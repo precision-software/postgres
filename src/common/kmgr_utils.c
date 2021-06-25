@@ -30,11 +30,12 @@
 #endif
 #include "common/cryptohash.h"
 #include "common/file_perm.h"
-#include "common/hex.h"
 #include "common/string.h"
 #include "crypto/kmgr.h"
 #include "lib/stringinfo.h"
 #include "storage/fd.h"
+#include "postgres.h"
+#include "utils/builtins.h"
 
 #ifndef FRONTEND
 #include "pgstat.h"
