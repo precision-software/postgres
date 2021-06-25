@@ -502,13 +502,16 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 		 * we don't need to be able to detect concurrent splits yet.)
 		 */
 		if (is_build)
-			recptr = GistBuildLSN;
+			recptr = !FileEncryptionEnabled ? GistBuildLSN :
+						LSNForEncryption(RelationIsPermanent(rel));
 		else
 		{
 			if (RelationNeedsWAL(rel))
 				recptr = gistXLogSplit(is_leaf,
 									   dist, oldrlink, oldnsn, leftchildbuf,
 									   markfollowright);
+			else if (FileEncryptionEnabled)
+				recptr = LSNForEncryption(RelationIsPermanent(rel));
 			else
 				recptr = gistGetFakeLSN(rel);
 		}
@@ -569,7 +572,8 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 			MarkBufferDirty(leftchildbuf);
 
 		if (is_build)
-			recptr = GistBuildLSN;
+			recptr = !FileEncryptionEnabled ? GistBuildLSN :
+						LSNForEncryption(RelationIsPermanent(rel));
 		else
 		{
 			if (RelationNeedsWAL(rel))
@@ -587,6 +591,8 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 										deloffs, ndeloffs, itup, ntup,
 										leftchildbuf);
 			}
+			else if (FileEncryptionEnabled)
+				recptr = LSNForEncryption(RelationIsPermanent(rel));
 			else
 				recptr = gistGetFakeLSN(rel);
 		}
@@ -1666,6 +1672,8 @@ gistprunepage(Relation rel, Page page, Buffer buffer, Relation heapRel)
 
 	if (ndeletable > 0)
 	{
+		XLogRecPtr	recptr;
+
 		TransactionId snapshotConflictHorizon = InvalidTransactionId;
 
 		if (XLogStandbyInfoActive() && RelationNeedsWAL(rel))
@@ -1691,17 +1699,18 @@ gistprunepage(Relation rel, Page page, Buffer buffer, Relation heapRel)
 		/* XLOG stuff */
 		if (RelationNeedsWAL(rel))
 		{
-			XLogRecPtr	recptr;
-
 			recptr = gistXLogDelete(buffer,
 									deletable, ndeletable,
 									snapshotConflictHorizon,
 									heapRel);
 
-			PageSetLSN(page, recptr);
 		}
+		else if (FileEncryptionEnabled)
+			recptr = LSNForEncryption(RelationIsPermanent(rel));
 		else
-			PageSetLSN(page, gistGetFakeLSN(rel));
+			recptr = gistGetFakeLSN(rel);
+
+		PageSetLSN(page, recptr);
 
 		END_CRIT_SECTION();
 	}
