@@ -38,10 +38,9 @@
 
 #include "common/file_perm.h"
 #include "common/file_utils.h"
-#include "common/hex.h"
 #include "common/restricted_token.h"
-#include "crypto/kmgr.h"
 #include "common/logging.h"
+#include "crypto/kmgr.h"
 #include "getopt_long.h"
 #include "pg_getopt.h"
 
@@ -83,6 +82,9 @@ static void retrieve_cluster_keys(void);
 static void bzero_keys_and_exit(exit_action action);
 static void reencrypt_data_keys(void);
 static void install_new_keys(void);
+
+static uint64 hex_decode(const char *src, size_t len, char *dst);
+
 
 static void
 usage(const char *progname)
@@ -511,8 +513,8 @@ retrieve_cluster_keys(void)
 												   (char *) cluster_key_hex,
 												   ALLOC_KMGR_CLUSTER_KEY_LEN,
 												   live_path, terminal_fd);
-	if (pg_hex_decode(cluster_key_hex, cluster_key_len,
-					  (char *) old_cluster_key, KMGR_CLUSTER_KEY_LEN) !=
+	if (hex_decode(cluster_key_hex, cluster_key_len,
+					  (char *) old_cluster_key) !=
 		KMGR_CLUSTER_KEY_LEN)
 	{
 		pg_log_error("cluster key must be at %d hex bytes", KMGR_CLUSTER_KEY_LEN);
@@ -534,8 +536,8 @@ retrieve_cluster_keys(void)
 												   (char *) cluster_key_hex,
 												   ALLOC_KMGR_CLUSTER_KEY_LEN,
 												   new_path, terminal_fd);
-	if (pg_hex_decode(cluster_key_hex, cluster_key_len,
-					  (char *) new_cluster_key, KMGR_CLUSTER_KEY_LEN) !=
+	if (hex_decode(cluster_key_hex, cluster_key_len,
+					  (char *) new_cluster_key) !=
 		KMGR_CLUSTER_KEY_LEN)
 	{
 		pg_log_error("cluster key must be at %d hex bytes", KMGR_CLUSTER_KEY_LEN);
@@ -721,4 +723,66 @@ bzero_keys_and_exit(exit_action action)
 
 	/* return 0 or 1 */
 	exit(action != SUCCESS_EXIT);
+}
+
+/*
+ * HEX
+ */
+
+static const int8 hexlookup[128] = {
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, -1, -1, -1, -1, -1,
+	-1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+};
+
+static inline char
+get_hex(const char *cp)
+{
+	unsigned char c = (unsigned char) *cp;
+	int			res = -1;
+
+	if (c < 127)
+		res = hexlookup[c];
+
+	if (res < 0)
+		pg_fatal("invalid hexadecimal digit: \"%s\"",cp);
+
+	return (char) res;
+}
+
+static uint64
+hex_decode(const char *src, size_t len, char *dst)
+{
+	const char *s,
+			   *srcend;
+	char		v1,
+				v2,
+			   *p;
+
+	srcend = src + len;
+	s = src;
+	p = dst;
+	while (s < srcend)
+	{
+		if (*s == ' ' || *s == '\n' || *s == '\t' || *s == '\r')
+		{
+			s++;
+			continue;
+		}
+		v1 = get_hex(s) << 4;
+		s++;
+		if (s >= srcend)
+			pg_fatal("invalid hexadecimal data: odd number of digits");
+
+		v2 = get_hex(s);
+		s++;
+		*p++ = v1 | v2;
+	}
+
+	return p - dst;
 }

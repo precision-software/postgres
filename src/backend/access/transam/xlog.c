@@ -8015,6 +8015,10 @@ xlog_redo(XLogReaderState *record)
 			UnlockReleaseBuffer(buffer);
 		}
 	}
+	else if (info == XLOG_ENCRYPTION_LSN)
+	{
+		/* nothing to do here */
+	}
 	else if (info == XLOG_BACKUP_END)
 	{
 		/* nothing to do here, handled in xlogrecovery_redo() */

@@ -107,13 +107,15 @@ extern PGDLLIMPORT int wal_level;
 /*
  * Is a full-page image needed for hint bit updates?
  *
- * Normally, we don't WAL-log hint bit updates, but if checksums are enabled,
- * we have to protect them against torn page writes.  When you only set
- * individual bits on a page, it's still consistent no matter what combination
- * of the bits make it to disk, but the checksum wouldn't match.  Also WAL-log
- * them if forced by wal_log_hints=on.
+ * Normally, we don't WAL-log hint bit updates, but if checksums or encryption
+ * is enabled, we have to protect them against torn page writes.  When you
+ * only set individual bits on a page, it's still consistent no matter what
+ * combination of the bits make it to disk, but the checksum wouldn't match.
+ * Cluster file encryption requires a new LSN for hint bit changes, and can't
+ * tolerate torn pages.  Also WAL-log them if forced by wal_log_hints=on.
  */
-#define XLogHintBitIsNeeded() (DataChecksumsEnabled() || wal_log_hints)
+#define XLogHintBitIsNeeded() \
+		(DataChecksumsEnabled() || FileEncryptionEnabled || wal_log_hints)
 
 /* Do we need to WAL-log information required only for Hot Standby and logical replication? */
 #define XLogStandbyInfoActive() (wal_level >= WAL_LEVEL_REPLICA)
