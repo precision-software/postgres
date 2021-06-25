@@ -13,6 +13,7 @@
 
 #include "access/xlogbackup.h"
 #include "access/xlogdefs.h"
+#include "common/kmgr_utils.h"
 #include "datatype/timestamp.h"
 #include "lib/stringinfo.h"
 #include "nodes/pg_list.h"
@@ -224,6 +225,10 @@ extern XLogRecPtr GetXLogWriteRecPtr(void);
 extern uint64 GetSystemIdentifier(void);
 extern char *GetMockAuthenticationNonce(void);
 extern bool DataChecksumsEnabled(void);
+
+#define FileEncryptionEnabled (GetFileEncryptionMethod() != DISABLED_ENCRYPTION_METHOD)
+extern int GetFileEncryptionMethod(void);
+
 extern XLogRecPtr GetFakeLSNForUnloggedRel(void);
 extern Size XLOGShmemSize(void);
 extern void XLOGShmemInit(void);

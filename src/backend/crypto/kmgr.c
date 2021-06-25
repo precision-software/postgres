@@ -141,7 +141,6 @@ BootStrapKmgr(void)
 	if (bootstrap_old_key_datadir == NULL)
 	{
 		unsigned char *bootstrap_keys_wrap[KMGR_NUM_DATA_KEYS];
-		int			key_lens[KMGR_NUM_DATA_KEYS];
 		PgCipherCtx *cluster_key_ctx;
 
 		/* Create KEK encryption context */
@@ -252,6 +251,9 @@ InitializeKmgr(void)
 	struct stat buffer;
 	char		live_path[MAXPGPATH];
 	unsigned char cluster_key[KMGR_CLUSTER_KEY_LEN];
+
+	if (!FileEncryptionEnabled)
+		return;
 
 #ifndef USE_OPENSSL
 	ereport(ERROR,

@@ -22,7 +22,7 @@ SUBDIRS = access archive backup bootstrap catalog parser commands executor \
 	main nodes optimizer partitioning port postmaster \
 	regex replication rewrite \
 	statistics storage tcop tsearch utils $(top_builddir)/src/timezone \
-	jit
+	jit crypto
 
 include $(srcdir)/common.mk
 

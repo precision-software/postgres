@@ -70,6 +70,7 @@
 #include "common/controldata_utils.h"
 #include "common/file_utils.h"
 #include "common/pagefeat.h"
+#include "crypto/kmgr.h"
 #include "executor/instrument.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
@@ -77,6 +78,7 @@
 #include "port/atomics.h"
 #include "port/pg_iovec.h"
 #include "postmaster/bgwriter.h"
+#include "postmaster/postmaster.h"
 #include "postmaster/startup.h"
 #include "postmaster/walwriter.h"
 #include "replication/logical.h"
@@ -112,6 +114,7 @@
 
 extern uint32 bootstrap_data_checksum_version;
 extern PageFeatureSet bootstrap_page_features;
+extern int bootstrap_file_encryption_method;
 
 /* timeline ID to be used when bootstrapping */
 #define BootstrapTimeLineID		1
@@ -3887,6 +3890,7 @@ InitControlFile(uint64 sysidentifier)
 	ControlFile->track_commit_timestamp = track_commit_timestamp;
 	ControlFile->data_checksum_version = bootstrap_data_checksum_version;
 	ControlFile->page_features = bootstrap_page_features;
+	ControlFile->file_encryption_method = bootstrap_file_encryption_method;
 }
 
 static void
@@ -4171,6 +4175,12 @@ ReadControlFile(void)
 					PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
 
 	SetExtendedFeatureConfigOptions(ControlFile->page_features);
+ 
+ 	StaticAssertStmt(lengthof(encryption_methods) == NUM_ENCRYPTION_METHODS,
+ 							 "encryption_methods[] must match NUM_ENCRYPTION_METHODS");
+ 	SetConfigOption("file_encryption_method",
+ 					encryption_methods[ControlFile->file_encryption_method].name,
+ 					PGC_INTERNAL, PGC_S_OVERRIDE);
 }
 
 /*
@@ -4213,6 +4223,21 @@ DataChecksumsEnabled(void)
 	return (ControlFile->data_checksum_version > 0) || \
 		PageFeatureSetHasFeature(ControlFile->page_features, PF_EXT_CHECKSUMS);
 
+}
+
+/*
+ * Is cluster file encryption enabled?
+ */
+int
+GetFileEncryptionMethod(void)
+{
+	if (IsBootstrapProcessingMode())
+		return bootstrap_file_encryption_method;
+	else
+	{
+		Assert(ControlFile != NULL);
+		return ControlFile->file_encryption_method;
+	}
 }
 
 /*
@@ -4803,6 +4828,14 @@ BootStrapXLOG(void)
 
 	/* some additional ControlFile fields are set in WriteControlFile() */
 	WriteControlFile();
+
+	BootStrapKmgr();
+
+	if (terminal_fd != -1)
+	{
+		close(terminal_fd);
+		terminal_fd = -1;
+	}
 
 	/* Bootstrap the commit log, too */
 	BootStrapCLOG();
