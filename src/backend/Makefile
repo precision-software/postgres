@@ -206,6 +206,12 @@ endif
 	$(INSTALL_DATA) $(srcdir)/libpq/pg_hba.conf.sample '$(DESTDIR)$(datadir)/pg_hba.conf.sample'
 	$(INSTALL_DATA) $(srcdir)/libpq/pg_ident.conf.sample '$(DESTDIR)$(datadir)/pg_ident.conf.sample'
 	$(INSTALL_DATA) $(srcdir)/utils/misc/postgresql.conf.sample '$(DESTDIR)$(datadir)/postgresql.conf.sample'
+	$(INSTALL_DATA) $(srcdir)/crypto/ckey_aws.sh.sample '$(DESTDIR)$(datadir)/auth_commands/ckey_aws.sh.sample'
+	$(INSTALL_DATA) $(srcdir)/crypto/ckey_direct.sh.sample '$(DESTDIR)$(datadir)/auth_commands/ckey_direct.sh.sample'
+	$(INSTALL_DATA) $(srcdir)/crypto/ckey_passphrase.sh.sample '$(DESTDIR)$(datadir)/auth_commands/ckey_passphrase.sh.sample'
+	$(INSTALL_DATA) $(srcdir)/crypto/ckey_piv_nopin.sh.sample '$(DESTDIR)$(datadir)/auth_commands/ckey_piv_nopin.sh.sample'
+	$(INSTALL_DATA) $(srcdir)/crypto/ckey_piv_pin.sh.sample '$(DESTDIR)$(datadir)/auth_commands/ckey_piv_pin.sh.sample'
+	$(INSTALL_DATA) $(srcdir)/crypto/ssl_passphrase.sh.sample '$(DESTDIR)$(datadir)/auth_commands/ssl_passphrase.sh.sample'
 
 ifeq ($(with_llvm), yes)
 install-bin: install-postgres-bitcode
@@ -225,6 +231,7 @@ endif
 
 installdirs:
 	$(MKDIR_P) '$(DESTDIR)$(bindir)' '$(DESTDIR)$(datadir)'
+	$(MKDIR_P) '$(DESTDIR)$(datadir)' '$(DESTDIR)$(datadir)/auth_commands'
 ifeq ($(PORTNAME), cygwin)
 ifeq ($(MAKE_DLL), true)
 	$(MKDIR_P) '$(DESTDIR)$(libdir)'
@@ -264,7 +271,13 @@ endif
 	$(MAKE) -C utils uninstall-data
 	rm -f '$(DESTDIR)$(datadir)/pg_hba.conf.sample' \
 	      '$(DESTDIR)$(datadir)/pg_ident.conf.sample' \
-	      '$(DESTDIR)$(datadir)/postgresql.conf.sample'
+	      '$(DESTDIR)$(datadir)/postgresql.conf.sample' \
+	      '$(DESTDIR)$(datadir)/auth_commands/ckey_aws.sh.sample' \
+	      '$(DESTDIR)$(datadir)/auth_commands/ckey_direct.sh.sample' \
+	      '$(DESTDIR)$(datadir)/auth_commands/ckey_passphrase.sh.sample' \
+	      '$(DESTDIR)$(datadir)/auth_commands/ckey_piv_nopin.sh.sample' \
+	      '$(DESTDIR)$(datadir)/auth_commands/ckey_piv_pin.sh.sample' \
+	      '$(DESTDIR)$(datadir)/auth_commands/ssl_passphrase.sh.sample'
 ifeq ($(with_llvm), yes)
 	$(call uninstall_llvm_module,postgres)
 endif
