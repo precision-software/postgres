@@ -97,6 +97,7 @@
 #include "common/ip.h"
 #include "common/pg_prng.h"
 #include "common/string.h"
+#include "crypto/bufenc.h"
 #include "crypto/kmgr.h"
 #include "lib/ilist.h"
 #include "libpq/auth.h"
@@ -1341,6 +1342,7 @@ PostmasterMain(int argc, char *argv[])
 	}
 
 	InitializeKmgr();
+	InitializeBufferEncryption();
 
 	if (terminal_fd != -1)
 		close(terminal_fd);

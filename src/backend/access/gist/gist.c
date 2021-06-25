@@ -504,17 +504,14 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 		if (is_build)
 			recptr = !FileEncryptionEnabled ? GistBuildLSN :
 						LSNForEncryption(RelationIsPermanent(rel));
+		else if (RelationNeedsWAL(rel))
+			recptr = gistXLogSplit(is_leaf,
+								   dist, oldrlink, oldnsn, leftchildbuf,
+								   markfollowright);
+		else if (FileEncryptionEnabled)
+			recptr = LSNForEncryption(RelationIsPermanent(rel));
 		else
-		{
-			if (RelationNeedsWAL(rel))
-				recptr = gistXLogSplit(is_leaf,
-									   dist, oldrlink, oldnsn, leftchildbuf,
-									   markfollowright);
-			else if (FileEncryptionEnabled)
-				recptr = LSNForEncryption(RelationIsPermanent(rel));
-			else
-				recptr = gistGetFakeLSN(rel);
-		}
+			recptr = gistGetFakeLSN(rel);
 
 		for (ptr = dist; ptr; ptr = ptr->next)
 			PageSetLSN(ptr->page, recptr);
@@ -574,28 +571,26 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 		if (is_build)
 			recptr = !FileEncryptionEnabled ? GistBuildLSN :
 						LSNForEncryption(RelationIsPermanent(rel));
-		else
+		else if (RelationNeedsWAL(rel))
 		{
-			if (RelationNeedsWAL(rel))
+			OffsetNumber ndeloffs = 0,
+						deloffs[1];
+
+			if (OffsetNumberIsValid(oldoffnum))
 			{
-				OffsetNumber ndeloffs = 0,
-							deloffs[1];
-
-				if (OffsetNumberIsValid(oldoffnum))
-				{
-					deloffs[0] = oldoffnum;
-					ndeloffs = 1;
-				}
-
-				recptr = gistXLogUpdate(buffer,
-										deloffs, ndeloffs, itup, ntup,
-										leftchildbuf);
+				deloffs[0] = oldoffnum;
+				ndeloffs = 1;
 			}
-			else if (FileEncryptionEnabled)
-				recptr = LSNForEncryption(RelationIsPermanent(rel));
-			else
-				recptr = gistGetFakeLSN(rel);
+
+			recptr = gistXLogUpdate(buffer,
+									deloffs, ndeloffs, itup, ntup,
+									leftchildbuf);
 		}
+		else if (FileEncryptionEnabled)
+			recptr = LSNForEncryption(RelationIsPermanent(rel));
+		else
+			recptr = gistGetFakeLSN(rel);
+
 		PageSetLSN(page, recptr);
 
 		if (newblkno)

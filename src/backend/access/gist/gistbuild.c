@@ -464,6 +464,12 @@ gist_indexsortbuild(GISTBuildState *state)
 	RelationGetSmgr(state->indexrel);
 	PageSetLSN(levelstate->pages[0], !FileEncryptionEnabled ? GistBuildLSN :
 			   LSNForEncryption(RelationIsPermanent(state->indexrel)));
+	/* Make sure LSNs are vaild, and if encryption, are not constant. */
+	Assert(!XLogRecPtrIsInvalid(PageGetLSN(levelstate->pages[0])) &&
+		   (!FileEncryptionEnabled ||
+			PageGetLSN(levelstate->pages[0]) != GistBuildLSN));
+	PageEncryptInplace(levelstate->pages[0], MAIN_FORKNUM, RelationIsPermanent(state->indexrel),
+					   GIST_ROOT_BLKNO);
 	PageSetChecksumInplace(levelstate->pages[0], GIST_ROOT_BLKNO);
 	smgrwrite(RelationGetSmgr(state->indexrel), MAIN_FORKNUM, GIST_ROOT_BLKNO,
 			  levelstate->pages[0], true);
@@ -663,6 +669,12 @@ gist_indexsortbuild_flush_ready_pages(GISTBuildState *state)
 
 		PageSetLSN(page, !FileEncryptionEnabled ? GistBuildLSN :
 				   LSNForEncryption(RelationIsPermanent(state->indexrel)));
+		/* Make sure LSNs are vaild, and if encryption, are not constant. */
+		Assert(!XLogRecPtrIsInvalid(PageGetLSN(page)) &&
+			   (!FileEncryptionEnabled ||
+				PageGetLSN(page) != GistBuildLSN));
+		PageEncryptInplace(page, MAIN_FORKNUM, RelationIsPermanent(state->indexrel),
+				   blkno);
 		PageSetChecksumInplace(page, blkno);
 		smgrextend(RelationGetSmgr(state->indexrel), MAIN_FORKNUM, blkno, page,
 				   true);
