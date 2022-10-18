@@ -19,6 +19,14 @@
 #include "storage/item.h"
 #include "storage/off.h"
 
+extern PGDLLIMPORT int reserved_page_size;
+
+#define SizeOfPageReservedSpace() reserved_page_size
+#define MaxSizeOfPageReservedSpace 0
+
+/* strict upper bound on the amount of space occupied we have reserved on
+ * pages in this cluster */
+
 /*
  * A postgres disk page is an abstraction layered on top of a postgres
  * disk block (which is simply a unit of i/o, see block.h).
@@ -36,10 +44,10 @@
  * |			 v pd_upper							  |
  * +-------------+------------------------------------+
  * |			 | tupleN ...                         |
- * +-------------+------------------+-----------------+
- * |	   ... tuple3 tuple2 tuple1 | "special space" |
- * +--------------------------------+-----------------+
- *									^ pd_special
+ * +-------------+-----+------------+----+------------+
+ * | ... tuple2 tuple1 | "special space" | "reserved" |
+ * +-------------------+------------+----+------------+
+ *					   ^ pd_special      ^ reserved_page_space
  *
  * a page is full when nothing can be added between pd_lower and
  * pd_upper.
@@ -73,6 +81,8 @@
  * stored as the page trailer.  an access method should always
  * initialize its pages with PageInit and then set its own opaque
  * fields.
+ *
+ * XXX - update more comments here about reserved_page_space
  */
 
 typedef Pointer Page;
@@ -313,7 +323,7 @@ PageSetPageSizeAndVersion(Page page, Size size, uint8 version)
 static inline uint16
 PageGetSpecialSize(Page page)
 {
-	return (PageGetPageSize(page) - ((PageHeader) page)->pd_special);
+	return (PageGetPageSize(page) - ((PageHeader) page)->pd_special - reserved_page_size);
 }
 
 /*
@@ -325,7 +335,7 @@ static inline void
 PageValidateSpecialPointer(Page page)
 {
 	Assert(page);
-	Assert(((PageHeader) page)->pd_special <= BLCKSZ);
+	Assert((((PageHeader) page)->pd_special + reserved_page_size) <= BLCKSZ);
 	Assert(((PageHeader) page)->pd_special >= SizeOfPageHeaderData);
 }
 
