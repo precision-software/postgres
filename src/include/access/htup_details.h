@@ -18,6 +18,7 @@
 #include "access/transam.h"
 #include "access/tupdesc.h"
 #include "access/tupmacs.h"
+#include "common/pagefeat.h"
 #include "storage/bufpage.h"
 #include "varatt.h"
 

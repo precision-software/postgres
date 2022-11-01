@@ -1596,7 +1596,7 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 				{
 					checksum = pg_checksum_page((char *) page, blkno + segmentno * RELSEG_SIZE);
 					phdr = (PageHeader) page;
-					if (phdr->pd_checksum != checksum)
+					if (phdr->pd_feat.checksum != checksum)
 					{
 						/*
 						 * Retry the block on the first failure.  It's
@@ -1659,7 +1659,7 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 											"file \"%s\", block %u: calculated "
 											"%X but expected %X",
 											readfilename, blkno, checksum,
-											phdr->pd_checksum)));
+											phdr->pd_feat.checksum)));
 						if (checksum_failures == 5)
 							ereport(WARNING,
 									(errmsg("further checksum verification "

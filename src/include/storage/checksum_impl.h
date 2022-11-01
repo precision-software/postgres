@@ -194,22 +194,23 @@ pg_checksum_page(char *page, BlockNumber blkno)
 	Assert(!PageIsNew((Page) page));
 
 	/*
-	 * Save pd_checksum and temporarily set it to zero, so that the checksum
-	 * calculation isn't affected by the old checksum stored on the page.
-	 * Restore it after, because actually updating the checksum is NOT part of
-	 * the API of this function.
+	 * Save pd_feat.checksum and temporarily set it to zero, so that the
+	 * checksum calculation isn't affected by the old checksum stored on the
+	 * page.  Restore it after, because actually updating the checksum is NOT
+	 * part of the API of this function.
 	 */
-	save_checksum = cpage->phdr.pd_checksum;
-	cpage->phdr.pd_checksum = 0;
+	save_checksum = cpage->phdr.pd_feat.checksum;
+	cpage->phdr.pd_feat.checksum = 0;
 	checksum = pg_checksum_block(cpage);
-	cpage->phdr.pd_checksum = save_checksum;
+	cpage->phdr.pd_feat.checksum = save_checksum;
 
 	/* Mix in the block number to detect transposed pages */
 	checksum ^= blkno;
 
 	/*
-	 * Reduce to a uint16 (to fit in the pd_checksum field) with an offset of
-	 * one. That avoids checksums of zero, which seems like a good idea.
+	 * Reduce to a uint16 (to fit in the pd_feat.checksum field) with an
+	 * offset of one. That avoids checksums of zero, which seems like a good
+	 * idea.
 	 */
 	return (uint16) ((checksum % 65535) + 1);
 }
