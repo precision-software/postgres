@@ -78,7 +78,16 @@
  * initialize its pages with PageInit and then set its own opaque
  * fields.
  *
- * XXX - update more comments here about reserved_page_space
+ * If any page features are in use (thus reserving the cluster-wise
+ * reserved_page_space), then the special space offset will be adjusted to
+ * start not at the end of the block itself, but right before the MAXALIGN'd
+ * reserved_page_space chunk at the end, which is allocated/managed using the
+ * page features mechanism.  This adjustment is done at PageInit() time
+ * transparently to the AM, which still uses the normal pd_special pointer to
+ * reference its opaque block.  The only difference here is that the
+ * pd_special field + sizeof(opaque structure) will not (necessarily) be the
+ * same as the heap block size, but instead BLCKSZ - reserved_page_space.
+ *
  */
 
 typedef Pointer Page;
@@ -119,7 +128,7 @@ PageXLogRecPtrGet(PageXLogRecPtr val)
  *
  *		pd_lsn		- identifies xlog record for last change to this page.
  *		pd_feat     - union type, one of:
- *         checksum - page checksum, if checksums enabled.
+ *         checksum - page checksum, if legacy checksums are enabled.
  *         features - page features, if using extended feature flags.
  *		pd_flags	- flag bits.
  *		pd_lower	- offset to start of free space.

@@ -331,5 +331,8 @@ main(int argc, char *argv[])
 		   mock_auth_nonce_str);
 	printf(_("Reserved page size for features:      %d\n"),
 		   PageFeatureSetCalculateSize(ControlFile->page_features));
+	printf(_("Using extended checksums:             %s\n"),
+		   PageFeatureSetHasFeature(ControlFile->page_features, PF_EXT_CHECKSUMS) \
+		   ? _("yes") : _("no"));
 	return 0;
 }
