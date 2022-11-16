@@ -566,13 +566,13 @@ reencrypt_data_keys(void)
 
 	old_ctx = pg_cipher_ctx_create(PG_CIPHER_AES_KWP,
 								   (unsigned char *) old_cluster_key,
-								   KMGR_CLUSTER_KEY_LEN, false);
+								   KMGR_KEK_KEY_LEN, false);
 	if (!old_ctx)
 		pg_log_error("could not initialize encryption context");
 
 	new_ctx = pg_cipher_ctx_create(PG_CIPHER_AES_KWP,
 								   (unsigned char *) new_cluster_key,
-								   KMGR_CLUSTER_KEY_LEN, true);
+								   KMGR_KEK_KEY_LEN, true);
 	if (!new_ctx)
 		pg_log_error("could not initialize encryption context");
 

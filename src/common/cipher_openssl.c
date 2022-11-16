@@ -349,6 +349,27 @@ get_evp_aes_ctr(int klen)
 }
 
 /*
+ * Returns the correct XTS cipher functions for OpenSSL based
+ * on the key length requested.
+ */
+static ossl_EVP_cipher_func
+get_evp_aes_xts(int klen)
+{
+	switch (klen)
+	{
+		case PG_AES128_KEY_LEN:
+			return EVP_aes_128_xts;
+		case PG_AES192_KEY_LEN:
+			/* unsupported */
+			return NULL;
+		case PG_AES256_KEY_LEN:
+			return EVP_aes_256_xts;
+		default:
+			return NULL;
+	}
+}
+
+/*
  * Initialize and return an EVP_CIPHER_CTX. Returns NULL if the given
  * cipher algorithm is not supported or on failure.
  */
@@ -361,10 +382,6 @@ ossl_cipher_ctx_create(int cipher, unsigned char *key, int klen, bool enc)
 
 	ctx = EVP_CIPHER_CTX_new();
 
-	/*
-	 * We currently only support AES GCM but others could be added in the
-	 * future.
-	 */
 	switch (cipher)
 	{
 		case PG_CIPHER_AES_GCM:
@@ -388,6 +405,13 @@ ossl_cipher_ctx_create(int cipher, unsigned char *key, int klen, bool enc)
 			func = get_evp_aes_ctr(klen);
 			if (!func)
 				goto failed;
+			break;
+		case PG_CIPHER_AES_XTS:
+			func = get_evp_aes_xts(klen);
+			if (!func)
+				goto failed;
+			/* XTS uses twice as long a key than the bitsize implies */
+			klen *= 2;
 			break;
 		default:
 			goto failed;

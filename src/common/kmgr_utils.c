@@ -127,7 +127,7 @@ kmgr_verify_cluster_key(unsigned char *cluster_key,
 
 	/* Create decryption context with the KEK. */
 	ctx = pg_cipher_ctx_create(PG_CIPHER_AES_KWP, cluster_key,
-							   KMGR_CLUSTER_KEY_LEN, false);
+							   KMGR_KEK_KEY_LEN, false);
 
 	/* unwrap each DEK */
 	for (int i = 0; i < KMGR_NUM_DATA_KEYS; i++)

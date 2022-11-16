@@ -48,13 +48,13 @@ InitializeBufferEncryption(void)
 
 	key = KmgrGetKey(KMGR_KEY_ID_REL);
 
-	BufEncCtx = pg_cipher_ctx_create(PG_CIPHER_AES_CTR,
+	BufEncCtx = pg_cipher_ctx_create(PG_CIPHER_DEFAULT,
 									 (unsigned char *) key->key,
 									 (key->klen), true);
 	if (!BufEncCtx)
 		elog(ERROR, "cannot initialize encryption context");
 
-	BufDecCtx = pg_cipher_ctx_create(PG_CIPHER_AES_CTR,
+	BufDecCtx = pg_cipher_ctx_create(PG_CIPHER_DEFAULT,
 									 (unsigned char *) key->key,
 									 (key->klen), false);
 	if (!BufDecCtx)
@@ -109,7 +109,7 @@ EncryptPage(Page page, bool relation_is_permanent, BlockNumber blkno)
 		PageSetLSN(page, LSNForEncryption(relation_is_permanent));
 
 	set_buffer_encryption_iv(page, blkno, relation_is_permanent);
-	if (unlikely(!pg_cipher_encrypt(BufEncCtx, PG_CIPHER_AES_CTR,
+	if (unlikely(!pg_cipher_encrypt(BufEncCtx, PG_CIPHER_DEFAULT,
 									(const unsigned char *) ptr,	/* input  */
 									SizeOfPageEncryption,
 									ptr,	/* length */
@@ -132,7 +132,7 @@ DecryptPage(Page page, bool relation_is_permanent, BlockNumber blkno)
 	Assert(BufDecCtx != NULL);
 
 	set_buffer_encryption_iv(page, blkno, relation_is_permanent);
-	if (unlikely(!pg_cipher_decrypt(BufDecCtx, PG_CIPHER_AES_CTR,
+	if (unlikely(!pg_cipher_decrypt(BufDecCtx, PG_CIPHER_DEFAULT,
 									(const unsigned char *) ptr,	/* input  */
 									SizeOfPageEncryption,
 									ptr,	/* output */
@@ -169,8 +169,4 @@ set_buffer_encryption_iv(Page page, BlockNumber blkno,
 	if (!relation_is_permanent)
 		*p++ = 0x80;
 
-	/*
-	 * The maximum required counter for AES-CTR is 2048, which fits in the
-	 * last three bytes.
-	 */
 }

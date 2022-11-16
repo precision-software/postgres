@@ -27,7 +27,9 @@
 #define PG_CIPHER_AES_GCM			0
 #define PG_CIPHER_AES_CTR			1
 #define PG_CIPHER_AES_KWP			2
-#define PG_MAX_CIPHER_ID			2
+#define PG_CIPHER_AES_XTS			3
+#define PG_MAX_CIPHER_ID			3
+#define PG_CIPHER_DEFAULT			PG_CIPHER_AES_XTS
 
 /* AES128/192/256 various length definitions */
 #define PG_AES128_KEY_LEN			(128 / 8)

@@ -38,14 +38,15 @@
 #define KMGR_KEY_ID_WAL 		1
 #define KMGR_NUM_DATA_KEYS	2
 
-/* We always, today, use a 256-bit AES key. */
-#define KMGR_CLUSTER_KEY_LEN 	PG_AES256_KEY_LEN
+/* When using XTS, our cluster key length is twice the AES size */
+#define KMGR_CLUSTER_KEY_LEN 	PG_AES256_KEY_LEN * (PG_CIPHER_DEFAULT == PG_CIPHER_AES_XTS ? 2 : 1)
+#define KMGR_KEK_KEY_LEN 	PG_AES256_KEY_LEN
 
 /* double for hex format, plus some for spaces, \r,\n, and null byte */
 #define ALLOC_KMGR_CLUSTER_KEY_LEN	(KMGR_CLUSTER_KEY_LEN * 2 + 10 + 2 + 1)
 
 /* Maximum length of key the key manager can store */
-#define KMGR_MAX_KEY_LEN			256
+#define KMGR_MAX_KEY_LEN			KMGR_CLUSTER_KEY_LEN * 8
 #define KMGR_MAX_KEY_LEN_BYTES		KMGR_MAX_KEY_LEN / 8
 
 
