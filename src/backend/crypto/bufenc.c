@@ -32,11 +32,27 @@ extern XLogRecPtr LSNForEncryption(bool use_wal_lsn);
 
 static unsigned char buf_encryption_iv[BUFENC_IV_SIZE];
 
+/* this private struct is used to store additional info about the page used to validate specific other pages */
+typedef struct AdditionalAuthenticatedData {
+	unsigned char data[PageEncryptOffset]; /* copy the unencrypted page header info */
+	RelFileNumber fileno;
+	BlockNumber blkNo;
+} AdditionalAuthenticatedData;
+
+StaticAssertDecl((MAXALIGN(sizeof(AdditionalAuthenticatedData)) == sizeof(AdditionalAuthenticatedData)),
+				 "AdditionalAuthenticatedData must be fully padded");
+
+AdditionalAuthenticatedData auth_data;
+
 PgCipherCtx *BufEncCtx = NULL;
 PgCipherCtx *BufDecCtx = NULL;
 
 static void set_buffer_encryption_iv(Page page, BlockNumber blkno,
 									 bool relation_is_permanent);
+static void
+setup_additional_authenticated_data(Page page, BlockNumber blkno,
+									bool relation_is_permanent, RelFileNumber fileno);
+
 
 void
 InitializeBufferEncryption(void)
@@ -63,12 +79,13 @@ InitializeBufferEncryption(void)
 
 /* Encrypt the given page with the relation key */
 void
-EncryptPage(Page page, bool relation_is_permanent, BlockNumber blkno)
+EncryptPage(Page page, bool relation_is_permanent, BlockNumber blkno, RelFileNumber fileno)
 {
 	unsigned char *ptr = (unsigned char *) page + PageEncryptOffset;
 	bool		is_gist_page_or_similar;
-
 	int			enclen;
+	unsigned char	*tag = NULL, *aad = NULL;
+	int			taglen = 0, aadlen = 0;
 
 	Assert(BufEncCtx != NULL);
 
@@ -109,6 +126,17 @@ EncryptPage(Page page, bool relation_is_permanent, BlockNumber blkno)
 		PageSetLSN(page, LSNForEncryption(relation_is_permanent));
 
 	set_buffer_encryption_iv(page, blkno, relation_is_permanent);
+
+	/* setup tag and AAD */
+	if (SizeOfEncryptionTag > 0)
+	{
+		tag = (unsigned char*)page + BLCKSZ - SizeOfEncryptionTag;
+		taglen = SizeOfEncryptionTag;
+		setup_additional_authenticated_data(page, blkno, relation_is_permanent, fileno);
+		aad = (unsigned char *)&auth_data;
+		aadlen = sizeof(AdditionalAuthenticatedData);
+	}
+
 	if (unlikely(!pg_cipher_encrypt(BufEncCtx, PG_CIPHER_DEFAULT,
 									(const unsigned char *) ptr,	/* input  */
 									SizeOfPageEncryption,
@@ -116,7 +144,8 @@ EncryptPage(Page page, bool relation_is_permanent, BlockNumber blkno)
 									&enclen,	/* resulting length */
 									buf_encryption_iv,	/* iv */
 									BUFENC_IV_SIZE,
-									NULL, 0)))
+									aad, aadlen, /* AAD */
+									tag, taglen)))
 		elog(ERROR, "cannot encrypt page %u", blkno);
 
 	Assert(enclen == SizeOfPageEncryption);
@@ -124,14 +153,27 @@ EncryptPage(Page page, bool relation_is_permanent, BlockNumber blkno)
 
 /* Decrypt the given page with the relation key */
 void
-DecryptPage(Page page, bool relation_is_permanent, BlockNumber blkno)
+DecryptPage(Page page, bool relation_is_permanent, BlockNumber blkno, RelFileNumber fileno)
 {
 	unsigned char *ptr = (unsigned char *) page + PageEncryptOffset;
 	int			enclen;
+	unsigned char	*tag = NULL, *aad = NULL;
+	int			taglen = 0, aadlen = 0;
 
 	Assert(BufDecCtx != NULL);
 
 	set_buffer_encryption_iv(page, blkno, relation_is_permanent);
+
+	/* setup tag and AAD */
+	if (SizeOfEncryptionTag > 0)
+	{
+		tag = (unsigned char*)page + BLCKSZ - SizeOfEncryptionTag;
+		taglen = SizeOfEncryptionTag;
+		setup_additional_authenticated_data(page, blkno, relation_is_permanent, fileno);
+		aad = (unsigned char *)&auth_data;
+		aadlen = sizeof(AdditionalAuthenticatedData);
+	}
+
 	if (unlikely(!pg_cipher_decrypt(BufDecCtx, PG_CIPHER_DEFAULT,
 									(const unsigned char *) ptr,	/* input  */
 									SizeOfPageEncryption,
@@ -139,7 +181,8 @@ DecryptPage(Page page, bool relation_is_permanent, BlockNumber blkno)
 									&enclen,	/* resulting length */
 									buf_encryption_iv,	/* iv */
 									BUFENC_IV_SIZE,
-									NULL, 0)))
+									aad, aadlen, /* AAD */
+									tag, taglen)))
 		elog(ERROR, "cannot decrypt page %u", blkno);
 
 	Assert(enclen == SizeOfPageEncryption);
@@ -169,4 +212,15 @@ set_buffer_encryption_iv(Page page, BlockNumber blkno,
 	if (!relation_is_permanent)
 		*p++ = 0x80;
 
+}
+
+/* setup aad for given page; private struct so we don't care */
+static void
+setup_additional_authenticated_data(Page page, BlockNumber blkno,
+									bool relation_is_permanent, RelFileNumber fileno)
+{
+	/* snarf the existing unencrypted bits of the page header */
+	memcpy(&auth_data.data, page, PageEncryptOffset);
+	auth_data.fileno = fileno;
+	auth_data.blkNo = blkno;
 }

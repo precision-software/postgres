@@ -169,7 +169,8 @@ spgbuildempty(Relation index)
 	 * replayed.
 	 */
 	PageEncryptInplace(page, INIT_FORKNUM, RelationIsPermanent(index),
-					   SPGIST_METAPAGE_BLKNO);
+					   SPGIST_METAPAGE_BLKNO,
+					   RelationGetSmgr(index)->smgr_rlocator.locator.relNumber);
 	PageSetChecksumInplace(page, SPGIST_METAPAGE_BLKNO);
 	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, SPGIST_METAPAGE_BLKNO,
 			  page, true);
@@ -180,7 +181,9 @@ spgbuildempty(Relation index)
 	SpGistInitPage(page, SPGIST_LEAF);
 
 	PageEncryptInplace(page, INIT_FORKNUM, RelationIsPermanent(index),
-					   SPGIST_ROOT_BLKNO);
+					   SPGIST_ROOT_BLKNO,
+					   RelationGetSmgr(index)->smgr_rlocator.locator.relNumber);
+
 	PageSetChecksumInplace(page, SPGIST_ROOT_BLKNO);
 	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, SPGIST_ROOT_BLKNO,
 			  page, true);
@@ -191,7 +194,9 @@ spgbuildempty(Relation index)
 	SpGistInitPage(page, SPGIST_LEAF | SPGIST_NULLS);
 
 	PageEncryptInplace(page, INIT_FORKNUM, RelationIsPermanent(index),
-					   SPGIST_NULL_BLKNO);
+					   SPGIST_NULL_BLKNO,
+					   RelationGetSmgr(index)->smgr_rlocator.locator.relNumber);
+
 	PageSetChecksumInplace(page, SPGIST_NULL_BLKNO);
 	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, SPGIST_NULL_BLKNO,
 			  page, true);

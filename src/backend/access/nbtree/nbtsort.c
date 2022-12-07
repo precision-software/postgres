@@ -671,7 +671,7 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 	}
 
 	PageEncryptInplace(page, MAIN_FORKNUM, RelationIsPermanent(wstate->index),
-					   blkno);
+					   blkno, RelationGetSmgr(wstate->index)->smgr_rlocator.locator.relNumber);
 	PageSetChecksumInplace(page, blkno);
 
 	/*

@@ -14,6 +14,7 @@
 #include "postgres.h"
 #include "common/pagefeat.h"
 #include "utils/guc.h"
+#include "crypto/bufenc.h"
 
 /* global variables */
 int reserved_page_size;
@@ -21,6 +22,7 @@ PageFeatureSet cluster_page_features;
 
 /* status GUCs, display only. set by XLog startup */
 bool page_feature_extended_checksums;
+bool page_feature_encryption_tags;
 
 /*
  * A "page feature" is an optional cluster-defined additional data field that
@@ -46,6 +48,8 @@ typedef struct PageFeatureDesc
  * or the attempt to set the GUC will fail. */
 
 static PageFeatureDesc feature_descs[PF_MAX_FEATURE] = {
+	/* PF_ENCRYPTION_TAG */
+	{ SizeOfEncryptionTag, "encryption_tags" },
 	/* PF_EXT_CHECKSUMS */
 	{ 8, "extended_checksums" }
 };

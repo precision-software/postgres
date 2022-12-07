@@ -29,7 +29,7 @@
 #define PG_CIPHER_AES_KWP			2
 #define PG_CIPHER_AES_XTS			3
 #define PG_MAX_CIPHER_ID			3
-#define PG_CIPHER_DEFAULT			PG_CIPHER_AES_XTS
+#define PG_CIPHER_DEFAULT			PG_CIPHER_AES_GCM
 
 /* AES128/192/256 various length definitions */
 #define PG_AES128_KEY_LEN			(128 / 8)
@@ -57,11 +57,13 @@ extern bool pg_cipher_encrypt(PgCipherCtx *ctx, int cipher,
 							  const unsigned char *plaintext, const int inlen,
 							  unsigned char *ciphertext, int *outlen,
 							  const unsigned char *iv, const int ivlen,
+							  const unsigned char *aad, const int aadlen,
 							  unsigned char *tag, const int taglen);
 extern bool pg_cipher_decrypt(PgCipherCtx *ctx, const int cipher,
 							  const unsigned char *ciphertext, const int inlen,
 							  unsigned char *plaintext, int *outlen,
 							  const unsigned char *iv, const int ivlen,
+							  const unsigned char *aad, const int aadlen,
 							  unsigned char *intag, const int taglen);
 
 extern bool pg_cipher_keywrap(PgCipherCtx *ctx,

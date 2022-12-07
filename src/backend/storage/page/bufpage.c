@@ -100,7 +100,7 @@ PageInit(Page page, Size pageSize, Size specialSize, PageFeatureSet features)
  */
 bool
 PageIsVerifiedExtended(Page page, ForkNumber forknum, bool relation_is_permanent,
-					   BlockNumber blkno, int flags)
+					   BlockNumber blkno, RelFileNumber fileno, int flags)
 {
 	PageHeader	p = (PageHeader) page;
 	size_t	   *pagebytes;
@@ -134,7 +134,7 @@ PageIsVerifiedExtended(Page page, ForkNumber forknum, bool relation_is_permanent
 				checksum_failure = true;
 		}
 
-		PageDecryptInplace(page, forknum, relation_is_permanent, blkno);
+		PageDecryptInplace(page, forknum, relation_is_permanent, blkno, fileno);
 
 		/*
 		 * The following checks don't prove the header is correct, only that
@@ -1594,7 +1594,7 @@ PageSetChecksumInplace(Page page, BlockNumber blkno)
 
 char *
 PageEncryptCopy(Page page, ForkNumber forknum, bool relation_is_permanent,
-				BlockNumber blkno)
+				BlockNumber blkno, RelFileNumber fileno)
 {
 	static char *pageCopy = NULL;
 
@@ -1612,27 +1612,27 @@ PageEncryptCopy(Page page, ForkNumber forknum, bool relation_is_permanent,
 		pageCopy = MemoryContextAlloc(TopMemoryContext, BLCKSZ);
 
 	memcpy(pageCopy, (char *) page, BLCKSZ);
-	EncryptPage(pageCopy, relation_is_permanent, blkno);
+	EncryptPage(pageCopy, relation_is_permanent, blkno, fileno);
 	return pageCopy;
 }
 
 void
 PageEncryptInplace(Page page, ForkNumber forknum, bool relation_is_permanent,
-				   BlockNumber blkno)
+				   BlockNumber blkno, RelFileNumber fileno)
 {
 	if (PageIsNew(page) || !PageNeedsToBeEncrypted(forknum))
 		return;
 
-	EncryptPage(page, relation_is_permanent, blkno);
+	EncryptPage(page, relation_is_permanent, blkno, fileno);
 }
 
 
 void
 PageDecryptInplace(Page page, ForkNumber forknum, bool relation_is_permanent,
-				   BlockNumber blkno)
+				   BlockNumber blkno, RelFileNumber fileno)
 {
 	if (PageIsNew(page) || !PageNeedsToBeEncrypted(forknum))
 		return;
 
-	DecryptPage(page, relation_is_permanent, blkno);
+	DecryptPage(page, relation_is_permanent, blkno, fileno);
 }

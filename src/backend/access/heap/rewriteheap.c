@@ -325,7 +325,9 @@ end_heap_rewrite(RewriteState state)
 
 		PageEncryptInplace(state->rs_buffer, MAIN_FORKNUM,
 						   RelationIsPermanent(state->rs_new_rel),
-						   state->rs_blockno);
+						   state->rs_blockno,
+						   RelationGetSmgr(state->rs_new_rel)->smgr_rlocator.locator.relNumber
+			);
 		PageSetChecksumInplace(state->rs_buffer, state->rs_blockno);
 
 		smgrextend(RelationGetSmgr(state->rs_new_rel), MAIN_FORKNUM,
@@ -694,7 +696,9 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 			 */
 			PageEncryptInplace(page, MAIN_FORKNUM,
 							   RelationIsPermanent(state->rs_new_rel),
-							   state->rs_blockno);
+							   state->rs_blockno,
+							   RelationGetSmgr(state->rs_new_rel)->smgr_rlocator.locator.relNumber
+				);
 			PageSetChecksumInplace(page, state->rs_blockno);
 
 			/* XXX - is this still needed? */

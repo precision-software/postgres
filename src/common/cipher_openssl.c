@@ -79,6 +79,12 @@ pg_cipher_blocksize(PgCipherCtx *ctx)
  * iv is the IV to use.
  * ivlen is the IV length to use.
  *
+ * aad is a pointer to additional authenticated data.
+ * aadlen is the length of aad.
+ *
+ * aad is a pointer to additional authenticated data.
+ * aadlen is the length of aad.
+ *
  * outtag is the resulting tag.
  * taglen is the length of the tag.
  */
@@ -87,6 +93,7 @@ pg_cipher_encrypt(PgCipherCtx *ctx, int cipher,
 				  const unsigned char *plaintext, const int inlen,
 				  unsigned char *ciphertext, int *outlen,
 				  const unsigned char *iv, const int ivlen,
+				  const unsigned char *aad, const int aadlen,
 				  unsigned char *outtag, const int taglen)
 {
 	int			len;
@@ -100,10 +107,6 @@ pg_cipher_encrypt(PgCipherCtx *ctx, int cipher,
 	 * context by passing in 'NULL' for the 2nd ('type') parameter.
 	 */
 
-	/*
-	 * We don't use GCM mode, but it has a MAC, so we support it and test it
-	 * in case we need it later.  XXX is this correct for GCM and CTR?
-	 */
 	/* Set the GCM IV length first */
 	if (cipher == PG_CIPHER_AES_GCM &&
 		!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, ivlen, NULL))
@@ -111,6 +114,13 @@ pg_cipher_encrypt(PgCipherCtx *ctx, int cipher,
 
 	/* Set the IV for this encryption. */
 	if (!EVP_EncryptInit_ex(ctx, NULL, NULL, NULL, iv))
+		return false;
+
+    /*
+	 * Provide any AAD data. This can be called zero or more times as
+	 * required
+	 */
+	if (aad && aadlen && !EVP_EncryptUpdate(ctx, NULL, &len, aad, aadlen))
 		return false;
 
 	/*
@@ -160,6 +170,7 @@ pg_cipher_decrypt(PgCipherCtx *ctx, const int cipher,
 				  const unsigned char *ciphertext, const int inlen,
 				  unsigned char *plaintext, int *outlen,
 				  const unsigned char *iv, const int ivlen,
+				  const unsigned char *aad, const int aadlen,
 				  unsigned char *intag, const int taglen)
 {
 	int			declen;
@@ -171,7 +182,6 @@ pg_cipher_decrypt(PgCipherCtx *ctx, const int cipher,
 	 * context by passing in 'NULL' for the 2nd ('type') parameter.
 	 */
 
-	/* XXX is this correct for GCM and CTR? */
 	/* Set the GCM IV length first */
 	if (cipher == PG_CIPHER_AES_GCM &&
 		!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, ivlen, NULL))
@@ -179,6 +189,13 @@ pg_cipher_decrypt(PgCipherCtx *ctx, const int cipher,
 
 	/* Set the IV for this decryption. */
 	if (!EVP_DecryptInit_ex(ctx, NULL, NULL, NULL, iv))
+		return false;
+
+    /*
+	 * Provide any AAD data. This can be called zero or more times as
+	 * required
+	 */
+	if (aad && aadlen && !EVP_DecryptUpdate(ctx, NULL, &len, aad, aadlen))
 		return false;
 
 	/*

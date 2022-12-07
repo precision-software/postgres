@@ -1881,6 +1881,17 @@ struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"encryption_tags", PGC_INTERNAL, PRESET_OPTIONS,
+			gettext_noop("Whether we are using an encryption method with encryption tags"),
+			NULL,
+			GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE | GUC_RUNTIME_COMPUTED
+		},
+		&page_feature_encryption_tags,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"syslog_sequence_numbers", PGC_SIGHUP, LOGGING_WHERE,
 			gettext_noop("Add sequence number to syslog messages to avoid duplicate suppression."),
 			NULL

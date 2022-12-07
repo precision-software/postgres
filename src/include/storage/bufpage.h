@@ -19,6 +19,7 @@
 #include "storage/block.h"
 #include "storage/item.h"
 #include "storage/off.h"
+#include "storage/relfilelocator.h"
 #include "common/pagefeat.h"
 
 /* strict upper bound on the amount of space occupied we have reserved on
@@ -192,7 +193,8 @@ typedef struct PageHeaderData
 
 typedef PageHeaderData *PageHeader;
 #define PageEncryptOffset	offsetof(PageHeaderData, pd_special)
-#define SizeOfPageEncryption (BLCKSZ - PageEncryptOffset)
+#define SizeOfEncryptionTag (PG_CIPHER_DEFAULT == PG_CIPHER_AES_GCM ? 16 : 0)
+#define SizeOfPageEncryption (BLCKSZ - PageEncryptOffset - SizeOfEncryptionTag)
 
 /*
  * pd_flags contains the following flag bits.  Undefined bits are initialized
@@ -516,9 +518,9 @@ do { \
 						((overwrite) ? PAI_OVERWRITE : 0) | \
 						((is_heap) ? PAI_IS_HEAP : 0))
 
-#define PageIsVerified(page, relation_is_permanent, blkno) \
+#define PageIsVerified(page, relation_is_permanent, blkno, fileno)				\
 	PageIsVerifiedExtended(page, MAIN_FORKNUM, relation_is_permanent, blkno, \
-						   PIV_LOG_WARNING | PIV_REPORT_STAT)
+						   fileno, PIV_LOG_WARNING | PIV_REPORT_STAT)
 
 /*
  * Check that BLCKSZ is a multiple of sizeof(size_t).  In
@@ -534,6 +536,7 @@ StaticAssertDecl(BLCKSZ == ((BLCKSZ / sizeof(size_t)) * sizeof(size_t)),
 extern bool PageIsVerifiedExtended(Page page, ForkNumber forknum,
 								   bool relation_is_permanent,
 								   BlockNumber blkno,
+								   RelFileNumber fileno,
 								   int flags);
 extern OffsetNumber PageAddItemExtended(Page page, Item item, Size size,
 										OffsetNumber offsetNumber, int flags);
@@ -555,10 +558,13 @@ extern bool PageIndexTupleOverwrite(Page page, OffsetNumber offnum,
 extern char *PageSetChecksumCopy(Page page, BlockNumber blkno);
 extern void PageSetChecksumInplace(Page page, BlockNumber blkno);
 extern char *PageEncryptCopy(Page page, ForkNumber forknum,
-							 bool relation_is_permanent, BlockNumber blkno);
+							 bool relation_is_permanent, BlockNumber blkno,
+							 RelFileNumber fileno);
 extern void PageEncryptInplace(Page page, ForkNumber forknum,
-							   bool relation_is_permanent, BlockNumber blkno);
+							   bool relation_is_permanent, BlockNumber blkno,
+							   RelFileNumber fileno);
 extern void PageDecryptInplace(Page page, ForkNumber forknum,
-							   bool relation_is_permanent, BlockNumber blkno);
+							   bool relation_is_permanent, BlockNumber blkno,
+							   RelFileNumber fileno);
 
 #endif							/* BUFPAGE_H */

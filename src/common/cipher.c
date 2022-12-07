@@ -50,6 +50,7 @@ pg_cipher_encrypt(PgCipherCtx *ctx, const int cipher,
 				  const unsigned char *plaintext,
 				  const int inlen, unsigned char *ciphertext, int *outlen,
 				  const unsigned char *iv, const int ivlen,
+				  const unsigned char *aad, const int aadlen,
 				  unsigned char *outtag, const int taglen)
 {
 	cipher_failure();
@@ -61,6 +62,7 @@ pg_cipher_decrypt(PgCipherCtx *ctx, const int cipher,
 				  const unsigned char *ciphertext,
 				  const int inlen, unsigned char *plaintext, int *outlen,
 				  const unsigned char *iv, const int ivlen,
+				  const unsigned char *aad, const int aadlen,
 				  unsigned char *intag, const int taglen)
 {
 	cipher_failure();

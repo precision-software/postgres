@@ -469,7 +469,7 @@ gist_indexsortbuild(GISTBuildState *state)
 		   (!FileEncryptionEnabled ||
 			PageGetLSN(levelstate->pages[0]) != GistBuildLSN));
 	PageEncryptInplace(levelstate->pages[0], MAIN_FORKNUM, RelationIsPermanent(state->indexrel),
-					   GIST_ROOT_BLKNO);
+					   GIST_ROOT_BLKNO, state->indexrel->rd_locator.relNumber);
 	PageSetChecksumInplace(levelstate->pages[0], GIST_ROOT_BLKNO);
 	smgrwrite(RelationGetSmgr(state->indexrel), MAIN_FORKNUM, GIST_ROOT_BLKNO,
 			  levelstate->pages[0], true);
@@ -674,7 +674,8 @@ gist_indexsortbuild_flush_ready_pages(GISTBuildState *state)
 			   (!FileEncryptionEnabled ||
 				PageGetLSN(page) != GistBuildLSN));
 		PageEncryptInplace(page, MAIN_FORKNUM, RelationIsPermanent(state->indexrel),
-				   blkno);
+						   blkno, state->indexrel->rd_locator.relNumber
+			);
 		PageSetChecksumInplace(page, blkno);
 		smgrextend(RelationGetSmgr(state->indexrel), MAIN_FORKNUM, blkno, page,
 				   true);

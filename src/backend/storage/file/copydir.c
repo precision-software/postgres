@@ -127,6 +127,7 @@ copy_file(const char *fromfile, const char *tofile, bool encrypt_init_file)
 	off_t		flush_offset;
 	/* Size of copy buffer (read and write requests) */
 	int			copy_buf_size = (encrypt_init_file) ? BLCKSZ : 8 * BLCKSZ;
+	RelFileNumber fileno = 0;
 
 	/*
 	 * Size of data flush requests.  It seems beneficial on most platforms to
@@ -196,9 +197,28 @@ copy_file(const char *fromfile, const char *tofile, bool encrypt_init_file)
 		{
 			Page page = (Page) buffer;
 
+			/* fileno */
+			if (!fileno)
+			{
+				/*
+				 * Parse fileno from tofile; if we have hit this routine we
+				 * already know we are an init fork and using a valid
+				 * relfilenumber, so we can just backtrack to the previous
+				 * path separator and just atoi() to get our result.
+				 */
+
+				char *ptr = strrchr(tofile, '/');
+				if (ptr)
+					fileno = atoi(ptr+1);
+				else
+					ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("could not determine relfilenumber for init fork")));
+			}
+
 			Assert(nbytes == BLCKSZ);
 			PageSetLSN(page, LSNForEncryption(false));
-			PageEncryptInplace(page, MAIN_FORKNUM, false, offset / BLCKSZ);
+			PageEncryptInplace(page, MAIN_FORKNUM, false, offset / BLCKSZ, fileno);
 		}
 
 		errno = 0;

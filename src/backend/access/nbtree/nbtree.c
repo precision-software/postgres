@@ -165,7 +165,8 @@ btbuildempty(Relation index)
 	 * this even when wal_level=minimal.
 	 */
 	PageEncryptInplace(metapage, INIT_FORKNUM, RelationIsPermanent(index),
-					   BTREE_METAPAGE);
+					   BTREE_METAPAGE,
+					   RelationGetSmgr(index)->smgr_rlocator.locator.relNumber);
 	PageSetChecksumInplace(metapage, BTREE_METAPAGE);
 
 	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, BTREE_METAPAGE,

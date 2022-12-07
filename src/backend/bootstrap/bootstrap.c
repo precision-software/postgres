@@ -302,6 +302,8 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
  						if (pg_strcasecmp(optarg, encryption_methods[i].name) == 0)
  						{
  							bootstrap_file_encryption_method = i;
+							if (SizeOfEncryptionTag > 0)
+								bootstrap_page_features = PageFeatureSetAddFeatureByName(bootstrap_page_features,"encryption_tags");
  							break;
  						}
  					if (i == NUM_ENCRYPTION_METHODS)

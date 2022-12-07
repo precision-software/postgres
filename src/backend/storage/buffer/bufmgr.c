@@ -1127,6 +1127,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 		if (!PageIsVerifiedExtended((Page) bufBlock, forkNum,
 									relpersistence == RELPERSISTENCE_PERMANENT,
 									blockNum,
+									smgr->smgr_rlocator.locator.relNumber,
 									PIV_LOG_WARNING | PIV_REPORT_STAT))
 		{
 			if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
@@ -3418,7 +3419,9 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 		 * okay since forkNum would also tell us not to encrypt init forks.
 		 */
 		bufToWrite = PageEncryptCopy((Page) bufBlock, buf->tag.forkNum,
-									 buf_state & BM_PERMANENT, buf->tag.blockNum);
+									 buf_state & BM_PERMANENT, buf->tag.blockNum,
+									 reln->smgr_rlocator.locator.relNumber
+			);
 		bufToWrite = PageSetChecksumCopy((Page) bufToWrite, buf->tag.blockNum);
 	}
 	else
@@ -4088,7 +4091,9 @@ FlushRelationBuffers(Relation rel)
 
 				/* XXX should we be writing a copy of the page here? */
 				PageEncryptInplace(localpage, bufHdr->tag.forkNum,
-								   RelationIsPermanent(rel), bufHdr->tag.blockNum);
+								   RelationIsPermanent(rel), bufHdr->tag.blockNum,
+								   rel->rd_locator.relNumber
+					);
 				PageSetChecksumInplace(localpage, bufHdr->tag.blockNum);
 
 				io_start = pgstat_prepare_io_time();

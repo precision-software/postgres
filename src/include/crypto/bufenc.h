@@ -21,8 +21,8 @@
 
 extern void InitializeBufferEncryption(void);
 extern void EncryptPage(Page page, bool relation_is_permanent,
-						BlockNumber blkno);
+						BlockNumber blkno, RelFileNumber fileno);
 extern void DecryptPage(Page page, bool relation_is_permanent,
-						BlockNumber blkno);
+						BlockNumber blkno, RelFileNumber fileno);
 
 #endif							/* BUFENC_H */

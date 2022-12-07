@@ -177,7 +177,9 @@ blbuildempty(Relation index)
 	 * this even when wal_level=minimal.
 	 */
 	PageEncryptInplace(metapage, INIT_FORKNUM, RelationIsPermanent(index),
-					   BLOOM_METAPAGE_BLKNO);
+					   BLOOM_METAPAGE_BLKNO,
+					   RelationGetSmgr(index)->smgr_rlocator.locator.relNumber
+		);
 	PageSetChecksumInplace(metapage, BLOOM_METAPAGE_BLKNO);
 
 	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, BLOOM_METAPAGE_BLKNO,
