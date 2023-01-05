@@ -3385,6 +3385,7 @@ main(int argc, char *argv[])
 				break;
 			case 19:
 				cluster_key_cmd = pg_strdup(optarg);
+				using_page_feats = true;
 				break;
 			case 'u':
 				old_key_datadir = pg_strdup(optarg);

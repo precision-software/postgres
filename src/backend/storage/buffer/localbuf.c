@@ -248,7 +248,7 @@ GetLocalVictimBuffer(void)
 		oreln = smgropen(BufTagGetRelFileLocator(&bufHdr->tag), MyBackendId);
 
 		PageEncryptInplace(localpage, bufHdr->tag.forkNum,
-					   buf_state & BM_PERMANENT, bufHdr->tag.blockNum, bufHdr->tag.relNumber);
+					   buf_state & BM_PERMANENT, bufHdr->tag.blockNum);
 		PageSetChecksumInplace(localpage, bufHdr->tag.blockNum);
 
 		io_start = pgstat_prepare_io_time();

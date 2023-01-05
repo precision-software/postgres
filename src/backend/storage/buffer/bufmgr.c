@@ -1127,7 +1127,6 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 		if (!PageIsVerifiedExtended((Page) bufBlock, forkNum,
 									relpersistence == RELPERSISTENCE_PERMANENT,
 									blockNum,
-									smgr->smgr_rlocator.locator.relNumber,
 									PIV_LOG_WARNING | PIV_REPORT_STAT))
 		{
 			if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
