@@ -11,6 +11,7 @@
 #include "libpq/pqformat.h"
 #include "ltree.h"
 #include "utils/memutils.h"
+#include "varatt.h"
 
 
 typedef struct
@@ -74,7 +75,7 @@ parse_ltree(const char *buf, struct Node *escontext)
 		switch (state)
 		{
 			case LTPRS_WAITNAME:
-				if (ISALNUM(ptr))
+				if (ISLABEL(ptr))
 				{
 					lptr->start = ptr;
 					lptr->wlen = 0;
@@ -92,7 +93,7 @@ parse_ltree(const char *buf, struct Node *escontext)
 					lptr++;
 					state = LTPRS_WAITNAME;
 				}
-				else if (!ISALNUM(ptr))
+				else if (!ISLABEL(ptr))
 					UNCHAR;
 				break;
 			default:
@@ -316,7 +317,7 @@ parse_lquery(const char *buf, struct Node *escontext)
 		switch (state)
 		{
 			case LQPRS_WAITLEVEL:
-				if (ISALNUM(ptr))
+				if (ISLABEL(ptr))
 				{
 					GETVAR(curqlevel) = lptr = (nodeitem *) palloc0(sizeof(nodeitem) * (numOR + 1));
 					lptr->start = ptr;
@@ -339,7 +340,7 @@ parse_lquery(const char *buf, struct Node *escontext)
 					UNCHAR;
 				break;
 			case LQPRS_WAITVAR:
-				if (ISALNUM(ptr))
+				if (ISLABEL(ptr))
 				{
 					lptr++;
 					lptr->start = ptr;
@@ -385,7 +386,7 @@ parse_lquery(const char *buf, struct Node *escontext)
 					state = LQPRS_WAITLEVEL;
 					curqlevel = NEXTLEV(curqlevel);
 				}
-				else if (ISALNUM(ptr))
+				else if (ISLABEL(ptr))
 				{
 					/* disallow more chars after a flag */
 					if (lptr->flag)
