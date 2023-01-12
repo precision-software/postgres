@@ -249,7 +249,7 @@ static void ReorderBufferExecuteInvalidations(uint32 nmsgs, SharedInvalidationMe
 static void ReorderBufferCheckMemoryLimit(ReorderBuffer *rb);
 static void ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn);
 static void ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
-										 int fd, ReorderBufferChange *change);
+										 TXNEntryFile *file, ReorderBufferChange *change);
 static Size ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 										TXNEntryFile *file, XLogSegNo *segno);
 static void ReorderBufferRestoreChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
@@ -3637,7 +3637,7 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 {
 	dlist_iter	subtxn_i;
 	dlist_mutable_iter change_i;
-	int			fd = -1;
+	TXNEntryFile file = (TXNEntryFile){.vfd=-1, .curOffset=0};
 	XLogSegNo	curOpenSegNo = 0;
 	Size		spilled = 0;
 	Size		size = txn->size;
@@ -3665,13 +3665,13 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 		 * store in segment in which it belongs by start lsn, don't split over
 		 * multiple segments tho
 		 */
-		if (fd == -1 ||
+		if (file.vfd == -1 ||
 			!XLByteInSeg(change->lsn, curOpenSegNo, wal_segment_size))
 		{
 			char		path[MAXPGPATH];
 
-			if (fd != -1)
-				CloseTransientFile(fd);
+			if (file.vfd != -1)
+				FileClose(file.vfd);
 
 			XLByteToSeg(change->lsn, curOpenSegNo, wal_segment_size);
 
@@ -3682,17 +3682,22 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 			ReorderBufferSerializedPath(path, MyReplicationSlot, txn->xid,
 										curOpenSegNo);
 
-			/* open segment, create it if necessary */
-			fd = OpenTransientFile(path,
-								   O_CREAT | O_WRONLY | O_APPEND | PG_BINARY);
+			/*
+			 * open segment, create it if necessary. Note this file must survive
+			 * past the end-of-transaction.
+			 */
+			file.vfd = PathNameOpenFile(path, O_CREAT | O_WRONLY | PG_BINARY);
 
-			if (fd < 0)
+			if (file.vfd < 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not open file \"%s\": %m", path)));
+
+			/* We wish to append to the segment file, so seek to end. */
+			file.curOffset = FileSize(file.vfd);
 		}
 
-		ReorderBufferSerializeChange(rb, txn, fd, change);
+		ReorderBufferSerializeChange(rb, txn, &file, change);
 		dlist_delete(&change->node);
 		ReorderBufferReturnChange(rb, change, true);
 
@@ -3717,8 +3722,8 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 	txn->nentries_mem = 0;
 	txn->txn_flags |= RBTXN_IS_SERIALIZED;
 
-	if (fd != -1)
-		CloseTransientFile(fd);
+	if (file.vfd != -1)
+		FileClose(file.vfd);
 }
 
 /*
@@ -3726,7 +3731,7 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
  */
 static void
 ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
-							 int fd, ReorderBufferChange *change)
+							 TXNEntryFile *file, ReorderBufferChange *change)
 {
 	ReorderBufferDiskChange *ondisk;
 	Size		sz = sizeof(ReorderBufferDiskChange);
@@ -3908,12 +3913,13 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 	ondisk->size = sz;
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_REORDER_BUFFER_WRITE);
-	if (write(fd, rb->outbuf, ondisk->size) != ondisk->size)
+	if (FileWrite(file->vfd, rb->outbuf, ondisk->size, file->curOffset,
+				  WAIT_EVENT_REORDER_BUFFER_WRITE) != ondisk->size)
 	{
 		int			save_errno = errno;
 
-		CloseTransientFile(fd);
+		FileClose(file->vfd);
+		file->vfd = -1;
 
 		/* if write didn't set errno, assume problem is no disk space */
 		errno = save_errno ? save_errno : ENOSPC;
@@ -3922,7 +3928,7 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				 errmsg("could not write to data file for XID %u: %m",
 						txn->xid)));
 	}
-	pgstat_report_wait_end();
+	file->curOffset += ondisk->size;
 
 	/*
 	 * Keep the transaction's final_lsn up to date with each change we send to
