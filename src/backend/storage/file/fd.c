@@ -99,6 +99,7 @@
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/resowner_private.h"
+#include "storage/iostack.h"
 
 /* Define PG_FLUSH_DATA_WORKS if we have an implementation for pg_flush_data */
 #if defined(HAVE_SYNC_FILE_RANGE)
@@ -201,6 +202,7 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
+	void		*pipeline;	/* Alternate file access supporting encryption/compression */
 } Vfd;
 
 /*
@@ -1507,6 +1509,11 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	DO_DB(elog(LOG, "PathNameOpenFilePerm: %s %x %o",
 			   fileName, fileFlags, fileMode));
 
+	/* Open as a file pipeline if a prototype is set and the flags request it */
+	if (!(fileFlags & PG_O_VFD) && IoStackPrototype != NULL)
+		return IoStackOpen(fileName, fileFlags, fileMode);
+	fileFlags &= ~PG_O_VFD;
+
 	/*
 	 * We need a malloc'd copy of the file name; fail cleanly if no room.
 	 */
@@ -1889,6 +1896,9 @@ FileClose(File file)
 	DO_DB(elog(LOG, "FileClose: %d (%s)",
 			   file, VfdCache[file].fileName));
 
+	if (VfdCache[file].pipeline != NULL)
+		return IoStackClose(file);
+
 	vfdP = &VfdCache[file];
 
 	if (!FileIsNotOpen(file))
@@ -1991,6 +2001,9 @@ FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info)
 			   file, VfdCache[file].fileName,
 			   (int64) offset, amount));
 
+	if (VfdCache[file].pipeline != NULL)
+		return IoStackPrefetch(file,  offset, amount, wait_event_info);
+
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
@@ -2018,6 +2031,9 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 			   file, VfdCache[file].fileName,
 			   (int64) offset, (int64) nbytes));
 
+	if (VfdCache[file].pipeline != NULL)
+		return IoStackWriteback(file, offset, nbytes, wait_event_info);
+
 	if (nbytes <= 0)
 		return;
 
@@ -2043,6 +2059,10 @@ FileRead(File file, void *buffer, size_t amount, off_t offset,
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
+
+	if (VfdCache[file].pipeline != NULL)
+		return IoStackRead(file, buffer, amount, offset, wait_event_info);
+
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
@@ -2099,6 +2119,9 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
+
+	if (VfdCache[file].pipeline != NULL)
+		return IoStackWrite(file, buffer, amount, offset, wait_event_info);
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
@@ -2193,6 +2216,9 @@ FileSync(File file, uint32 wait_event_info)
 
 	DO_DB(elog(LOG, "FileSync: %d (%s)",
 			   file, VfdCache[file].fileName));
+
+	if (VfdCache[file].pipeline != NULL)
+		return IoStackSync(file, wait_event_info);
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
