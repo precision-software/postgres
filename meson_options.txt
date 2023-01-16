@@ -194,3 +194,6 @@ option('ZSTD', type : 'string', value: 'zstd',
 
 option('ZIC', type : 'string', value: 'zic',
   description: 'path to zic binary, when cross-compiling')
+
+option('iostack', type : 'boolean', value: true,
+  description: 'include iostacks for compression and encryption')

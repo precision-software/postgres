@@ -1361,6 +1361,24 @@ else
 endif
 
 
+###############################################################
+# Library: IoStack
+# TODO: add dependencies for lz4 and crypto. (or do they come from package?)
+###############################################################
+iostackopt = get_option('iostack')
+if iostackopt
+   iostack = dependency('IoStack')
+
+   if iostack.found()
+     cdata.set('USE_IOSTACK', true)
+     cdata.set('HAVE_LIBIOSTACK', true)
+   endif
+
+
+else
+  iostack = not_found_dep
+endif
+
 
 ###############################################################
 # Compiler tests
@@ -3245,6 +3263,7 @@ if meson.version().version_compare('>=0.57')
       'uuid': uuid,
       'zlib': zlib,
       'zstd': zstd,
+      'iostack': iostack,
     },
     section: 'External libraries',
   )
