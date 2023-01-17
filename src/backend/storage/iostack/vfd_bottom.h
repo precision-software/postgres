@@ -6,6 +6,6 @@
 #define POSTGRES_IDE_VFD_BOTTOM_H
 
 typedef struct VfdBottom VfdBottom;
-VfdBottom *vfdBottomNew()
+VfdBottom *vfdBottomNew(void);
 
 #endif //POSTGRES_IDE_VFD_BOTTOM_H

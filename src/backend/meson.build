@@ -135,7 +135,7 @@ endif
 postgres = executable('postgres',
   backend_input,
   objects: backend_objs,
-  link_args: backend_link_args,
+  link_args: [ '-L/opt/local/lib', '-liostack', backend_link_args],  # TODO: get rid of hack
   link_with: backend_link_with,
   link_depends: backend_link_depends,
   export_dynamic: true,

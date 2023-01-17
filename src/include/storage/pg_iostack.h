@@ -6,8 +6,8 @@
 #define STORAGE_IOSTACK_H
 
 
-/* Open flag to force opening VFDs directly, avoiding use of IoStacks */
-#define PG_O_VFD 0x200000
+/* Open flag to request opening with IO Stacks */
+#define PG_O_IOSTACK (0x2000000)
 
 /*
  * If we are NOT using I/O Stacks, then dummy out the procedures which use them
@@ -36,11 +36,12 @@
 #include "c.h"
 
 /* Contains a prototype FilePipeline for opening new files */
+void IoStackSetup(void);
 extern void *IoStackPrototype;
 
 /* VFD equivalent routines which invoke IoStacks instead of VFDs */
 IoStack *IoStackOpen(IoStack *proto, const char *fileName, int fileFlags, mode_t fileMode);
-void IoStackClose(IoStack *iostack, bool delete);
+int IoStackClose(IoStack *iostack, char *deleteName);
 int IoStackPrefetch(IoStack *iostack, off_t offset, off_t amount, uint32 wait_event_info);
 void IoStackWriteback(IoStack *iostack, off_t offset, off_t nbytes, uint32 wait_event_info);
 int IoStackRead(IoStack *iostack, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);

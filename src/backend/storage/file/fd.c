@@ -97,9 +97,10 @@
 #include "postmaster/startup.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
+#include "storage/pg_iostack.h"
 #include "utils/guc.h"
 #include "utils/resowner_private.h"
-#include "storage/iostack.h"
+
 
 /* Define PG_FLUSH_DATA_WORKS if we have an implementation for pg_flush_data */
 #if defined(HAVE_SYNC_FILE_RANGE)
@@ -202,7 +203,7 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
-	void		*pipeline;	/* Alternate file access supporting encryption/compression */
+	IoStack		*iostack;		/* fd alternative supporting encryption/compression */
 } Vfd;
 
 /*
@@ -349,6 +350,9 @@ static void datadir_fsync_fname(const char *fname, bool isdir, int elevel);
 static void unlink_if_exists_fname(const char *fname, bool isdir, int elevel);
 
 static int	fsync_parent_path(const char *fname, int elevel);
+
+static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode);
+static void FileCloseIoStack(File file);
 
 
 /*
@@ -823,6 +827,9 @@ InitFileAccess(void)
 	VfdCache->fd = VFD_CLOSED;
 
 	SizeVfdCache = 1;
+
+	/* Initialize I/O Stacks to be used with Vfds */
+	IoStackSetup();
 }
 
 /*
@@ -1510,9 +1517,8 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 			   fileName, fileFlags, fileMode));
 
 	/* Open as a file pipeline if a prototype is set and the flags request it */
-	if (!(fileFlags & PG_O_VFD) && IoStackPrototype != NULL)
-		return IoStackOpen(fileName, fileFlags, fileMode);
-	fileFlags &= ~PG_O_VFD;
+	if ((fileFlags & PG_O_IOSTACK) && IoStackPrototype != NULL)
+		return PathNameOpenIoStack(fileName, fileFlags, fileMode);
 
 	/*
 	 * We need a malloc'd copy of the file name; fail cleanly if no room.
@@ -1890,16 +1896,15 @@ void
 FileClose(File file)
 {
 	Vfd		   *vfdP;
-
 	Assert(FileIsValid(file));
+	vfdP = &VfdCache[file];
 
 	DO_DB(elog(LOG, "FileClose: %d (%s)",
 			   file, VfdCache[file].fileName));
 
-	if (VfdCache[file].pipeline != NULL)
-		return IoStackClose(file);
+	if (vfdP->iostack != NULL)
+		return FileCloseIoStack(file);
 
-	vfdP = &VfdCache[file];
 
 	if (!FileIsNotOpen(file))
 	{
@@ -1996,20 +2001,21 @@ FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info)
 	int			returnCode;
 
 	Assert(FileIsValid(file));
+	Vfd *vfdP = &VfdCache[file];
 
 	DO_DB(elog(LOG, "FilePrefetch: %d (%s) " INT64_FORMAT " %d",
 			   file, VfdCache[file].fileName,
 			   (int64) offset, amount));
 
-	if (VfdCache[file].pipeline != NULL)
-		return IoStackPrefetch(file,  offset, amount, wait_event_info);
+	if (vfdP->iostack != NULL)
+		return IoStackPrefetch(vfdP->iostack,  offset, amount, wait_event_info);
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
 
 	pgstat_report_wait_start(wait_event_info);
-	returnCode = posix_fadvise(VfdCache[file].fd, offset, amount,
+	returnCode = posix_fadvise(vfdP->fd, offset, amount,
 							   POSIX_FADV_WILLNEED);
 	pgstat_report_wait_end();
 
@@ -2026,13 +2032,14 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 	int			returnCode;
 
 	Assert(FileIsValid(file));
+	Vfd *vfdP = &VfdCache[file];
 
 	DO_DB(elog(LOG, "FileWriteback: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
 			   file, VfdCache[file].fileName,
 			   (int64) offset, (int64) nbytes));
 
-	if (VfdCache[file].pipeline != NULL)
-		return IoStackWriteback(file, offset, nbytes, wait_event_info);
+	if (vfdP->iostack != NULL)
+		return IoStackWriteback(vfdP->iostack, offset, nbytes, wait_event_info);
 
 	if (nbytes <= 0)
 		return;
@@ -2054,21 +2061,22 @@ FileRead(File file, void *buffer, size_t amount, off_t offset,
 	Vfd		   *vfdP;
 
 	Assert(FileIsValid(file));
+	vfdP = &VfdCache[file];
 
 	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
 
-	if (VfdCache[file].pipeline != NULL)
-		return IoStackRead(file, buffer, amount, offset, wait_event_info);
+	if (vfdP->iostack != NULL)
+		return IoStackRead(vfdP->iostack, buffer, amount, offset, wait_event_info);
 
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
 
-	vfdP = &VfdCache[file];
+
 
 retry:
 	pgstat_report_wait_start(wait_event_info);
@@ -2114,20 +2122,21 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 	Vfd		   *vfdP;
 
 	Assert(FileIsValid(file));
+	vfdP = &VfdCache[file];
 
 	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %d %p",
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
 
-	if (VfdCache[file].pipeline != NULL)
-		return IoStackWrite(file, buffer, amount, offset, wait_event_info);
+	if (vfdP->iostack != NULL)
+		return IoStackWrite(vfdP->iostack, buffer, amount, offset, wait_event_info);
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
 
-	vfdP = &VfdCache[file];
+
 
 	/*
 	 * If enforcing temp_file_limit and it's a temp file, check to see if the
@@ -2211,21 +2220,23 @@ int
 FileSync(File file, uint32 wait_event_info)
 {
 	int			returnCode;
+	Vfd 		*vfdP;
 
 	Assert(FileIsValid(file));
+	vfdP = &VfdCache[file];
 
 	DO_DB(elog(LOG, "FileSync: %d (%s)",
 			   file, VfdCache[file].fileName));
 
-	if (VfdCache[file].pipeline != NULL)
-		return IoStackSync(file, wait_event_info);
+	if (vfdP->iostack != NULL)
+		return IoStackSync(vfdP->iostack, wait_event_info);
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
 
 	pgstat_report_wait_start(wait_event_info);
-	returnCode = pg_fsync(VfdCache[file].fd);
+	returnCode = pg_fsync(vfdP->fd);
 	pgstat_report_wait_end();
 
 	return returnCode;
@@ -2238,6 +2249,9 @@ FileSize(File file)
 
 	DO_DB(elog(LOG, "FileSize %d (%s)",
 			   file, VfdCache[file].fileName));
+
+	if (VfdCache[file].iostack != NULL)
+		return IoStackSize(VfdCache[file].iostack);
 
 	if (FileIsNotOpen(file))
 	{
@@ -2257,6 +2271,9 @@ FileTruncate(File file, off_t offset, uint32 wait_event_info)
 
 	DO_DB(elog(LOG, "FileTruncate %d (%s)",
 			   file, VfdCache[file].fileName));
+
+	if (VfdCache[file].iostack != NULL)
+		return IoStackTruncate(VfdCache[file].iostack, offset, wait_event_info);
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
@@ -3762,4 +3779,61 @@ int
 data_sync_elevel(int elevel)
 {
 	return data_sync_retry ? elevel : PANIC;
+}
+
+
+/*
+ * Open a vfd using an I/O Stack. Local to fd.c since it accesses Vfds.
+ */
+static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode)
+{
+	char	   *fnamecopy;
+	File		file;
+	Vfd		   *vfdP;
+
+	/*
+	 * We need a malloc'd copy of the file name; fail cleanly if no room.
+	 */
+	fnamecopy = strdup(fileName);
+	if (fnamecopy == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+					errmsg("out of memory")));
+
+	/* Allocate a Vfd and fill it in */
+	file = AllocateVfd();
+	vfdP = &VfdCache[file];
+
+	vfdP->fileName = fnamecopy;
+	vfdP->fileFlags = fileFlags;
+	vfdP->fileMode = fileMode;
+	vfdP->fileSize = 0;
+	vfdP->fdstate = 0x0;
+	vfdP->resowner = NULL;
+	vfdP->fd = -1;
+
+	/* Open the I/O Stack */
+	vfdP->iostack = IoStackOpen(IoStackPrototype, fileName, fileFlags, fileMode);
+
+	/* clean up on error */
+
+	if (vfdP->iostack == NULL)
+	{
+		int			save_errno = errno;
+		FreeVfd(file);
+		free(fnamecopy);
+		errno = save_errno;
+		return -1;
+	}
+
+    return file;
+}
+
+
+/*
+ * Close a vfd which is using an I/O Stack. Local to fd.c since it accesses Vfds.
+ */
+static void FileCloseIoStack(File file)
+{
+
 }

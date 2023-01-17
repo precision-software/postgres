@@ -7,12 +7,16 @@
 #include <unistd.h>
 #include <stdbool.h>
 
-#include "/usr/local/include/iostack.h"
+#include "postgres.h"
+#include "/usr/local/include/iostack/iostack.h"
+#include "/usr/local/include/iostack/iostack_error.h"
+#include "/usr/local/include/iostack/common/filter.h"
 
 #include "storage/pg_iostack.h"
 #include "storage/fd.h"
 #include "vfd_bottom.h"
 
+extern uint32 IoStackWaitEvent;
 
 /**
  * VfdBottom is the consumer of file system events, doing the actual
@@ -26,41 +30,38 @@
 struct VfdBottom {
 	Filter filter;   /* first in every Filter. */
 	File vfd;        /* The file descriptor for the currrently open file. */
-	bool writable;   /* Can we write to the file? */
-	bool readable;   /* Can we read from the file? */
-	bool eof;        /* Has the currently open file read past eof? */
 	off_t position;  /* Track file position to use with vfd */
 };
-
-static Error errorCantWrite = (Error){.code=errorCodeFilter, .msg="Writing to file opened as readonly"};
-static Error errorCantRead = (Error){.code=errorCodeFilter, .msg="Reading from file opened as writeonly"};
-static Error errorReadTooSmall = (Error){.code=errorCodeFilter, .msg="unbuffered read was smaller than block size"};
 
 
 /**
  * Open a VFD file.
  */
-VfdBottom *vfdOpen(VfdBottom *sink, char *path, int oflags, int perm, Error *error)
+ static
+ VfdBottom *vfdOpen(VfdBottom *sink, char *path, int oflags, int perm, Error *error)
 {
 	/* Clone ourself. */
 	VfdBottom *this = vfdBottomNew();
 	if (isError(*error))
 		return this;
 
-	/* Check the oflags we are opening the file in. TODO: move checks to ioStack. */
-	this->writable = (oflags & O_ACCMODE) != O_RDONLY;
-	this->readable = (oflags & O_ACCMODE) != O_WRONLY;
-	this->eof = false;
-	this->position = 0;
+	/* We are opening real vfds, not I/O Stacks */
+	oflags &= ~PG_O_IOSTACK;
 
 	/* Default file permission when creating a file. */
 	if (perm == 0)
 		perm = 0666;
 
 	/* Open the file and check for errors. */
-	this->vfd = PathNameFileOpen(path, oflags, perm);
+	this->vfd = PathNameOpenFilePerm(path, oflags, perm);
 	if (this->vfd == -1)
+	{
 		setSystemError(error);
+		return NULL;
+	}
+
+	/* Set our file position, checking for O_APPEND */
+	this->position = (oflags & O_APPEND)? FileSize(this->vfd): 0;
 
 	return this;
 }
@@ -70,18 +71,18 @@ VfdBottom *vfdOpen(VfdBottom *sink, char *path, int oflags, int perm, Error *err
  * Write data to a file. For efficiency, we like larger buffers,
  * but in a pinch we can write individual bytes.
  */
-size_t vfdWrite(VfdBottom *this, Byte *buf, size_t bufSize, Error *error)
+static size_t
+vfdWrite(VfdBottom *this, Byte *buf, size_t bufSize, Error *error)
 {
 	/* Check for errors. TODO: move to ioStack. */
-	if (errorIsOK(*error) && !this->writable)
-		*error = errorCantWrite;
+	if (isError(*error)) return 0;
 
 	/* Write the data. */
-	int actual = FileWrite(this->vfd, buf, bufSize, this->position);
+	int actual = FileWrite(this->vfd, buf, bufSize, this->position, IoStackWaitEvent);
 	if (actual == -1)
-		return setSystemError(error);
+		actual = setSystemError(error);
 
-	/* On success, track the new position.
+	/* On success, track the new position. */
 	this->position += actual;
 
 	return actual;
@@ -93,26 +94,33 @@ size_t vfdWrite(VfdBottom *this, Byte *buf, size_t bufSize, Error *error)
  * Read data from a file, checking for EOF. We like larger read buffers
  * for efficiency, but they are not required.
  */
-size_t vfdRead(VfdBottom *this, Byte *buf, size_t size, Error *error)
+static size_t
+vfdRead(VfdBottom *this, Byte *buf, size_t size, Error *error)
 {
 
 	/* Check for errors. */
-	if (isError(*error))                 ;
-	else if (!this->readable)            *error = errorCantRead;
-	else if (this->eof)                  *error = errorEOF;
+	if (isError(*error)) return 0;
 
-	// Do the actual read.
-	return sys_read(this->fd, buf, size, error);
+	/* Read the data. */
+	int actual = FileRead(this->vfd, buf, size, this->position, IoStackWaitEvent);
+	if (actual == -1)
+		actual = setSystemError(error);
+
+	/* On success, track the new position. */
+	this->position += actual;
+
+	return actual;
 }
 
 
 /**
- * Close a Posix file.
+ * Close a VFD file
  */
-void vfdClose(VfdBottom *this, Error *error)
+static void
+vfdClose(VfdBottom *this, Error *error)
 {
 	/* Close the fd if it was opened earlier. */
-	sys_close(this->fd, error);
+	FileClose(this->vfd);
 	free(this);
 }
 
@@ -120,15 +128,16 @@ void vfdClose(VfdBottom *this, Error *error)
 /**
  * Push data which has been written out to persistent storage.
  */
-void vfdSync(VfdBottom *this, Error *error)
+static void
+vfdSync(VfdBottom *this, Error *error)
 {
-	/* Error if file was readonly. */
-	if (errorIsOK(*error) && !this->writable)
-		*error = errorCantWrite;
+	/* Check for errors */
+	if (isError(*error)) return;
 
 	/* Go sync it. */
-	if (this->writable)
-		sys_datasync(this->fd, error);
+	int res = FileSync(this->vfd, IoStackWaitEvent);
+	if (res == -1)
+		res = setSystemError(error);
 }
 
 
@@ -137,7 +146,8 @@ void vfdSync(VfdBottom *this, Error *error)
  * Since we are not supporting O_DIRECT yet, we simply
  * return 1 indicating we can deal with any size.
  */
-size_t vfdBlockSize(VfdBottom *this, size_t prevSize, Error *error)
+static size_t
+vfdBlockSize(VfdBottom *this, size_t prevSize, Error *error)
 {
 	return 1;
 }
@@ -148,24 +158,31 @@ size_t vfdBlockSize(VfdBottom *this, size_t prevSize, Error *error)
  * This allows us to remove temporary files when a transaction aborts.
  * Not currently implemented.
  */
-void vfdAbort(VfdBottom *this, Error *errorO)
+static void
+vfdAbort(VfdBottom *this, Error *errorO)
 {
 	abort(); /* TODO: not implemented. */
 }
 
-off_t vfdSeek(VfdBottom *this, pos_t position, Error *error)
+static off_t
+vfdSeek(VfdBottom *this, off_t position, Error *error)
 {
-	return sys_lseek(this->fd, position, error);
+    if (position == FILE_END_POSITION)
+		this->position = FileSize(this->vfd);
+	else
+	    this->position = position;
+
+	return this->position;
 }
 
 
-void vfdDelete(VfdBottom *this, char *path, Error *error)
+static void
+vfdDelete(VfdBottom *this, const char *path, Error *error)
 {
 	/* Unlink the file, even if we've already had an error */
-	Error tempError = errorOK;
-	sys_unlink(path, &tempError);
-	setError(error, tempError);
-
+	int res = durable_unlink(path, LOG);
+	if (res == -1)
+		setSystemError(error);
 }
 
 FilterInterface vfdInterface = (FilterInterface)
@@ -190,7 +207,7 @@ VfdBottom *vfdBottomNew()
 	VfdBottom *this = malloc(sizeof(VfdBottom));
 	*this = (VfdBottom)
 		{
-			.fd = -1,
+			.vfd = -1,
 			.filter = (Filter){
 				.iface=&vfdInterface,
 				.next=NULL}
