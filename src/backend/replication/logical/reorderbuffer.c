@@ -100,6 +100,7 @@
 #include "replication/snapbuild.h"	/* just for SnapBuildSnapDecRefcount */
 #include "storage/bufmgr.h"
 #include "storage/fd.h"
+#include "storage/pg_iostack.h"  /* TODO: define PG_IOSTACK elsewhere */
 #include "storage/sinval.h"
 #include "utils/builtins.h"
 #include "utils/combocid.h"
@@ -3686,7 +3687,7 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 			 * open segment, create it if necessary. Note this file must survive
 			 * past the end-of-transaction.
 			 */
-			file.vfd = PathNameOpenFile(path, O_CREAT | O_WRONLY | PG_BINARY);
+			file.vfd = PathNameOpenFile(path, O_CREAT | O_WRONLY | PG_BINARY | PG_IOSTACK);
 
 			if (file.vfd < 0)
 				ereport(ERROR,
@@ -4232,7 +4233,7 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 			ReorderBufferSerializedPath(path, MyReplicationSlot, txn->xid,
 										*segno);
 
-			*fd = PathNameOpenFile(path, O_RDONLY | PG_BINARY);
+			*fd = PathNameOpenFile(path, O_RDONLY | PG_BINARY | PG_IOSTACK);
 
 			/* No harm in resetting the offset even in case of failure */
 			file->curOffset = 0;

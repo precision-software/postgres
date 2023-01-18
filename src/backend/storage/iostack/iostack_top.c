@@ -7,14 +7,15 @@
 
 #include "postgres.h"
 #include "pgstat.h"
-
+#define DEBUG
 #include "storage/pg_iostack.h"
 #include "storage/fd.h"
 
 /* TODO: configure system include directories */
 #include "/usr/local/include/iostack/iostack.h"
 #include "/usr/local/include/iostack/file/fileSystemBottom.h"
-
+#include "/usr/local/include/iostack/encrypt/libcrypto/aead.h"
+#include "/usr/local/include/iostack/file/buffered.h"
 
 
 /* A prototype file pipeline to use when opening files */
@@ -39,10 +40,7 @@ int checkForError(int ret, Error error);
 IoStack *IoStackOpen(IoStack *prototype, const char *fileName, int fileFlags, mode_t fileMode)
 {
 	Error error = errorOK;
-
-	/* Clear the flags so lower level "open" use Postgres Vfds */
-	/*   During development, the flag must be set to use IoStacks.  Later, the flag will reverse meaning */
-	fileFlags &= ~PG_O_IOSTACK;
+	debug("IoStackOpen: fileName=%s  fileFlags=0x%x  fileMode=0x%x\n", fileName, fileFlags, fileMode);
 
 	/* Open the file using the prototype I/O stack */
 	IoStack *iostack = fileOpen(prototype, fileName, fileFlags, fileMode, &error);
@@ -61,6 +59,7 @@ int IoStackRead(IoStack *iostack,  void *buffer, size_t amount, off_t offset,
 {
 	Error error = errorOK;
 	IoStackWaitEvent = wait_event_info;
+	debug("IoStackRead: amount=%zu offset=%lld\n", amount, offset);
 
 	pgstat_report_wait_start(wait_event_info);
 
@@ -80,6 +79,7 @@ int IoStackWrite(IoStack *iostack, const void *buffer, size_t amount, off_t offs
 {
 	Error error = errorOK;
 	IoStackWaitEvent = wait_event_info;
+	debug("IoStackWrite: amount=%zu offset=%lld\n", amount, offset);
 
 	pgstat_report_wait_start(wait_event_info);
 
@@ -96,6 +96,7 @@ int IoStackWrite(IoStack *iostack, const void *buffer, size_t amount, off_t offs
  */
 int IoStackClose(IoStack *iostack, char *deleteName)
 {
+	debug("IoStackClose: deleteName=%s\n", deleteName);
 
 	/* If we will delete the file, then clone the pipeline first */
 	IoStack *clone = NULL;
@@ -139,12 +140,14 @@ void IoStackWriteback(IoStack *iostack, off_t offset, off_t nbytes, uint32 wait_
 off_t IoStackSize(IoStack *iostack)
 {
 	Error error = errorOK;
+	debug("IoStackSize: \n");
 	return fileSeek(iostack, FILE_END_POSITION, &error);
 }
 
 
 int IoStackTruncate(IoStack *iostack, off_t offset, uint32 wait_event_info)
 {
+	debug("IoStackTruncate: offset=%lld\n", offset);
 	errno = EINVAL;
 	return -1;
 }
@@ -160,16 +163,14 @@ int checkForError(int ret, Error error)
 
 	/* System errors - set errno and return -1 */
 	else if (errorIsSystem(error)) {
+		debug("checkForError: errno=%d msg=%s\n", -error.code, error.msg);
 		errno = -error.code;
-		ereport(LOG,
-				(errcode_for_file_access(),
-					errmsg("I/O Stack error: %s %m", error.msg)));
 		return -1;
 	}
 
 	/* Other errors, raise an exception */
 	else if (isError(error))
-		ereport(ERROR, errmsg("IoStack error: %s", error.msg));
+		ereport(ERROR, errmsg("IoStack error: code=%d  msg=%s", error.code, error.msg));
 
 	/* Otherwise, everything is just fine. */
 	else
@@ -179,5 +180,9 @@ int checkForError(int ret, Error error)
 
 void IoStackSetup(void)
 {
-    IoStackPrototype = ioStackNew( fileSystemBottomNew() );
+	IoStackPrototype =
+		ioStackNew(
+			//bufferedNew(1024,
+						//aeadFilterNew("AES-256-GCM", 1024, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32,
+									  vfdBottomNew());
 }

@@ -5,9 +5,15 @@
 #ifndef STORAGE_IOSTACK_H
 #define STORAGE_IOSTACK_H
 
+#ifdef DEBUG
+#define debug(...) elog(DEBUG2, __VA_ARGS__)
+#define FDDEBUG
+#else
+#define debug(...) ((void)0)
+#endif
 
 /* Open flag to request opening with IO Stacks */
-#define PG_O_IOSTACK (0x2000000)
+#define PG_IOSTACK (0x2000000)
 
 /*
  * If we are NOT using I/O Stacks, then dummy out the procedures which use them
@@ -39,6 +45,10 @@
 void IoStackSetup(void);
 extern void *IoStackPrototype;
 
+typedef struct VfdBottom VfdBottom;
+VfdBottom *vfdBottomNew(void);
+
+
 /* VFD equivalent routines which invoke IoStacks instead of VFDs */
 IoStack *IoStackOpen(IoStack *proto, const char *fileName, int fileFlags, mode_t fileMode);
 int IoStackClose(IoStack *iostack, char *deleteName);
@@ -49,6 +59,8 @@ int IoStackWrite(IoStack *iostack, const void *buffer, size_t amount, off_t offs
 int IoStackSync(IoStack *iostack, uint32 wait_event_info);
 off_t IoStackSize(IoStack *iostack);
 int IoStackTruncate(IoStack *iostack, off_t offset, uint32 wait_event_info);
+
+
 
 #endif
 #endif /* STORAGE_IOSTACK_H */

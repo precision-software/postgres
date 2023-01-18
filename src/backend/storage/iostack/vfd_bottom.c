@@ -11,10 +11,9 @@
 #include "/usr/local/include/iostack/iostack.h"
 #include "/usr/local/include/iostack/iostack_error.h"
 #include "/usr/local/include/iostack/common/filter.h"
-
+#define DEBUG
 #include "storage/pg_iostack.h"
 #include "storage/fd.h"
-#include "vfd_bottom.h"
 
 extern uint32 IoStackWaitEvent;
 
@@ -40,13 +39,14 @@ struct VfdBottom {
  static
  VfdBottom *vfdOpen(VfdBottom *sink, char *path, int oflags, int perm, Error *error)
 {
+	 debug("vfdOpen: path=%s oflags=0x%x  perm=0x%x erroor=%s\n", path, oflags, perm, error->msg);
 	/* Clone ourself. */
 	VfdBottom *this = vfdBottomNew();
 	if (isError(*error))
 		return this;
 
 	/* We are opening real vfds, not I/O Stacks */
-	oflags &= ~PG_O_IOSTACK;
+	oflags &= ~PG_IOSTACK;
 
 	/* Default file permission when creating a file. */
 	if (perm == 0)
@@ -74,6 +74,7 @@ struct VfdBottom {
 static size_t
 vfdWrite(VfdBottom *this, Byte *buf, size_t bufSize, Error *error)
 {
+	debug("vfdWrite: bufSize=%zu  error=%s postition=%lld  vfd=%d\n", bufSize, error->msg, this->position, this->vfd);
 	/* Check for errors. TODO: move to ioStack. */
 	if (isError(*error)) return 0;
 
@@ -97,6 +98,7 @@ vfdWrite(VfdBottom *this, Byte *buf, size_t bufSize, Error *error)
 static size_t
 vfdRead(VfdBottom *this, Byte *buf, size_t size, Error *error)
 {
+	debug("vfdRead: bufSize=%zu  error=%s posiition=%lld vfd=%d", size, error->msg, this->position, this->vfd);
 
 	/* Check for errors. */
 	if (isError(*error)) return 0;
@@ -105,10 +107,13 @@ vfdRead(VfdBottom *this, Byte *buf, size_t size, Error *error)
 	int actual = FileRead(this->vfd, buf, size, this->position, IoStackWaitEvent);
 	if (actual == -1)
 		actual = setSystemError(error);
+	else if (actual == 0)
+		setError(error, errorEOF);
 
 	/* On success, track the new position. */
 	this->position += actual;
 
+    debug("vfdRead: actual=%d  msg=%s", actual, error->msg);
 	return actual;
 }
 
@@ -119,6 +124,7 @@ vfdRead(VfdBottom *this, Byte *buf, size_t size, Error *error)
 static void
 vfdClose(VfdBottom *this, Error *error)
 {
+	debug("vfdClose: this->vfd=%d  this->position=%lld\n", this->vfd, this->position);
 	/* Close the fd if it was opened earlier. */
 	FileClose(this->vfd);
 	free(this);

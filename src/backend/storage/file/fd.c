@@ -97,6 +97,7 @@
 #include "postmaster/startup.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
+#define DEBUG
 #include "storage/pg_iostack.h"
 #include "utils/guc.h"
 #include "utils/resowner_private.h"
@@ -1517,7 +1518,7 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 			   fileName, fileFlags, fileMode));
 
 	/* Open as a file pipeline if a prototype is set and the flags request it */
-	if ((fileFlags & PG_O_IOSTACK) && IoStackPrototype != NULL)
+	if ((fileFlags & PG_IOSTACK) && IoStackPrototype != NULL)
 		return PathNameOpenIoStack(fileName, fileFlags, fileMode);
 
 	/*
@@ -2124,7 +2125,7 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 	Assert(FileIsValid(file));
 	vfdP = &VfdCache[file];
 
-	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %d %p",
+	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
@@ -2732,7 +2733,7 @@ TryAgain:
  * Read a directory opened with AllocateDir, ereport'ing any error.
  *
  * This is easier to use than raw readdir() since it takes care of some
- * otherwise rather tedious and error-prone manipulation of errno.  Also,
+ * otherwise rather tedious and error-prone manipulation onotf errno.  Also,
  * if you are happy with a generic error message for AllocateDir failure,
  * you can just do
  *
@@ -3835,5 +3836,21 @@ static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode
  */
 static void FileCloseIoStack(File file)
 {
+	// TODO assert file is valid
+	Vfd *vfdP = &VfdCache[file];
 
+	// TODO: unregister and free the vfd first, so we don't come back here if error on close.
+
+	/* Remember the file name if deleting. Clear the flag so we can only delete it once */
+	char *deleteName = (vfdP->fdstate & FD_DELETE_AT_CLOSE)? vfdP->fileName : NULL;
+	vfdP->fdstate &= ~FD_DELETE_AT_CLOSE;
+
+	/* Close the file, deleting it if requested. */
+	IoStackClose(vfdP->iostack, deleteName);
+	vfdP->iostack = NULL;
+
+	/* Unregister from the resource owner and free the vfd structure */
+	if (vfdP->resowner)
+		ResourceOwnerForgetFile(vfdP->resowner, file);
+	FreeVfd(file);
 }
