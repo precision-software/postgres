@@ -689,7 +689,7 @@ static int	get_sync_bit(int method);
 static void CopyXLogRecordToWAL(int write_len, bool isLogSwitch,
 								XLogRecData *rdata,
 								XLogRecPtr StartPos, XLogRecPtr EndPos,
-								TimeLineID tli);
+								TimeLineID tli, bool encrypt);
 static void ReserveXLogInsertLocation(int size, XLogRecPtr *StartPos,
 									  XLogRecPtr *EndPos, XLogRecPtr *PrevPtr);
 static bool ReserveXLogSwitch(XLogRecPtr *StartPos, XLogRecPtr *EndPos,
@@ -857,19 +857,27 @@ XLogInsertRecord(XLogRecData *rdata,
 	{
 		/*
 		 * Now that xl_prev has been filled in, calculate CRC of the record
-		 * header.
+		 * header.  If we are using encrypted WAL, this CRC is overwritten by
+		 * the authentication tag, so just zero
 		 */
-		rdata_crc = rechdr->xl_integrity;
-		COMP_CRC32C(rdata_crc, rechdr, offsetof(XLogRecord, xl_integrity));
-		FIN_CRC32C(rdata_crc);
-		rechdr->xl_integrity = rdata_crc;
+		if (!encrypt_wal)
+		{
+			rdata_crc = rechdr->xl_integrity.crc;
+			COMP_CRC32C(rdata_crc, rechdr, offsetof(XLogRecord, xl_integrity.crc));
+			FIN_CRC32C(rdata_crc);
+			rechdr->xl_integrity.crc = rdata_crc;
+		}
+		else
+			memset(&rechdr->xl_integrity, 0, sizeof(rechdr->xl_integrity));
 
 		/*
 		 * All the record data, including the header, is now ready to be
-		 * inserted. Copy the record in the space reserved.
+		 * inserted. Copy the record in the space reserved.  If WAL is
+		 * encrypted, we will also calculate the authentication tag and
+		 * perform the encryption of data as it is being written out.
 		 */
 		CopyXLogRecordToWAL(rechdr->xl_tot_len, isLogSwitch, rdata,
-							StartPos, EndPos, insertTLI);
+							StartPos, EndPos, insertTLI, encrypt_wal);
 
 		/*
 		 * Unless record is flagged as not important, update LSN of last
@@ -1162,17 +1170,30 @@ ReserveXLogSwitch(XLogRecPtr *StartPos, XLogRecPtr *EndPos, XLogRecPtr *PrevPtr)
 
 /*
  * Subroutine of XLogInsertRecord.  Copies a WAL record to an already-reserved
- * area in the WAL.
+ * area in the WAL.  If "encrypt" is true, encrypt the non-header portions of
+ * the record, storing the GCM Tag in the initial header's xl_integrity field.
  */
 static void
 CopyXLogRecordToWAL(int write_len, bool isLogSwitch, XLogRecData *rdata,
-					XLogRecPtr StartPos, XLogRecPtr EndPos, TimeLineID tli)
+					XLogRecPtr StartPos, XLogRecPtr EndPos, TimeLineID tli,
+					bool encrypt)
 {
 	char	   *currpos;
 	int			freespace;
 	int			written;
 	XLogRecPtr	CurrPos;
 	XLogPageHeader pagehdr;
+	char authtag[8] = {0};
+
+	/* If encrypting we will need to precalculate the authtag for this record
+	 * and set xl_integrity to it. */
+	if (encrypt)
+	{
+		CalculateXLogRecordAuthtag(rdata, StartPos, authtag);
+		memcpy(&((XLogRecord*)rdata->data)->xl_integrity, authtag, 8);
+		/* Start the encryption process; initializes record IV and precalculates AAD */
+		StartEncryptXLogRecord((XLogRecord*)rdata->data, StartPos);
+	}
 
 	/*
 	 * Get a pointer to the right place in the right WAL buffer to start
@@ -1201,7 +1222,10 @@ CopyXLogRecordToWAL(int write_len, bool isLogSwitch, XLogRecData *rdata,
 			 * Write what fits on this page, and continue on the next page.
 			 */
 			Assert(CurrPos % XLOG_BLCKSZ >= SizeOfXLogShortPHD || freespace == 0);
-			memcpy(currpos, rdata_data, freespace);
+			if (encrypt)
+				EncryptXLogRecordIncremental(rdata_data, currpos, freespace);
+			else
+				memcpy(currpos, rdata_data, freespace);
 			rdata_data += freespace;
 			rdata_len -= freespace;
 			written += freespace;
@@ -1236,7 +1260,10 @@ CopyXLogRecordToWAL(int write_len, bool isLogSwitch, XLogRecData *rdata,
 		}
 
 		Assert(CurrPos % XLOG_BLCKSZ >= SizeOfXLogShortPHD || rdata_len == 0);
-		memcpy(currpos, rdata_data, rdata_len);
+		if (encrypt)
+			EncryptXLogRecordIncremental(rdata_data, currpos, rdata_len);
+		else
+			memcpy(currpos, rdata_data, rdata_len);
 		currpos += rdata_len;
 		CurrPos += rdata_len;
 		freespace -= rdata_len;
@@ -1246,6 +1273,9 @@ CopyXLogRecordToWAL(int write_len, bool isLogSwitch, XLogRecData *rdata,
 	}
 	Assert(written == write_len);
 
+	if (encrypt)
+		FinishEncryptXLogRecord(currpos);
+
 	/*
 	 * If this was an xlog-switch, it's not enough to write the switch record,
 	 * we also have to consume all the remaining space in the WAL segment.  We
@@ -1253,6 +1283,9 @@ CopyXLogRecordToWAL(int write_len, bool isLogSwitch, XLogRecData *rdata,
 	 */
 	if (isLogSwitch && XLogSegmentOffset(CurrPos, wal_segment_size) != 0)
 	{
+		/* TODO: how do we handle this runs of zeros here in an encrypted
+		 * page?  Just leave as zero? */
+
 		/* An xlog-switch record doesn't contain any data besides the header */
 		Assert(write_len == SizeOfXLogRecord);
 
@@ -4778,11 +4811,30 @@ BootStrapXLOG(void)
 	recptr += sizeof(checkPoint);
 	Assert(recptr - (char *) record == record->xl_tot_len);
 
-	INIT_CRC32C(crc);
-	COMP_CRC32C(crc, ((char *) record) + SizeOfXLogRecord, record->xl_tot_len - SizeOfXLogRecord);
-	COMP_CRC32C(crc, (char *) record, offsetof(XLogRecord, xl_integrity));
-	FIN_CRC32C(crc);
-	record->xl_integrity = crc;
+	BootStrapKmgr();
+	InitializeBufferEncryption();
+
+	if (bootstrap_file_encryption_method != DISABLED_ENCRYPTION_METHOD)
+	{
+		/* Since this must be set for XLogBytePosToRecPtr to work properly,
+		 * set explicitly here.  Note that we don't actually care about this
+		 * exact calculation being correct with non-default wal_segment_size
+		 * since it will be reset when we hit ReadControlFile() later in this
+		 * function, and as the first record in the WAL stream this will
+		 * always be the first position. */
+		UsableBytesInSegment =
+			(wal_segment_size / XLOG_BLCKSZ * UsableBytesInPage) -
+			(SizeOfXLogLongPHD - SizeOfXLogShortPHD);
+		EncryptXLogRecord(record, wal_segment_size + SizeOfXLogLongPHD, NULL);
+	}
+	else
+	{
+		INIT_CRC32C(crc);
+		COMP_CRC32C(crc, ((char *) record) + SizeOfXLogRecord, record->xl_tot_len - SizeOfXLogRecord);
+		COMP_CRC32C(crc, (char *) record, offsetof(XLogRecord, xl_integrity));
+		FIN_CRC32C(crc);
+		record->xl_integrity.crc = crc;
+	}
 
 	/* Create first XLOG segment file */
 	openLogTLI = BootstrapTimeLineID;
@@ -4829,9 +4881,6 @@ BootStrapXLOG(void)
 
 	/* some additional ControlFile fields are set in WriteControlFile() */
 	WriteControlFile();
-
-	BootStrapKmgr();
-	InitializeBufferEncryption();
 
 	if (terminal_fd != -1)
 	{

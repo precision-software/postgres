@@ -38,6 +38,9 @@
  * XLogRecordDataHeaderLong structs all begin with a single 'id' byte. It's
  * used to distinguish between block references, and the main data structs.
  */
+
+#define AUTHTAG_SIZE 8
+
 typedef struct XLogRecord
 {
 	uint32		xl_tot_len;		/* total len of entire record */
@@ -45,14 +48,16 @@ typedef struct XLogRecord
 	XLogRecPtr	xl_prev;		/* ptr to previous record in log */
 	uint8		xl_info;		/* flag bits, see below */
 	RmgrId		xl_rmid;		/* resource manager for this record */
-	/* 2 bytes of padding here, initialize to zero */
-	uint64		xl_integrity;			/* CRC or tag for this record */
-
+	char        xl_pad[6];
+	union {
+		uint32 crc;
+		unsigned char authtag[AUTHTAG_SIZE];			/* CRC or tag for this record */
+	} xl_integrity;
 	/* XLogRecordBlockHeaders and XLogRecordDataHeader follow, no padding */
 
 } XLogRecord;
 
-#define SizeOfXLogRecord	(offsetof(XLogRecord, xl_integrity) + sizeof(uint64))
+#define SizeOfXLogRecord	(offsetof(XLogRecord, xl_integrity) + AUTHTAG_SIZE)
 
 /*
  * The high 4 bits in xl_info may be used freely by rmgr. The
@@ -89,6 +94,7 @@ typedef struct XLogRecord
  * wal_consistency_checking is enabled for a rmgr this is set unconditionally.
  */
 #define XLR_CHECK_CONSISTENCY	0x02
+
 
 /*
  * Header info for block data appended to an XLOG record.

@@ -879,18 +879,21 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	hdr_rdt.len = (scratch - hdr_scratch);
 	total_len += hdr_rdt.len;
 
-	/*
-	 * Calculate CRC of the data
-	 *
-	 * Note that the record header isn't added into the CRC initially since we
-	 * don't know the prev-link yet.  Thus, the CRC will represent the CRC of
-	 * the whole record in the order: rdata, then backup blocks, then record
-	 * header.
-	 */
-	INIT_CRC32C(rdata_crc);
-	COMP_CRC32C(rdata_crc, hdr_scratch + SizeOfXLogRecord, hdr_rdt.len - SizeOfXLogRecord);
-	for (rdt = hdr_rdt.next; rdt != NULL; rdt = rdt->next)
-		COMP_CRC32C(rdata_crc, rdt->data, rdt->len);
+	if (!encrypt_wal)
+	{
+		/*
+		 * Calculate CRC of the data
+		 *
+		 * Note that the record header isn't added into the CRC initially since we
+		 * don't know the prev-link yet.  Thus, the CRC will represent the CRC of
+		 * the whole record in the order: rdata, then backup blocks, then record
+		 * header.
+		 */
+		INIT_CRC32C(rdata_crc);
+		COMP_CRC32C(rdata_crc, hdr_scratch + SizeOfXLogRecord, hdr_rdt.len - SizeOfXLogRecord);
+		for (rdt = hdr_rdt.next; rdt != NULL; rdt = rdt->next)
+			COMP_CRC32C(rdata_crc, rdt->data, rdt->len);
+	}
 
 	/*
 	 * Ensure that the XLogRecord is not too large.
@@ -916,7 +919,8 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	rechdr->xl_info = info;
 	rechdr->xl_rmid = rmid;
 	rechdr->xl_prev = InvalidXLogRecPtr;
-	rechdr->xl_integrity = rdata_crc;
+	if (!encrypt_wal)
+		rechdr->xl_integrity.crc = rdata_crc;
 
 	return &hdr_rdt;
 }

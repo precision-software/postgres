@@ -96,8 +96,45 @@ pg_cipher_encrypt(PgCipherCtx *ctx, int cipher,
 				  const unsigned char *aad, const int aadlen,
 				  unsigned char *outtag, const int taglen)
 {
-	int			len;
-	int			enclen;
+	return pg_cipher_encrypt_ex(ctx, cipher, &plaintext, &inlen, 1,
+							 ciphertext,outlen,iv,ivlen,aad,aadlen,outtag,taglen);
+}
+
+/*
+ * Encryption routine to encrypt multiple data blocks of source data.
+ *
+ * ctx is the encryption context which must have been created previously.
+ *
+ * plaintext is an array of pointers to data we are going to encrypt
+ * inlen is an array the length of the data to encrypt
+ * nchunks are the number of elements in each of these arrays, which must match
+ *
+ * ciphertext is the encrypted result
+ * outlen is the encrypted length
+ *
+ * iv is the IV to use.
+ * ivlen is the IV length to use.
+ *
+ * aad is a pointer to additional authenticated data.
+ * aadlen is the length of aad.
+ *
+ * aad is a pointer to additional authenticated data.
+ * aadlen is the length of aad.
+ *
+ * outtag is the resulting tag.
+ * taglen is the length of the tag.
+ */
+bool
+pg_cipher_encrypt_ex(PgCipherCtx *ctx, int cipher,
+				  const unsigned char **plaintext, const int *inlen,
+				  const int nchunks,
+				  unsigned char *ciphertext, int *outlen,
+				  const unsigned char *iv, const int ivlen,
+				  const unsigned char *aad, const int aadlen,
+				  unsigned char *outtag, const int taglen)
+{
+	int			len = 0;
+	int			enclen = 0;
 
 	Assert(ctx != NULL);
 
@@ -123,12 +160,20 @@ pg_cipher_encrypt(PgCipherCtx *ctx, int cipher,
 	if (aad && aadlen && !EVP_EncryptUpdate(ctx, NULL, &len, aad, aadlen))
 		return false;
 
+	/* reset to zero since we only care about the total /encrypted/ length */
+	len = 0;
+
 	/*
 	 * This is the function which is actually performing the encryption for
 	 * us.
 	 */
-	if (!EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, inlen))
-		return false;
+	for (int i = 0; i < nchunks; i++) {
+		int inclen;
+
+		if (!EVP_EncryptUpdate(ctx, ciphertext + len, &inclen, plaintext[i], inlen[i]))
+			return false;
+		len += inclen;
+	}
 
 	enclen = len;
 

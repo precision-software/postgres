@@ -90,6 +90,7 @@ typedef enum RecoveryState
 } RecoveryState;
 
 extern PGDLLIMPORT int wal_level;
+extern bool encrypt_wal;
 
 /* Is WAL archiving enabled (always or only while server is running normally)? */
 #define XLogArchivingActive() \
@@ -125,6 +126,13 @@ extern PGDLLIMPORT int wal_level;
 
 #ifdef WAL_DEBUG
 extern PGDLLIMPORT bool XLOG_DEBUG;
+#endif
+
+#ifdef FRONTEND
+/* TODO: handle in FRONTEND */
+#define encrypt_wal 0
+#else
+#define encrypt_wal (GetFileEncryptionMethod())
 #endif
 
 /*
