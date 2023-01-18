@@ -97,7 +97,6 @@
 #include "postmaster/startup.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
-#define DEBUG
 #include "storage/pg_iostack.h"
 #include "utils/guc.h"
 #include "utils/resowner_private.h"
@@ -1405,9 +1404,11 @@ FreeVfd(File file)
 		vfdP->fileName = NULL;
 	}
 	vfdP->fdstate = 0x0;
+	debug("FreeVfd(middle): nextFree=%d  ", VfdCache->nextFree);
 
 	vfdP->nextFree = VfdCache[0].nextFree;
 	VfdCache[0].nextFree = file;
+	debug("FreeVfd(done)");
 }
 
 /* returns 0 on success, -1 on re-open failure (with errno set) */
@@ -1544,6 +1545,7 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 
 		FreeVfd(file);
 		free(fnamecopy);
+		debug("PathNameOpenFilePerm(error) fileName=%s errno=%d", fileName, save_errno);
 		errno = save_errno;
 		return -1;
 	}
@@ -1560,6 +1562,7 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	vfdP->resowner = NULL;
 
 	Insert(file);
+	debug("PathNameOpenFilePerm(done): fileName=%s  file=%d", fileName, file);
 
 	return file;
 }
@@ -3813,20 +3816,23 @@ static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode
 	vfdP->resowner = NULL;
 	vfdP->fd = -1;
 
+	debug("PathNameOpenIoStack: fileName=%s  fileFlags=0x%x  fileMode=x%x", fileName, fileFlags, fileMode);
+
+
 	/* Open the I/O Stack */
 	vfdP->iostack = IoStackOpen(IoStackPrototype, fileName, fileFlags, fileMode);
 
 	/* clean up on error */
-
 	if (vfdP->iostack == NULL)
 	{
 		int			save_errno = errno;
 		FreeVfd(file);
-		free(fnamecopy);
+		debug("PathNameOpenIoStack(error): file=%d  fnamecopy=%p", file, fnamecopy);
 		errno = save_errno;
-		return -1;
+		file = -1;
 	}
 
+	debug("PathNameOpenIoStack(done): file=%d filenane=%s", file, fileName);
     return file;
 }
 
@@ -3836,6 +3842,9 @@ static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode
  */
 static void FileCloseIoStack(File file)
 {
+	debug("FileCloseIoStack: file=%d", file);
+	if (file == -1) return;
+
 	// TODO assert file is valid
 	Vfd *vfdP = &VfdCache[file];
 
@@ -3853,4 +3862,5 @@ static void FileCloseIoStack(File file)
 	if (vfdP->resowner)
 		ResourceOwnerForgetFile(vfdP->resowner, file);
 	FreeVfd(file);
+	debug("FileCloseIoStack(done)");
 }

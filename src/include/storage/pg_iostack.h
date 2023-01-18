@@ -4,9 +4,16 @@
 
 #ifndef STORAGE_IOSTACK_H
 #define STORAGE_IOSTACK_H
+#include <errno.h>
 
+#define DEBUG
 #ifdef DEBUG
-#define debug(...) elog(DEBUG2, __VA_ARGS__)
+
+#define debug(...) do { \
+    int save_errno = errno; \
+	elog(DEBUG2, __VA_ARGS__);  \
+	errno = save_errno;    \
+	} while (0)
 #define FDDEBUG
 #else
 #define debug(...) ((void)0)

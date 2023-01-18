@@ -55,13 +55,17 @@ struct VfdBottom {
 	/* Open the file and check for errors. */
 	this->vfd = PathNameOpenFilePerm(path, oflags, perm);
 	if (this->vfd == -1)
-	{
 		setSystemError(error);
-		return NULL;
-	}
+
 
 	/* Set our file position, checking for O_APPEND */
-	this->position = (oflags & O_APPEND)? FileSize(this->vfd): 0;
+	this->position = 0;
+	if (this->vfd == -1 || (oflags & O_APPEND) == 0)
+		this->position = 0;
+	else
+	    this->position = FileSize(this->vfd);
+
+	debug("vfdOpen (done): path=%s  position=%lld  fd=%d  msg=%s", path, this->position, this->vfd, error->msg);
 
 	return this;
 }
@@ -126,7 +130,8 @@ vfdClose(VfdBottom *this, Error *error)
 {
 	debug("vfdClose: this->vfd=%d  this->position=%lld\n", this->vfd, this->position);
 	/* Close the fd if it was opened earlier. */
-	FileClose(this->vfd);
+	if (this->vfd != -1)
+		FileClose(this->vfd);
 	free(this);
 }
 

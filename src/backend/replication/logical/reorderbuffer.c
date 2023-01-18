@@ -4211,6 +4211,8 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 	while (restored < max_changes_in_memory && *segno <= last_segno)
 	{
+		elog(DEBUG2, "reorderbuffer(top of loop): restored=%zu  maxchanges=%zu =segno=%zu  last=%zu *fd=%d",
+			 restored, max_changes_in_memory, *segno, last_segno, *fd);
 		int			readBytes;
 		ReorderBufferDiskChange *ondisk;
 
@@ -4234,6 +4236,7 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 										*segno);
 
 			*fd = PathNameOpenFile(path, O_RDONLY | PG_BINARY | PG_IOSTACK);
+			elog(DEBUG2, "reorderbuffer(after open file): *fd=%d", *fd);
 
 			/* No harm in resetting the offset even in case of failure */
 			file->curOffset = 0;
@@ -4313,7 +4316,9 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		 */
 		ReorderBufferRestoreChange(rb, txn, rb->outbuf);
 		restored++;
+		elog(DEBUG2, "reorderbuffer(bottom of loop): restored=%zu  segno=%zu", restored, *segno);
 	}
+	elog(DEBUG2, "reorderbuffer(done): restored=%zu", restored);
 
 	return restored;
 }

@@ -7,7 +7,6 @@
 
 #include "postgres.h"
 #include "pgstat.h"
-#define DEBUG
 #include "storage/pg_iostack.h"
 #include "storage/fd.h"
 
@@ -44,9 +43,16 @@ IoStack *IoStackOpen(IoStack *prototype, const char *fileName, int fileFlags, mo
 
 	/* Open the file using the prototype I/O stack */
 	IoStack *iostack = fileOpen(prototype, fileName, fileFlags, fileMode, &error);
-	if (isError(error) && checkForError(0, error) == -1)
-		return NULL;
 
+    if (isError(error))
+	{
+		Error ignoreError = errorOK;
+		fileClose(iostack, &ignoreError);  // TODO: fileFree
+		iostack = NULL;
+	}
+
+	debug("IoStackOpen(done): iostack=%p  msg=%s", iostack, error.msg);
+	checkForError(-1, error);  /* set errno if a system error, abort otherwise */
 	return iostack;
 }
 
@@ -96,7 +102,7 @@ int IoStackWrite(IoStack *iostack, const void *buffer, size_t amount, off_t offs
  */
 int IoStackClose(IoStack *iostack, char *deleteName)
 {
-	debug("IoStackClose: deleteName=%s\n", deleteName);
+	debug("IoStackClose: iostack=%p deleteName=%s\n", iostack, deleteName);
 
 	/* If we will delete the file, then clone the pipeline first */
 	IoStack *clone = NULL;
@@ -117,6 +123,7 @@ int IoStackClose(IoStack *iostack, char *deleteName)
 	};
 
 	/* Check for errors, returning 0 on success */
+	debug("IoStackClose(done): msg=%s", error.msg);
 	return checkForError(0, error);
 }
 
