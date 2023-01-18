@@ -48,8 +48,7 @@ IoStack *IoStackOpen(IoStack *prototype, const char *fileName, int fileFlags, mo
 	{
 		Error ignoreError = errorOK;
 		fileClose(iostack, &ignoreError);  // TODO: fileFree
-		iostack = NULL;
-	}
+		iostack = NULL;	}
 
 	debug("IoStackOpen(done): iostack=%p  msg=%s", iostack, error.msg);
 	checkForError(-1, error);  /* set errno if a system error, abort otherwise */
@@ -189,7 +188,7 @@ void IoStackSetup(void)
 {
 	IoStackPrototype =
 		ioStackNew(
-			//bufferedNew(1024,
-						//aeadFilterNew("AES-256-GCM", 1024, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32,
-									  vfdBottomNew());
+			bufferedNew(1024,
+						aeadFilterNew("AES-256-GCM", 1024, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32,
+									  vfdBottomNew())));
 }
