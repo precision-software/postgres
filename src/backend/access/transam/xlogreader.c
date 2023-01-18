@@ -1187,10 +1187,10 @@ ValidXLogRecord(XLogReaderState *state, XLogRecord *record, XLogRecPtr recptr)
 	INIT_CRC32C(crc);
 	COMP_CRC32C(crc, ((char *) record) + SizeOfXLogRecord, record->xl_tot_len - SizeOfXLogRecord);
 	/* include the record header last */
-	COMP_CRC32C(crc, (char *) record, offsetof(XLogRecord, xl_crc));
+	COMP_CRC32C(crc, (char *) record, offsetof(XLogRecord, xl_integrity));
 	FIN_CRC32C(crc);
 
-	if (!EQ_CRC32C(record->xl_crc, crc))
+	if (!EQ_CRC32C(record->xl_integrity, crc))
 	{
 		report_invalid_record(state,
 							  "incorrect resource manager data checksum in record at %X/%X",

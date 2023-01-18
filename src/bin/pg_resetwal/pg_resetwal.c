@@ -1080,9 +1080,9 @@ WriteEmptyXLOG(void)
 
 	INIT_CRC32C(crc);
 	COMP_CRC32C(crc, ((char *) record) + SizeOfXLogRecord, record->xl_tot_len - SizeOfXLogRecord);
-	COMP_CRC32C(crc, (char *) record, offsetof(XLogRecord, xl_crc));
+	COMP_CRC32C(crc, (char *) record, offsetof(XLogRecord, xl_integrity));
 	FIN_CRC32C(crc);
-	record->xl_crc = crc;
+	record->xl_integrity = crc;
 
 	/* Write the first page */
 	XLogFilePath(path, ControlFile.checkPointCopy.ThisTimeLineID,

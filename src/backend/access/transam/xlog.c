@@ -725,7 +725,7 @@ static void WALInsertLockUpdateInsertingAt(XLogRecPtr insertingAt);
  *
  * The first XLogRecData in the chain must be for the record header, and its
  * data must be MAXALIGNed.  XLogInsertRecord fills in the xl_prev and
- * xl_crc fields in the header, the rest of the header must already be filled
+ * xl_integrity fields in the header, the rest of the header must already be filled
  * by the caller.
  *
  * Returns XLOG pointer to end of record (beginning of next record).
@@ -859,10 +859,10 @@ XLogInsertRecord(XLogRecData *rdata,
 		 * Now that xl_prev has been filled in, calculate CRC of the record
 		 * header.
 		 */
-		rdata_crc = rechdr->xl_crc;
-		COMP_CRC32C(rdata_crc, rechdr, offsetof(XLogRecord, xl_crc));
+		rdata_crc = rechdr->xl_integrity;
+		COMP_CRC32C(rdata_crc, rechdr, offsetof(XLogRecord, xl_integrity));
 		FIN_CRC32C(rdata_crc);
-		rechdr->xl_crc = rdata_crc;
+		rechdr->xl_integrity = rdata_crc;
 
 		/*
 		 * All the record data, including the header, is now ready to be
@@ -4780,9 +4780,9 @@ BootStrapXLOG(void)
 
 	INIT_CRC32C(crc);
 	COMP_CRC32C(crc, ((char *) record) + SizeOfXLogRecord, record->xl_tot_len - SizeOfXLogRecord);
-	COMP_CRC32C(crc, (char *) record, offsetof(XLogRecord, xl_crc));
+	COMP_CRC32C(crc, (char *) record, offsetof(XLogRecord, xl_integrity));
 	FIN_CRC32C(crc);
-	record->xl_crc = crc;
+	record->xl_integrity = crc;
 
 	/* Create first XLOG segment file */
 	openLogTLI = BootstrapTimeLineID;
