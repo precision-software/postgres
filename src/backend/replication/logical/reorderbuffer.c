@@ -4253,7 +4253,6 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 						 errmsg("could not open file \"%s\": %m",
 								path)));
 		}
-
 		/*
 		 * Read the statically sized part of a change which has information
 		 * about the total size. If we couldn't read a record, we're at the

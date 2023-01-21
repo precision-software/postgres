@@ -11,7 +11,6 @@
 #include "/usr/local/include/iostack/iostack.h"
 #include "/usr/local/include/iostack/iostack_error.h"
 #include "/usr/local/include/iostack/common/filter.h"
-#define DEBUG
 #include "storage/pg_iostack.h"
 #include "storage/fd.h"
 
@@ -37,13 +36,9 @@ struct VfdBottom {
  * Open a VFD file.
  */
  static
- VfdBottom *vfdOpen(VfdBottom *sink, char *path, int oflags, int perm, Error *error)
+ void vfdOpen(VfdBottom *this, char *path, int oflags, int perm, Error *error)
 {
 	 debug("vfdOpen: path=%s oflags=0x%x  perm=0x%x erroor=%s\n", path, oflags, perm, error->msg);
-	/* Clone ourself. */
-	VfdBottom *this = vfdBottomNew();
-	if (isError(*error))
-		return this;
 
 	/* We are opening real vfds, not I/O Stacks */
 	oflags &= ~PG_IOSTACK;
@@ -66,8 +61,6 @@ struct VfdBottom {
 	    this->position = FileSize(this->vfd);
 
 	debug("vfdOpen (done): path=%s  position=%lld  fd=%d  msg=%s", path, this->position, this->vfd, error->msg);
-
-	return this;
 }
 
 
@@ -132,7 +125,7 @@ vfdClose(VfdBottom *this, Error *error)
 	/* Close the fd if it was opened earlier. */
 	if (this->vfd != -1)
 		FileClose(this->vfd);
-	free(this);
+	this->vfd = -1;
 }
 
 
@@ -196,6 +189,18 @@ vfdDelete(VfdBottom *this, const char *path, Error *error)
 		setSystemError(error);
 }
 
+
+static void *vfdClone(VfdBottom *this)
+{
+	return vfdBottomNew();
+}
+
+static void vfdFree(VfdBottom *this)
+{
+	free(this);
+}
+
+
 FilterInterface vfdInterface = (FilterInterface)
 	{
 		.fnOpen = (FilterOpen)vfdOpen,
@@ -206,7 +211,9 @@ FilterInterface vfdInterface = (FilterInterface)
 		.fnBlockSize = (FilterBlockSize)vfdBlockSize,
 		.fnAbort = (FilterAbort)vfdAbort,
 		.fnSeek = (FilterSeek)vfdSeek,
-		.fnDelete = (FilterDelete)vfdDelete
+		.fnDelete = (FilterDelete)vfdDelete,
+		.fnClone = (FilterClone)vfdClone,
+		.fnFree = (FilterFree)vfdFree,
 	};
 
 

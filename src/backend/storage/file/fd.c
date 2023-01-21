@@ -1404,11 +1404,9 @@ FreeVfd(File file)
 		vfdP->fileName = NULL;
 	}
 	vfdP->fdstate = 0x0;
-	debug("FreeVfd(middle): nextFree=%d  ", VfdCache->nextFree);
 
 	vfdP->nextFree = VfdCache[0].nextFree;
 	VfdCache[0].nextFree = file;
-	debug("FreeVfd(done)");
 }
 
 /* returns 0 on success, -1 on re-open failure (with errno set) */
@@ -1587,7 +1585,7 @@ PathNameCreateTemporaryDir(const char *basedir, const char *directory)
 			return;
 
 		/*
-		 * Failed.  Try to create basedir first in case it's missing. Tolerate
+		 * Failed.  Try to create basedir first in case it's missing. Toleravfdte
 		 * EEXIST to close a race against another process following the same
 		 * algorithm.
 		 */

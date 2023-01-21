@@ -6,7 +6,6 @@
 #define STORAGE_IOSTACK_H
 #include <errno.h>
 
-#define DEBUG
 #ifdef DEBUG
 
 #define debug(...) do { \
@@ -44,7 +43,7 @@
  */
 #else
 #include <sys/types.h>
-#include "/usr/local/include/iostack.h"  /* <iostack.h> */
+#include "/usr/local/include/iostack/iostack.h"  /* <iostack/iostack.h> */
 #include "storage/fd.h"
 #include "c.h"
 

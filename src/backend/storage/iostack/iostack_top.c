@@ -3,12 +3,11 @@
 //
 
 #include <fcntl.h>
-#include "/usr/local/include/iostack.h"  //<iostack.h>
 
 #include "postgres.h"
 #include "pgstat.h"
-#include "storage/pg_iostack.h"
 #include "storage/fd.h"
+#include "storage/pg_iostack.h"
 
 /* TODO: configure system include directories */
 #include "/usr/local/include/iostack/iostack.h"
@@ -41,14 +40,17 @@ IoStack *IoStackOpen(IoStack *prototype, const char *fileName, int fileFlags, mo
 	Error error = errorOK;
 	debug("IoStackOpen: fileName=%s  fileFlags=0x%x  fileMode=0x%x\n", fileName, fileFlags, fileMode);
 
-	/* Open the file using the prototype I/O stack */
-	IoStack *iostack = fileOpen(prototype, fileName, fileFlags, fileMode, &error);
+	/* Clone the prototype and open it */
+	IoStack *iostack = fileClone(prototype);
+	fileOpen(iostack, fileName, fileFlags, fileMode, &error);
 
     if (isError(error))
 	{
 		Error ignoreError = errorOK;
-		fileClose(iostack, &ignoreError);  // TODO: fileFree
-		iostack = NULL;	}
+		fileClose(iostack, &ignoreError);
+		fileFree(iostack);
+		iostack = NULL;
+	}
 
 	debug("IoStackOpen(done): iostack=%p  msg=%s", iostack, error.msg);
 	checkForError(-1, error);  /* set errno if a system error, abort otherwise */
@@ -103,23 +105,17 @@ int IoStackClose(IoStack *iostack, char *deleteName)
 {
 	debug("IoStackClose: iostack=%p deleteName=%s\n", iostack, deleteName);
 
-	/* If we will delete the file, then clone the pipeline first */
-	IoStack *clone = NULL;
-	Error ignorableError = errorEOF;
-	if (deleteName)
-		clone = fileOpen(iostack, "", 0, 0, &ignorableError);
-
-	/* Close the file, freeing the pipeline. */
+	/* Close the file */
 	Error error = errorOK;
 	fileClose(iostack, &error);
 
 	/* Delete the file if it was temporary */
 	if (deleteName)
-	{
-		/* Delete the file using the cloned pipeline, then free the clone */
-		fileDelete(clone, deleteName, &error);
-		fileClose(clone, &error);
-	};
+		fileDelete(iostack, deleteName, &error);
+
+	/* Free the cloned iostack */
+	debug("IoStackClose(before fileFree): iostack=%p  next=%p", iostack, *(void **)iostack);
+	//fileFree(iostack); TODO: debugging - create deliberate memory leak
 
 	/* Check for errors, returning 0 on success */
 	debug("IoStackClose(done): msg=%s", error.msg);
