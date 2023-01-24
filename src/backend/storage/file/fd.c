@@ -1358,6 +1358,7 @@ AllocateVfd(void)
 		/*
 		 * Be careful not to clobber VfdCache ptr if realloc fails.
 		 */
+		debug("AllocateVFD(realloc) newCacheSize=%zu", newCacheSize);
 		newVfdCache = (Vfd *) realloc(VfdCache, sizeof(Vfd) * newCacheSize);
 		if (newVfdCache == NULL)
 			ereport(ERROR,
@@ -1397,6 +1398,7 @@ FreeVfd(File file)
 
 	DO_DB(elog(LOG, "FreeVfd: %d (%s)",
 			   file, vfdP->fileName ? vfdP->fileName : ""));
+	Assert(vfdP->iostack == NULL);
 
 	if (vfdP->fileName != NULL)
 	{
@@ -1417,6 +1419,7 @@ FileAccess(File file)
 
 	DO_DB(elog(LOG, "FileAccess %d (%s)",
 			   file, VfdCache[file].fileName));
+	Assert(VfdCache[file].iostack == NULL);
 
 	/*
 	 * Is the file open?  If not, open it and put it at the head of the LRU
@@ -1741,7 +1744,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 	 * temp file that can be reused.
 	 */
 	file = PathNameOpenFile(tempfilepath,
-							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
+							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
 	if (file <= 0)
 	{
 		/*
@@ -1755,7 +1758,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 		(void) MakePGDirectory(tempdirpath);
 
 		file = PathNameOpenFile(tempfilepath,
-								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
+								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
 		if (file <= 0 && rejectError)
 			elog(ERROR, "could not create temporary file \"%s\": %m",
 				 tempfilepath);
@@ -1790,7 +1793,7 @@ PathNameCreateTemporaryFile(const char *path, bool error_on_failure)
 	 * Open the file.  Note: we don't use O_EXCL, in case there is an orphaned
 	 * temp file that can be reused.
 	 */
-	file = PathNameOpenFile(path, O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
+	file = PathNameOpenFile(path, O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
 	if (file <= 0)
 	{
 		if (error_on_failure)
@@ -1826,7 +1829,7 @@ PathNameOpenTemporaryFile(const char *path, int mode)
 
 	ResourceOwnerEnlargeFiles(CurrentResourceOwner);
 
-	file = PathNameOpenFile(path, mode | PG_BINARY | PG_ENCRYPT);
+	file = PathNameOpenFile(path, mode | PG_BINARY );
 
 	/* If no such file, then we don't raise an error. */
 	if (file <= 0 && errno != ENOENT)
@@ -1901,8 +1904,8 @@ FileClose(File file)
 	Assert(FileIsValid(file));
 	vfdP = &VfdCache[file];
 
-	DO_DB(elog(LOG, "FileClose: %d (%s)",
-			   file, VfdCache[file].fileName));
+	DO_DB(elog(LOG, "FileClose: %d (%s)  iostack=%p",
+			   file, VfdCache[file].fileName, VfdCache[file].iostack));
 
 	if (vfdP->iostack != NULL)
 		return FileCloseIoStack(file);
@@ -2065,10 +2068,9 @@ FileRead(File file, void *buffer, size_t amount, off_t offset,
 	Assert(FileIsValid(file));
 	vfdP = &VfdCache[file];
 
-	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %zu %p",
+	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %zu %p  iostack=%p",
 			   file, VfdCache[file].fileName,
-			   (int64) offset,
-			   amount, buffer));
+			   (int64) offset, amount, buffer, vfdP->iostack));
 
 	if (vfdP->iostack != NULL)
 		return IoStackRead(vfdP->iostack, buffer, amount, offset, wait_event_info);
@@ -2126,10 +2128,10 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 	Assert(FileIsValid(file));
 	vfdP = &VfdCache[file];
 
-	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %zu %p",
+	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %zu %p  iostack=%p",
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
-			   amount, buffer));
+			   amount, buffer, vfdP->iostack));
 
 	if (vfdP->iostack != NULL)
 		return IoStackWrite(vfdP->iostack, buffer, amount, offset, wait_event_info);
@@ -3836,7 +3838,7 @@ static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode
 		file = -1;
 	}
 
-	debug("PathNameOpenIoStack(done): file=%d filenane=%s", file, fileName);
+	debug("PathNameOpenIoStack(done): file=%d filenane=%s  iostack=%p", file, fileName, vfdP->iostack);
     return file;
 }
 
@@ -3846,7 +3848,7 @@ static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode
  */
 static void FileCloseIoStack(File file)
 {
-	debug("FileCloseIoStack: file=%d", file);
+	debug("FileCloseIoStack: file=%d  iostack=%p", file, VfdCache[file].iostack);
 	if (file == -1) return;
 
 	// TODO assert file is valid

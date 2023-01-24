@@ -3687,8 +3687,7 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 			 * open segment, create it if necessary. Note this file must survive
 			 * past the end-of-transaction.
 			 */
-			file.vfd = PathNameOpenFile(path, O_CREAT | O_WRONLY | PG_BINARY | PG_ENCRYPT);
-
+			file.vfd = PathNameOpenFile(path, O_CREAT | O_WRONLY | PG_BINARY | PG_ENCRYPT );
 			if (file.vfd < 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),

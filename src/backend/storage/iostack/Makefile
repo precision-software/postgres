@@ -1,10 +1,10 @@
 #-------------------------------------------------------------------------
 #
 # Makefile--
-#    Makefile for storage/file
+#    Makefile for storage/iostack
 #
 # IDENTIFICATION
-#    src/backend/storage/file/Makefile
+#    src/backend/storage/iostack/Makefile
 #
 #-------------------------------------------------------------------------
 
@@ -14,7 +14,7 @@ include $(top_builddir)/src/Makefile.global
 
 # Make this conditional on iostack option
 OBJS = \
-	iostack_top.c \
-	vfd_bottom.c
+	iostack_top.o \
+	vfd_bottom.o
 
 include $(top_srcdir)/src/backend/common.mk
