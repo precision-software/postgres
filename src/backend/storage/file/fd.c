@@ -1744,7 +1744,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 	 * temp file that can be reused.
 	 */
 	file = PathNameOpenFile(tempfilepath,
-							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
+							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (file <= 0)
 	{
 		/*
@@ -1758,7 +1758,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 		(void) MakePGDirectory(tempdirpath);
 
 		file = PathNameOpenFile(tempfilepath,
-								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
+								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 		if (file <= 0 && rejectError)
 			elog(ERROR, "could not create temporary file \"%s\": %m",
 				 tempfilepath);
