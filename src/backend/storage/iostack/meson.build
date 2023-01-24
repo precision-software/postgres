@@ -8,7 +8,7 @@
   )
 
 
-  include_directories( '/usr/local/include', '/opt/local/include', '/usr/local/include/iostack')
+  include_directories( '/usr/local/include', '/opt/local/include')
 
 
 

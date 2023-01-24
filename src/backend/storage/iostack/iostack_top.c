@@ -9,36 +9,43 @@
 #include "storage/fd.h"
 #include "storage/pg_iostack.h"
 
-/* TODO: configure system include directories */
-#include "/usr/local/include/iostack/iostack.h"
-#include "/usr/local/include/iostack/file/fileSystemBottom.h"
-#include "/usr/local/include/iostack/encrypt/libcrypto/aead.h"
-#include "/usr/local/include/iostack/file/buffered.h"
-
-
-/* A prototype file pipeline to use when opening files */
-void *IoStackPrototype = NULL;
-
 /*
- * Our current wait timer.
- * When using VFDs, the Read/Write/Sync code sets the wait timer,
- * so we need to pass the desired wait timer to them.
- * But if not using VFDs, the wait timers would not be set.
- * The compromise is to set it at both the high level code
- * and the low level vfd routines.
- * This global variable tells the lower routines which wait event to use */
+ * Our current wait timer, passed as a global to vfd_bottom.
+ *
+ * This global variable tells the lower routines which wait event to use.
+ * TODO: Passing a global is a bit of a Kludge ...
+ */
 uint32 IoStackWaitEvent = 0;
 
 
 int checkForError(int ret, Error error);
 
+
+/* These are the pre-configured I/O stacks */
+static IoStack *encryptStack = NULL;  /* Encryption only */
+static IoStack *ecompressStack = NULL; /* Encryption plus compression */
+
 /*
  * Open an I/O stack for the given file
  */
-IoStack *IoStackOpen(IoStack *prototype, const char *fileName, int fileFlags, mode_t fileMode)
+IoStack *IoStackOpen(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	Error error = errorOK;
 	debug("IoStackOpen: fileName=%s  fileFlags=0x%x  fileMode=0x%x\n", fileName, fileFlags, fileMode);
+
+	/* Verify I/O stacks have been configured */
+	if (encryptStack == NULL || ecompressStack == NULL)
+		ioStackError(&error, "Opening a file before I/O stacks are configured");
+
+	/* Based on the flags, choose which I/O stack to use */
+	IoStack *prototype = NULL;
+	if ( (fileFlags & PG_IOSTACK) == PG_ENCRYPT)
+		prototype = encryptStack;
+	else if ((fileFlags & PG_IOSTACK) == PG_ECOMPRESS)
+		prototype = ecompressStack;
+	else
+		ioStackError(&error, "Unexpected flags for opening an I/O stack");
+
 
 	/* Clone the prototype and open it */
 	IoStack *iostack = fileClone(prototype);
@@ -172,7 +179,7 @@ int checkForError(int ret, Error error)
 
 	/* Other errors, raise an exception */
 	else if (isError(error))
-		ereport(ERROR, errmsg("IoStack error: code=%d  msg=%s", error.code, error.msg));
+		ereport(FATAL, errmsg("IoStack error: code=%d  msg=%s", error.code, error.msg));
 
 	/* Otherwise, everything is just fine. */
 	else
@@ -180,11 +187,19 @@ int checkForError(int ret, Error error)
 }
 
 
-void IoStackSetup(void)
+void IoStackSetup(Byte *key, size_t keySize)
 {
-	IoStackPrototype =
+	debug("IoStackSetup: key=%32s", key);
+	encryptStack =
 		ioStackNew(
 			bufferedNew(1024,
-						aeadFilterNew("AES-256-GCM", 1024, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32,
-									  vfdBottomNew())));
+				aeadFilterNew("AES-256-GCM", 1024, key, keySize,
+					vfdBottomNew())));
+	ecompressStack =
+		ioStackNew(
+			bufferedNew(1024,
+				lz4CompressNew(1024,
+					bufferedNew(1024*1024,
+						aeadFilterNew("AES-256-GCM", 1024, key, keySize,
+							vfdBottomNew())))));
 }

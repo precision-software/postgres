@@ -7,10 +7,9 @@
 #include <unistd.h>
 #include <stdbool.h>
 
+#include "/usr/local/include/iostack/framework/filter.h"  // <iostack/framework/filter.h>
+
 #include "postgres.h"
-#include "/usr/local/include/iostack/iostack.h"
-#include "/usr/local/include/iostack/iostack_error.h"
-#include "/usr/local/include/iostack/common/filter.h"
 #include "storage/pg_iostack.h"
 #include "storage/fd.h"
 

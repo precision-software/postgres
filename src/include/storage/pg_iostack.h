@@ -6,6 +6,7 @@
 #define STORAGE_IOSTACK_H
 #include <errno.h>
 
+#define DEBUG
 #ifdef DEBUG
 
 #define debug(...) do { \
@@ -18,15 +19,18 @@
 #define debug(...) ((void)0)
 #endif
 
-/* Open flag to request opening with IO Stacks */
-#define PG_IOSTACK (0x2000000)
 
 /*
  * If we are NOT using I/O Stacks, then dummy out the procedures which use them
  */
 #ifdef NOT_NOW
+
+#define PG_IOSTACK 0
+#define PG_ENCRYPT 0
+#define PG_ECOMPRESS 0
+
 #define noop  ((void)0)
-#define IoStackPrototype NULL
+#define IoStackenabled false
 #define IoStackOpen(proto, fileName, fileFlags, fileMode) noop
 #define IoStackClose(file) noop
 #define IoStackPrefetch(file, offset, amount,wait_event_info) noop
@@ -43,20 +47,23 @@
  */
 #else
 #include <sys/types.h>
-#include "/usr/local/include/iostack/iostack.h"  /* <iostack/iostack.h> */
+#include "/usr/local/include/iostack/iostack.h" // <iostack/iostack.h>
 #include "storage/fd.h"
 #include "c.h"
 
-/* Contains a prototype FilePipeline for opening new files */
-void IoStackSetup(void);
-extern void *IoStackPrototype;
+/* Open flag to request opening with IO Stacks */
+/* TODO: static asssert to verify no conflict with other flags (or go to int64 flags) */
+#define PG_IOSTACK 		(0x3000000)		/* Bit mask to extract type of I/O stack */
+#define PG_ENCRYPT		(0x1000000)     /* Encryption. Supports streaming and random reads/writes */
+#define PG_ECOMPRESS	(0x2000000)		/* Encryption and compression. No random writes */
 
-typedef struct VfdBottom VfdBottom;
-VfdBottom *vfdBottomNew(void);
+
+/* Initialize the I/O stacks */
+void IoStackSetup(Byte *key, size_t keySize);
 
 
 /* VFD equivalent routines which invoke IoStacks instead of VFDs */
-IoStack *IoStackOpen(IoStack *proto, const char *fileName, int fileFlags, mode_t fileMode);
+IoStack *IoStackOpen(const char *fileName, int fileFlags, mode_t fileMode);
 int IoStackClose(IoStack *iostack, char *deleteName);
 int IoStackPrefetch(IoStack *iostack, off_t offset, off_t amount, uint32 wait_event_info);
 void IoStackWriteback(IoStack *iostack, off_t offset, off_t nbytes, uint32 wait_event_info);
@@ -65,6 +72,9 @@ int IoStackWrite(IoStack *iostack, const void *buffer, size_t amount, off_t offs
 int IoStackSync(IoStack *iostack, uint32 wait_event_info);
 off_t IoStackSize(IoStack *iostack);
 int IoStackTruncate(IoStack *iostack, off_t offset, uint32 wait_event_info);
+
+typedef struct VfdBottom VfdBottom;
+VfdBottom *vfdBottomNew(void);
 
 
 

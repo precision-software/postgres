@@ -828,8 +828,8 @@ InitFileAccess(void)
 
 	SizeVfdCache = 1;
 
-	/* Initialize I/O Stacks to be used with Vfds */
-	IoStackSetup();
+	/* Initialize I/O Stacks to be used with Vfds. Temporarily, use a dummy key. */
+	IoStackSetup((Byte *)"12345678901234567890123456789012", 32);
 }
 
 /*
@@ -1516,8 +1516,8 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	DO_DB(elog(LOG, "PathNameOpenFilePerm: %s %x %o",
 			   fileName, fileFlags, fileMode));
 
-	/* Open as a file pipeline if a prototype is set and the flags request it */
-	if ((fileFlags & PG_IOSTACK) && IoStackPrototype != NULL)
+	/* Open the file as an IOSTACK the flags request it */
+	if ( (fileFlags & PG_IOSTACK) != 0)
 		return PathNameOpenIoStack(fileName, fileFlags, fileMode);
 
 	/*
@@ -1741,7 +1741,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 	 * temp file that can be reused.
 	 */
 	file = PathNameOpenFile(tempfilepath,
-							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
+							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (file <= 0)
 	{
 		/*
@@ -1755,7 +1755,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 		(void) MakePGDirectory(tempdirpath);
 
 		file = PathNameOpenFile(tempfilepath,
-								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
+								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 		if (file <= 0 && rejectError)
 			elog(ERROR, "could not create temporary file \"%s\": %m",
 				 tempfilepath);
@@ -1790,7 +1790,7 @@ PathNameCreateTemporaryFile(const char *path, bool error_on_failure)
 	 * Open the file.  Note: we don't use O_EXCL, in case there is an orphaned
 	 * temp file that can be reused.
 	 */
-	file = PathNameOpenFile(path, O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
+	file = PathNameOpenFile(path, O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (file <= 0)
 	{
 		if (error_on_failure)
@@ -1826,7 +1826,7 @@ PathNameOpenTemporaryFile(const char *path, int mode)
 
 	ResourceOwnerEnlargeFiles(CurrentResourceOwner);
 
-	file = PathNameOpenFile(path, mode | PG_BINARY);
+	file = PathNameOpenFile(path, mode | PG_BINARY | PG_ENCRYPT);
 
 	/* If no such file, then we don't raise an error. */
 	if (file <= 0 && errno != ENOENT)
@@ -3785,6 +3785,11 @@ data_sync_elevel(int elevel)
 
 
 /*
+ * TODO: Description of how I/O stacks fit in and why this code is in fd.c
+ */
+
+
+/*
  * Open a vfd using an I/O Stack. Local to fd.c since it accesses Vfds.
  */
 static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode)
@@ -3792,6 +3797,7 @@ static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode
 	char	   *fnamecopy;
 	File		file;
 	Vfd		   *vfdP;
+
 
 	/*
 	 * We need a malloc'd copy of the file name; fail cleanly if no room.
@@ -3817,8 +3823,8 @@ static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode
 	debug("PathNameOpenIoStack: fileName=%s  fileFlags=0x%x  fileMode=x%x", fileName, fileFlags, fileMode);
 
 
-	/* Open the I/O Stack */
-	vfdP->iostack = IoStackOpen(IoStackPrototype, fileName, fileFlags, fileMode);
+	/* Open the I/O Stack  TODO: change order in case the open routine throws an error */
+     vfdP->iostack = IoStackOpen(fileName, fileFlags, fileMode);
 
 	/* clean up on error */
 	if (vfdP->iostack == NULL)
@@ -3849,7 +3855,7 @@ static void FileCloseIoStack(File file)
 	// TODO: unregister and free the vfd first, so we don't come back here if error on close.
 
 	/* Remember the file name if deleting. Clear the flag so we can only delete it once */
-	char *deleteName = (vfdP->fdstate & FD_DELETE_AT_CLOSE)? vfdP->fileName : NULL;
+	char *deleteName = (vfdP->fdstate & FD_DELETE_AT_CLOSE) ? vfdP->fileName : NULL;
 	vfdP->fdstate &= ~FD_DELETE_AT_CLOSE;
 
 	/* Close the file, deleting it if requested. */
