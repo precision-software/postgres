@@ -163,7 +163,6 @@ bool		data_sync_retry = false;
 int			recovery_init_sync_method = RECOVERY_INIT_SYNC_METHOD_FSYNC;
 
 /* Debugging.... */
-
 #ifdef FDDEBUG
 #define DO_DB(A) \
 	do { \
@@ -201,6 +200,7 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
+	off_t 		offset;
 } Vfd;
 
 /*
@@ -1544,6 +1544,7 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	vfdP->fileSize = 0;
 	vfdP->fdstate = 0x0;
 	vfdP->resowner = NULL;
+	vfdP->offset = (fileFlags & O_APPEND) == 0? 0: FileSize(file);
 
 	Insert(file);
 
@@ -2083,6 +2084,9 @@ retry:
 			goto retry;
 	}
 
+	/* Update the file position */
+	vfdP->offset = offset + returnCode;
+
 	return returnCode;
 }
 
@@ -2143,18 +2147,16 @@ retry:
 
 	if (returnCode >= 0)
 	{
+		/* Update the new file position */
+		vfdP->offset = offset + amount;
+
 		/*
 		 * Maintain fileSize and temporary_files_size if it's a temp file.
 		 */
-		if (vfdP->fdstate & FD_TEMP_FILE_LIMIT)
+		if (vfdP->fdstate & FD_TEMP_FILE_LIMIT && vfdP->offset > vfdP->fileSize)
 		{
-			off_t		past_write = offset + amount;
-
-			if (past_write > vfdP->fileSize)
-			{
-				temporary_files_size += past_write - vfdP->fileSize;
-				vfdP->fileSize = past_write;
-			}
+			temporary_files_size += vfdP->offset - vfdP->fileSize;
+			vfdP->fileSize = vfdP->offset;
 		}
 	}
 	else
@@ -2183,6 +2185,64 @@ retry:
 
 	return returnCode;
 }
+
+/*
+ * Read sequentially from the file.
+ */
+int
+FileReadSeq(File file, void *buffer, size_t amount,
+			uint32 wait_event_info)
+{
+	Vfd *vfdP;
+	Assert(FileIsValid(file));
+	vfdP = &VfdCache[file];
+
+	DO_DB(elog(LOG, "FileReadSeq: %d (%s) " INT64_FORMAT " %d %p",
+		file, vfdP->fileName,
+		(int64) vfdP->offset,
+		amount, buffer));
+
+	return FileRead(file, buffer, amount, vfdP->offset, wait_event_info);
+}
+
+/*
+ * Write sequentially to the file.
+ */
+int
+FileWriteSeq(File file, const void *buffer, size_t amount,
+			uint32 wait_event_info)
+{
+	Vfd *vfdP;
+	Assert(FileIsValid(file));
+	vfdP = &VfdCache[file];
+
+	DO_DB(elog(LOG, "FileWriteSeq: %d (%s) " INT64_FORMAT " %d %p",
+		file, vfdP->fileName,
+		(int64) vfdP->offset,
+		amount, buffer));
+
+	return FileWrite(file, buffer, amount, vfdP->offset, wait_event_info);
+}
+
+/*
+ * Seek to a random position within the file.
+ * TODO: Add a "seek to end of file" value.
+ */
+off_t
+FileSeek(File file, off_t offset)
+{
+	Vfd *vfdP;
+	Assert(FileIsValid(file));
+	vfdP = &VfdCache[file];
+
+	DO_DB(elog(LOG, "FileSeek: %d (%s) " INT64_FORMAT ,
+		file, vfdP->fileName,
+		(int64) vfdP->offset));
+
+	vfdP->offset = offset;
+	return offset;
+}
+
 
 int
 FileSync(File file, uint32 wait_event_info)
