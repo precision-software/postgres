@@ -1793,7 +1793,7 @@ PathNameCreateTemporaryFile(const char *path, bool error_on_failure)
 	 * Open the file.  Note: we don't use O_EXCL, in case there is an orphaned
 	 * temp file that can be reused.
 	 */
-	file = PathNameOpenFile(path, O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
+	file = PathNameOpenFile(path, O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (file <= 0)
 	{
 		if (error_on_failure)
@@ -1829,7 +1829,7 @@ PathNameOpenTemporaryFile(const char *path, int mode)
 
 	ResourceOwnerEnlargeFiles(CurrentResourceOwner);
 
-	file = PathNameOpenFile(path, mode | PG_BINARY );
+	file = PathNameOpenFile(path, mode | PG_BINARY | PG_ENCRYPT);
 
 	/* If no such file, then we don't raise an error. */
 	if (file <= 0 && errno != ENOENT)
