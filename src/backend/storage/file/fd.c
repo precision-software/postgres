@@ -2312,6 +2312,26 @@ FileTruncate(File file, off_t offset, uint32 wait_event_info)
 	return returnCode;
 }
 
+int
+PathNameFileSync(const char *pathName, uint32 wait_event_info)
+{
+	/* Open the file, returning immediately if unable */
+	File file = PathNameOpenFile(pathName, O_RDWR | PG_BINARY);
+	if (file < 0)
+		return file;
+
+	/* Sync the now opened file, remembering if error occurred. */
+	int ret = FileSync(file, wait_event_info);
+	int save_errno = errno;
+
+	/* Close the file. */
+	FileClose(file);
+
+	/* Done, remembering the sync error */
+	errno = save_errno;
+	return ret;
+}
+
 /*
  * Return the pathname associated with an open file.
  *
