@@ -116,6 +116,7 @@ extern mode_t FileGetRawMode(File file);
 extern int FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info);
 extern int FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info);
 extern off_t FileSeek(File file, off_t offset);
+extern int PathNameFileSync(const char *path, uint32 wait_event_info);
 
 /* Operations used for sharing named temporary files */
 extern File PathNameCreateTemporaryFile(const char *path, bool error_on_failure);
