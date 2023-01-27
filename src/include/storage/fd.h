@@ -44,6 +44,7 @@
 #define FD_H
 
 #include <dirent.h>
+#include "c.h"
 
 typedef enum RecoveryInitSyncMethod
 {
@@ -113,10 +114,22 @@ extern char *FilePathName(File file);
 extern int	FileGetRawDesc(File file);
 extern int	FileGetRawFlags(File file);
 extern mode_t FileGetRawMode(File file);
+extern int PathNameFileSync(const char *path, uint32 wait_event_info);
+
+/* Operations on virtual files -- Sequential I/O */
 extern int FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info);
 extern int FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info);
+extern off_t FileTell(File file);
 extern off_t FileSeek(File file, off_t offset);
-extern int PathNameFileSync(const char *path, uint32 wait_event_info);
+
+/* Operations on virtual files --- equivalent to fread/fwrite */
+extern int FileGetc(File file);
+extern int FilePutc(int c, File file);
+extern void FileClearError(File file);
+extern int FileError(File file);
+extern int FileEof(File file);
+extern int FilePrintf(File file, const char *format, ...);
+extern int FileScanf(File file, const char *format, ...);
 
 /* Operations used for sharing named temporary files */
 extern File PathNameCreateTemporaryFile(const char *path, bool error_on_failure);
