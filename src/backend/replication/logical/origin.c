@@ -570,7 +570,7 @@ CheckPointReplicationOrigin(void)
 {
 	const char *tmppath = "pg_logical/replorigin_checkpoint.tmp";
 	const char *path = "pg_logical/replorigin_checkpoint";
-	int			tmpfd;
+	int			file;
 	int			i;
 	uint32		magic = REPLICATION_STATE_MAGIC;
 	pg_crc32c	crc;
@@ -591,9 +591,9 @@ CheckPointReplicationOrigin(void)
 	 * no other backend can perform this at the same time; only one checkpoint
 	 * can happen at a time.
 	 */
-	tmpfd = OpenTransientFile(tmppath,
+	file = PathNameOpenTemporaryFile(tmppath,
 							  O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
-	if (tmpfd < 0)
+	if (file < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not create file \"%s\": %m",
@@ -601,16 +601,12 @@ CheckPointReplicationOrigin(void)
 
 	/* write magic */
 	errno = 0;
-	if ((write(tmpfd, &magic, sizeof(magic))) != sizeof(magic))
-	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
+	if ((FileWriteSeq(file, &magic, sizeof(magic), WAIT_EVENT_NONE)) != sizeof(magic))
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m",
 						tmppath)));
-	}
+	
 	COMP_CRC32C(crc, &magic, sizeof(magic));
 
 	/* prevent concurrent creations/drops */
@@ -640,19 +636,13 @@ CheckPointReplicationOrigin(void)
 
 		/* make sure we only write out a commit that's persistent */
 		XLogFlush(local_lsn);
-
-		errno = 0;
-		if ((write(tmpfd, &disk_state, sizeof(disk_state))) !=
+		
+		if ((FileWriteSeq(file, &disk_state, sizeof(disk_state), WAIT_EVENT_NONE)) !=
 			sizeof(disk_state))
-		{
-			/* if write didn't set errno, assume problem is no disk space */
-			if (errno == 0)
-				errno = ENOSPC;
 			ereport(PANIC,
 					(errcode_for_file_access(),
 					 errmsg("could not write to file \"%s\": %m",
 							tmppath)));
-		}
 
 		COMP_CRC32C(crc, &disk_state, sizeof(disk_state));
 	}
@@ -661,23 +651,13 @@ CheckPointReplicationOrigin(void)
 
 	/* write out the CRC */
 	FIN_CRC32C(crc);
-	errno = 0;
-	if ((write(tmpfd, &crc, sizeof(crc))) != sizeof(crc))
-	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
+	if ((FileWriteSeq(file, &crc, sizeof(crc), WAIT_EVENT_NONE)) != sizeof(crc))
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m",
 						tmppath)));
-	}
 
-	if (CloseTransientFile(tmpfd) != 0)
-		ereport(PANIC,
-				(errcode_for_file_access(),
-				 errmsg("could not close file \"%s\": %m",
-						tmppath)));
+	FileClose(file);
 
 	/* fsync, rename to permanent file, fsync file and directory */
 	durable_rename(tmppath, path, PANIC);
@@ -695,7 +675,7 @@ void
 StartupReplicationOrigin(void)
 {
 	const char *path = "pg_logical/replorigin_checkpoint";
-	int			fd;
+	File		file;
 	int			readBytes;
 	uint32		magic = REPLICATION_STATE_MAGIC;
 	int			last_state = 0;
@@ -717,22 +697,22 @@ StartupReplicationOrigin(void)
 
 	elog(DEBUG2, "starting up replication origin progress state");
 
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	file = PathNameOpenTemporaryFile(path, O_RDONLY | PG_BINARY);
 
 	/*
 	 * might have had max_replication_slots == 0 last run, or we just brought
 	 * up a standby.
 	 */
-	if (fd < 0 && errno == ENOENT)
+	if (file < 0 && errno == ENOENT)
 		return;
-	else if (fd < 0)
+	else if (file < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m",
 						path)));
 
 	/* verify magic, that is written even if nothing was active */
-	readBytes = read(fd, &magic, sizeof(magic));
+	readBytes = FileReadSeq(file, &magic, sizeof(magic), WAIT_EVENT_NONE);
 	if (readBytes != sizeof(magic))
 	{
 		if (readBytes < 0)
@@ -760,7 +740,7 @@ StartupReplicationOrigin(void)
 	{
 		ReplicationStateOnDisk disk_state;
 
-		readBytes = read(fd, &disk_state, sizeof(disk_state));
+		readBytes = FileReadSeq(file, &disk_state, sizeof(disk_state), WAIT_EVENT_NONE);
 
 		/* no further data */
 		if (readBytes == sizeof(crc))
@@ -812,11 +792,7 @@ StartupReplicationOrigin(void)
 				 errmsg("replication slot checkpoint has wrong checksum %u, expected %u",
 						crc, file_crc)));
 
-	if (CloseTransientFile(fd) != 0)
-		ereport(PANIC,
-				(errcode_for_file_access(),
-				 errmsg("could not close file \"%s\": %m",
-						path)));
+	FileClose(file);
 }
 
 void
