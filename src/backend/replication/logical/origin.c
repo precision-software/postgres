@@ -570,7 +570,7 @@ CheckPointReplicationOrigin(void)
 {
 	const char *tmppath = "pg_logical/replorigin_checkpoint.tmp";
 	const char *path = "pg_logical/replorigin_checkpoint";
-	int			file;
+	File		file;
 	int			i;
 	uint32		magic = REPLICATION_STATE_MAGIC;
 	pg_crc32c	crc;
