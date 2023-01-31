@@ -163,6 +163,7 @@ bool		data_sync_retry = false;
 int			recovery_init_sync_method = RECOVERY_INIT_SYNC_METHOD_FSYNC;
 
 /* Debugging.... */
+#define FDDEBUG
 #ifdef FDDEBUG
 #define DO_DB(A) \
 	do { \
@@ -2119,7 +2120,7 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 	int			returnCode;
 	Vfd		   *vfdP = getVfd(file);
 
-	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %d %p",
+	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
@@ -3870,14 +3871,36 @@ void FileClearError(File file)
 	vfdP->errNo = 0;
 }
 
+/*
+ * A temporary equivalent of fprintf.
+ * This version limits text to what fits in a local buffer.
+ * Ultimately, we need to update the internal snprintf.c (dopr) to spill
+ * to temporary files as well as to FILE*.
+ */
 int FilePrintf(File file, const char *format, ...)
 {
-	Assert(false); /* Not implemented */
-	return -1;
+	va_list args;
+	char buffer[4*1024]; /* arbitrary size, big enough? */
+	int size;
+
+	va_start(args, format);
+	size = vsnprintf(buffer, sizeof(buffer), format, args);
+	va_end(args);
+
+	if (size < 0 || size >= sizeof(buffer))
+		ereport(ERROR,
+			errmsg("FilePrintf buffer overflow - %d characters exceeded %lu buffer", size, sizeof(buffer)));
+
+	return FileWriteSeq(file, buffer, Min(size, sizeof(buffer)-1), WAIT_EVENT_NONE);
 }
 
  int FileScanf(File file, const char *format, ...)
  {
 	Assert(false); /* Not implemented */
 	return -1;
+ }
+
+ int FilePuts(File file, const char *string)
+ {
+	return FileWriteSeq(file, string, strlen(string), WAIT_EVENT_NONE);
  }
