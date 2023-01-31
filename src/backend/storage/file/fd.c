@@ -163,7 +163,6 @@ bool		data_sync_retry = false;
 int			recovery_init_sync_method = RECOVERY_INIT_SYNC_METHOD_FSYNC;
 
 /* Debugging.... */
-#define FDDEBUG
 #ifdef FDDEBUG
 #define DO_DB(A) \
 	do { \
