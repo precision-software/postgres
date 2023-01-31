@@ -102,7 +102,7 @@ extern PGDLLIMPORT int max_safe_fds;
 extern File PathNameOpenFile(const char *fileName, int fileFlags);
 extern File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
 extern File OpenTemporaryFile(bool interXact);
-extern void FileClose(File file);
+extern int FileClose(File file);
 extern int	FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info);
 extern int	FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
 extern int	FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);

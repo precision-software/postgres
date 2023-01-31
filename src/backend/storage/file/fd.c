@@ -1887,19 +1887,15 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 }
 
 /*
- * close a file when done with it
+ * close a file when done with it. Return 0 if close was successfule.
  */
-void
+int
 FileClose(File file)
 {
-	Vfd		   *vfdP;
+	Vfd		   *vfdP = getVfd(file);
+	int retval = 0;
 
-	Assert(FileIsValid(file));
-
-	DO_DB(elog(LOG, "FileClose: %d (%s)",
-			   file, VfdCache[file].fileName));
-
-	vfdP = &VfdCache[file];
+	DO_DB(elog(LOG, "FileClose: %d (%s)", file, vfdP->fileName));
 
 	if (!FileIsNotOpen(file))
 	{
@@ -1919,6 +1915,8 @@ FileClose(File file)
 			 */
 			elog(vfdP->fdstate & FD_TEMP_FILE_LIMIT ? LOG : data_sync_elevel(LOG),
 				 "could not close file \"%s\": %m", vfdP->fileName);
+
+			retval = 1;
 		}
 
 		--nfile;
@@ -1990,6 +1988,8 @@ FileClose(File file)
 	 */
 	FreeVfd(file);
 
+	/* Return 0 if successful, 1 if problems closing file. */
+    return retval;
 }
 
 /*
