@@ -130,6 +130,7 @@ extern int FileError(File file);
 extern int FileEof(File file);
 extern int FilePrintf(File file, const char *format, ...);
 extern int FileScanf(File file, const char *format, ...);
+extern int FilePuts(File, const char *string);
 
 /* Operations used for sharing named temporary files */
 extern File PathNameCreateTemporaryFile(const char *path, bool error_on_failure);
