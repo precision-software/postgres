@@ -57,13 +57,15 @@
 #define PG_ENCRYPT		(0x1000000)     /* Encryption. Supports streaming and random reads/writes */
 #define PG_ECOMPRESS	(0x2000000)		/* Encryption and compression. No random writes */
 
+#define PG_NOSTACK      (0x4000000)     /* Prevents I/O stacks from being used */
 
 /* Initialize the I/O stacks */
 void IoStackSetup(void);
+IoStack *pickIoStack(const char *path);
 
 
 /* VFD equivalent routines which invoke IoStacks instead of VFDs */
-IoStack *IoStackOpen(const char *fileName, int fileFlags, mode_t fileMode);
+IoStack *IoStackOpen(IoStack *prototype, const char *fileName, int fileFlags, mode_t fileMode);
 int IoStackClose(IoStack *iostack, char *deleteName);
 int IoStackPrefetch(IoStack *iostack, off_t offset, off_t amount, uint32 wait_event_info);
 void IoStackWriteback(IoStack *iostack, off_t offset, off_t nbytes, uint32 wait_event_info);

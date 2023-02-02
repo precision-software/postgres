@@ -351,7 +351,7 @@ static void unlink_if_exists_fname(const char *fname, bool isdir, int elevel);
 
 static int	fsync_parent_path(const char *fname, int elevel);
 
-static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode);
+static int PathNameOpenIoStack(IoStack *prototype, const char *fileName, int fileFlags, int fileMode);
 static void FileCloseIoStack(File file);
 
 
@@ -1520,8 +1520,9 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 			   fileName, fileFlags, fileMode));
 
 	/* Open the file as an IOSTACK the flags request it */
-	if ( (fileFlags & PG_IOSTACK) != 0)
-		return PathNameOpenIoStack(fileName, fileFlags, fileMode);
+	IoStack *iostack = pickIoStack(fileName);
+	if ((fileFlags & PG_NOSTACK) == 0 && iostack != NULL)
+		return PathNameOpenIoStack(iostack, fileName, fileFlags, fileMode);
 
 	/*
 	 * We need a malloc'd copy of the file name; fail cleanly if no room.
@@ -3794,7 +3795,7 @@ data_sync_elevel(int elevel)
 /*
  * Open a vfd using an I/O Stack. Local to fd.c since it accesses Vfds.
  */
-static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode)
+static int PathNameOpenIoStack(IoStack *prototype, const char *fileName, int fileFlags, int fileMode)
 {
 	char	   *fnamecopy;
 	File		file;
@@ -3826,7 +3827,7 @@ static int PathNameOpenIoStack(const char *fileName, int fileFlags, int fileMode
 
 
 	/* Open the I/O Stack  TODO: change order in case the open routine throws an error */
-     vfdP->iostack = IoStackOpen(fileName, fileFlags, fileMode);
+     vfdP->iostack = IoStackOpen(prototype, fileName, fileFlags, fileMode);
 
 	/* clean up on error */
 	if (vfdP->iostack == NULL)

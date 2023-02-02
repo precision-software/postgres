@@ -22,19 +22,13 @@ uint32 IoStackWaitEvent = 0;
 int checkForError(int ret, Error error);
 
 
-
-static IoStack *pickStack(const char *path);
-
 /*
  * Open an I/O stack for the given file
  */
-IoStack *IoStackOpen(const char *fileName, int fileFlags, mode_t fileMode)
+IoStack *IoStackOpen(IoStack *prototype, const char *fileName, int fileFlags, mode_t fileMode)
 {
 	Error error = errorOK;
 	debug("IoStackOpen: fileName=%s  fileFlags=0x%x  fileMode=0x%x\n", fileName, fileFlags, fileMode);
-
-	/* Based on the pathname, choose which I/O stack to use */
-	IoStack *prototype = pickStack(fileName);
 
 	/* Clone the prototype and open it */
 	IoStack *iostack = fileClone(prototype);
@@ -185,18 +179,18 @@ IoStack *noStack;
 
 static struct {const char *pattern; IoStack **iostack;} configs[] =
 {
-	{"pg_logical/*", &sessionStack},
+	{"pg_logical/**", &sessionStack},
 	{"PGVERSION", &noStack},
-	{"pg_replslot/*", &sessionStack},
-	{"*/pg_filenode.map", &sessionStack},
-	{"pg_wal/*", &noStack},
+	{"pg_replslot/*/xid*.spill", &sessionStack},
+	//{"*/pg_filenode.map", &sessionStack},
+	//{"pg_wal/*", &noStack},
 };
 
 #define countof(array) (sizeof(array)/sizeof(*array))
 /*
  * Select which I/O stack to use for the given file path.
  */
-static IoStack *pickStack(const char *path)
+IoStack *pickIoStack(const char *path)
 {
     int idx;
     for (idx = 0;  idx < countof(configs); idx++)
@@ -204,6 +198,7 @@ static IoStack *pickStack(const char *path)
 			break;
 
 	/* Return the iostack if matched, noStack if not matched */
+	debug("pickStack: path=%s  idx=%d", path, idx);
 	return idx < countof(configs)? *configs[idx].iostack: noStack;
 }
 

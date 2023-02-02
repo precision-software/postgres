@@ -37,7 +37,7 @@ struct VfdBottom {
  static
  void vfdOpen(VfdBottom *this, char *path, int oflags, int perm, Error *error)
 {
-	 debug("vfdOpen: path=%s oflags=0x%x  perm=0x%x erroor=%s\n", path, oflags, perm, error->msg);
+	 debug("vfdOpen: path=%s oflags=0x%x  perm=0x%x error=%s\n", path, oflags, perm, error->msg);
 
 	/* We are opening real vfds, not I/O Stacks */
 	oflags &= ~PG_IOSTACK;
@@ -47,7 +47,7 @@ struct VfdBottom {
 		perm = 0666;
 
 	/* Open the file and check for errors. */
-	this->vfd = PathNameOpenFilePerm(path, oflags, perm);
+	this->vfd = PathNameOpenFilePerm(path, oflags | PG_NOSTACK, perm);  /* set flag to supress IoStacks */
 	if (this->vfd == -1)
 		setSystemError(error);
 
