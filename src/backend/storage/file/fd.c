@@ -829,7 +829,7 @@ InitFileAccess(void)
 	SizeVfdCache = 1;
 
 	/* Initialize I/O Stacks to be used with Vfds. Temporarily, use a dummy key. */
-	IoStackSetup((Byte *)"12345678901234567890123456789012", 32);
+	IoStackSetup();
 }
 
 /*

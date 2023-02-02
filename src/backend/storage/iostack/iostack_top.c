@@ -1,8 +1,9 @@
 //
-// Created by John Morris on 1/12/23.
+//
 //
 
 #include <fcntl.h>
+#include <fnmatch.h>
 
 #include "postgres.h"
 #include "pgstat.h"
@@ -21,9 +22,8 @@ uint32 IoStackWaitEvent = 0;
 int checkForError(int ret, Error error);
 
 
-/* These are the pre-configured I/O stacks */
-static IoStack *encryptStack = NULL;  /* Encryption only */
-static IoStack *ecompressStack = NULL; /* Encryption plus compression */
+
+static IoStack *pickStack(const char *path);
 
 /*
  * Open an I/O stack for the given file
@@ -33,19 +33,8 @@ IoStack *IoStackOpen(const char *fileName, int fileFlags, mode_t fileMode)
 	Error error = errorOK;
 	debug("IoStackOpen: fileName=%s  fileFlags=0x%x  fileMode=0x%x\n", fileName, fileFlags, fileMode);
 
-	/* Verify I/O stacks have been configured */
-	if (encryptStack == NULL || ecompressStack == NULL)
-		ioStackError(&error, "Opening a file before I/O stacks are configured");
-
-	/* Based on the flags, choose which I/O stack to use */
-	IoStack *prototype = NULL;
-	if ( (fileFlags & PG_IOSTACK) == PG_ENCRYPT)
-		prototype = encryptStack;
-	else if ((fileFlags & PG_IOSTACK) == PG_ECOMPRESS)
-		prototype = ecompressStack;
-	else
-		ioStackError(&error, "Unexpected flags for opening an I/O stack");
-
+	/* Based on the pathname, choose which I/O stack to use */
+	IoStack *prototype = pickStack(fileName);
 
 	/* Clone the prototype and open it */
 	IoStack *iostack = fileClone(prototype);
@@ -187,19 +176,61 @@ int checkForError(int ret, Error error)
 }
 
 
-void IoStackSetup(Byte *key, size_t keySize)
+/*
+ * Look at the file path and lookup the correspoinding I/O Stack.
+ */
+IoStack *sessionStack;
+IoStack *databaseStack;
+IoStack *noStack;
+
+static struct {const char *pattern; IoStack **iostack;} configs[] =
 {
-	debug("IoStackSetup: key=%32s", key);
-	encryptStack =
+	{"pg_logical/*", &sessionStack},
+	{"PGVERSION", &noStack},
+	{"pg_replslot/*", &sessionStack},
+	{"*/pg_filenode.map", &sessionStack},
+	{"pg_wal/*", &noStack},
+};
+
+#define countof(array) (sizeof(array)/sizeof(*array))
+/*
+ * Select which I/O stack to use for the given file path.
+ */
+static IoStack *pickStack(const char *path)
+{
+    int idx;
+    for (idx = 0;  idx < countof(configs); idx++)
+		if (fnmatch(configs[idx].pattern, path, FNM_PATHNAME) == 0)
+			break;
+
+	/* Return the iostack if matched, noStack if not matched */
+	return idx < countof(configs)? *configs[idx].iostack: noStack;
+}
+
+
+/*
+ * Initialize I/O stacks.
+ */
+void IoStackSetup()
+{
+    /* Get the keys for both permanent and temporary files TODO: */
+	Byte *permanentKey  = (Byte *)"12345678901234567890123456789012";
+	Byte *temporaryKey  = (Byte *)"abcdefghijklmnopqrstuvwxyzABCDEF";
+	size_t blockSize = 16*1024;
+
+	/* Encrypted with a key generated every session */
+	sessionStack =
 		ioStackNew(
-			bufferedNew(1024,
-				aeadFilterNew("AES-256-GCM", 1024, key, keySize,
-					vfdBottomNew())));
-	ecompressStack =
+			bufferedNew(blockSize,
+						aeadFilterNew("AES-256-GCM", blockSize, temporaryKey, 32,
+									  vfdBottomNew())));
+
+	/* Encrypted with the permanent database key so file is available in future */
+	databaseStack =
 		ioStackNew(
-			bufferedNew(1024,
-				lz4CompressNew(1024,
-					bufferedNew(1024*1024,
-						aeadFilterNew("AES-256-GCM", 1024, key, keySize,
-							vfdBottomNew())))));
+			bufferedNew(blockSize,
+						aeadFilterNew("AES-256-GCM", blockSize, permanentKey, 32,
+									  vfdBottomNew())));
+    /* No encryption or buffering */
+	noStack = NULL;
 }

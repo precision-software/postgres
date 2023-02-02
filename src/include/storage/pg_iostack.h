@@ -59,7 +59,7 @@
 
 
 /* Initialize the I/O stacks */
-void IoStackSetup(Byte *key, size_t keySize);
+void IoStackSetup(void);
 
 
 /* VFD equivalent routines which invoke IoStacks instead of VFDs */
