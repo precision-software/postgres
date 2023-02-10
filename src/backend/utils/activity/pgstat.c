@@ -1335,7 +1335,7 @@ pgstat_write_statsfile(void)
 	 * Write IO stats struct
 	 */
 	pgstat_build_snapshot_fixed(PGSTAT_KIND_IO);
-	write_chunk_s(fpout, &pgStatLocal.snapshot.io);
+	write_chunk_s(file, &pgStatLocal.snapshot.io);
 
 	/*
 	 * Write SLRU stats struct
@@ -1508,7 +1508,7 @@ pgstat_read_statsfile(void)
 	/*
 	 * Read IO stats struct
 	 */
-	if (!read_chunk_s(fpin, &shmem->io.stats))
+	if (!read_chunk_s(file, &shmem->io.stats))
 		goto error;
 
 	/*
