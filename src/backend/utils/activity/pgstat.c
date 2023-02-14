@@ -1403,9 +1403,7 @@ pgstat_write_statsfile(void)
 	 * after each individual fputc or fwrite (in write_chunk()) above.
 	 */
 	FilePutc('E', file);
-	FileClose(file);
-
-	if (FileError(file))  /* TODO: This requires cumulative error */
+	if (FileError(file) != 0 | FileClose(file) != 0) /* Note: both execute. TODO: FileClose returns cumulative error? */
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),

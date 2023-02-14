@@ -98,10 +98,9 @@ extern PGDLLIMPORT int max_safe_fds;
  * prototypes for functions in fd.c
  */
 
-/* Operations on virtual Files --- equivalent to Unix kernel file ops */
-extern File PathNameOpenFile(const char *fileName, int fileFlags);
-extern File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
-extern File OpenTemporaryFile(bool interXact);
+/* Operations on Virtual files */
+extern File FileOpen(const char *fileName, int fileFlags);
+extern File FileOpenPerm(const char*fileName, int fileFlags, mode_t fileMode);
 extern int FileClose(File file);
 extern int	FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info);
 extern int	FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
@@ -122,17 +121,25 @@ extern int FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wai
 extern off_t FileTell(File file);
 extern off_t FileSeek(File file, off_t offset);
 
-/* Operations on virtual files --- equivalent to fread/fwrite */
-extern int FileGetc(File file);
-extern int FilePutc(int c, File file);
-extern void FileClearError(File file);
-extern int FileError(File file);
-extern int FileEof(File file);
+/* Operations on virtual files --- similar to fread/fwrite */
 extern int FilePrintf(File file, const char *format, ...);
 extern int FileScanf(File file, const char *format, ...);
 extern int FilePuts(File, const char *string);
+extern int FileGetc(File file);
+extern int FilePutc(int c, File file);
+extern int FileEof(File file);
+extern void FileClearError(File file);
+extern int FileError(File file);
+extern char *FileErrorMsg(File file);
 
-/* Operations used for sharing named temporary files */
+/* Deprecated methods to open a virtual file - use FileOpen and FileOpenPerm instead */
+extern File PathNameOpenFile(const char *fileName, int fileFlags);
+extern File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
+
+/* Open an unnamed temporary file */
+extern File OpenTemporaryFile(bool interXact);
+
+/* Operations used for creating and sharing named temporary files */
 extern File PathNameCreateTemporaryFile(const char *path, bool error_on_failure);
 extern File PathNameOpenTemporaryFile(const char *path, int mode);
 extern bool PathNameDeleteTemporaryFile(const char *path, bool error_on_failure);
