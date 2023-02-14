@@ -18,13 +18,45 @@ This is a "header only" file.
 #include <string.h>
 #include <stdio.h>
 
-#ifndef Assert
-#include <assert.h>
-#define Assert assert
-#endif
-
 #include "./iostack.h"
-#include "./framework/debug.h"
+
+#ifndef DEBUG
+#define debug(...) ((void) 0)
+#else
+
+#define debug(args...) elog(DEBUG2, args)
+
+bool fileErrorNext(void *thisVoid);
+
+/*
+ * Quick and dirty debug function to display a buffer in hex.
+ * Avoids memory allocation by reusing portions of static buffer.
+ */
+static inline char *asHex(uint8_t *buf, size_t size)
+{
+	/* Static buffer for formatting hex string.
+    static char hex[1024];
+    static char *bp = hex;
+
+    /* Truncate the output to 64 bytes */
+    if (size > 128)
+       size = 128;
+
+    /* Wrap around - we can provide a limited number of hex conversions in one printf */
+    if (bp + 2 * size + 1 > hex + sizeof(hex))
+        bp = hex;
+
+    /* Convert bytes to hex and add to static buffer */
+    char *start = bp;
+    for (int i = 0; i < size; i++)
+        bp += sprintf(bp, "%.2x", buf[i]);
+    bp++; /* final null char added by sprintf */
+
+    /* point to where the hex string started */
+    return start;
+}
+#endif // DEBUG
+
 
 /* Upper limit on the block sizes we suport. Basically 16Mb with some extra space, say for nonces. */
 #define MAX_BLOCK_SIZE (16*1024*1024)
@@ -64,10 +96,11 @@ inline static ssize_t setIoStackError(void *this, const char *fmt, ...)
 }
 
 
-/* Check for a  system error, returning the retval */
-inline static ssize_t setSystemError(void *thisVoid, ssize_t retval, const char *fmt, ...)
+/* Test retval for system error, returning the retval */
+inline static ssize_t checkSystemError(void *thisVoid, ssize_t retval, const char *fmt, ...)
 {
 	IoStack *this = thisVoid;
+
 	/* If a system error occured ... */
 	if (retval < 0)
 	{
@@ -88,6 +121,19 @@ inline static ssize_t setSystemError(void *thisVoid, ssize_t retval, const char 
 	return retval;
 }
 
+/*
+ * Copy error information from the next lower stack level to the current level.
+ */
+inline static bool fileErrorNext(void *thisVoid)
+{
+	IoStack *this = thisVoid;
+	Assert(this != NULL && this->next != NULL);
+	fileErrorInfo(this->next, &this->errNo, this->errMsg);
+	this->eof = fileEof(this->next);
+	return fileError(this);
+}
+
+
 
 inline static ssize_t setNextError(void *thisVoid, ssize_t retval)
 {
@@ -106,9 +152,14 @@ inline static ssize_t setNextError(void *thisVoid, ssize_t retval)
 
 
 /* Some convenient macros */
+#ifndef MAX
 #define MAX(a,b) ( ((a)>(b))?(a):(b) )
+#endif
+#ifndef MIN
 #define MIN(a,b) ( ((a)<(b))?(a):(b) )
+#endif
 #define ROUNDDOWN(a,b) ( (a) / (b) * (b))
 #define ROUNDUP(a,b)    ROUNDDOWN(a + b - 1, b)
+
 
 #endif /*FILTER_ERROR_H */

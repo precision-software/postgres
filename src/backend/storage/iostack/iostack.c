@@ -1,17 +1,17 @@
 /**/
-
+#include <stdlib.h>
 #include "storage/iostack_internal.h"
 #include "packed.h"
 
 
-ssize_t fileWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset, void *ctx)
+ssize_t fileWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset, uint32 wait_event_info)
 {
 	/* Repeat until the entire buffer is written (or error) */
 	ssize_t total, current;
 	for (total = 0; total < size; total += current)
 	{
 		/* Do a partial write */
-		current = fileWrite(this, buf + total, size - total, offset + total, ctx);
+		current = fileWrite(this, buf + total, size - total, offset + total, wait_event_info);
 		if (current <= 0)
 			break;
 	}
@@ -24,7 +24,7 @@ ssize_t fileWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset, 
 }
 
 
-ssize_t fileReadAll(IoStack *this, Byte *buf, size_t size, off_t offset, void *ctx)
+ssize_t fileReadAll(IoStack *this, Byte *buf, size_t size, off_t offset, uint32 wait_event_info)
 {
 	/* Repeat until the entire buffer is read (or EOF or error) */
 	ssize_t total, current;
@@ -35,7 +35,7 @@ ssize_t fileReadAll(IoStack *this, Byte *buf, size_t size, off_t offset, void *c
 			break;
 
 		/* Do the next read. If eof or error, then done */
-		current = fileRead(this, buf + total, size - total, offset + total, ctx);
+		current = fileRead(this, buf + total, size - total, offset + total, wait_event_info);
 		if (current <= 0)
 			break;
 	}
@@ -44,8 +44,8 @@ ssize_t fileReadAll(IoStack *this, Byte *buf, size_t size, off_t offset, void *c
 	if (current < 0)
 		total = current;
 
-	/* Only report EOF if we really read no data, not just the last read */
 	this->eof = (total == 0);
+
 	return total;
 }
 
@@ -53,7 +53,7 @@ ssize_t fileReadAll(IoStack *this, Byte *buf, size_t size, off_t offset, void *c
 /*
  * Write a 4 byte int in network byte order (big endian)
  */
-static bool fileWriteInt32(IoStack *this, uint32_t data, off_t offset, void *ctx)
+static bool fileWriteInt32(IoStack *this, uint32_t data, off_t offset, uint32 wait_event_info)
 {
 	debug("fileWriteInt32: data=%d  offset=%lld\n", data, offset);
 	static Byte buf[4];
@@ -62,16 +62,16 @@ static bool fileWriteInt32(IoStack *this, uint32_t data, off_t offset, void *ctx
 	buf[2] = (Byte)(data >> 8);
 	buf[3] = (Byte)data;
 
-	return (fileWrite(this, buf, 4, offset, ctx) == 4);
+	return (fileWriteAll(this, buf, 4, offset, wait_event_info) == 4);
 }
 
 /*
  * Read a 4 byte int in network byte order (big endian)
  */
-static bool fileReadInt32(IoStack *this, uint32_t *data, off_t offset, void *ctx)
+static bool fileReadInt32(IoStack *this, uint32_t *data, off_t offset, uint32 wait_event_info)
 {
 	Byte buf[4];
-	if (fileReadAll(this, buf, 4, offset, ctx) != 4)
+	if (fileReadAll(this, buf, 4, offset, wait_event_info) != 4)
 		return false;
 
 	*data = buf[0] << 24 | buf[1] << 16 | buf[2] << 8 | buf[3];
@@ -80,27 +80,27 @@ static bool fileReadInt32(IoStack *this, uint32_t *data, off_t offset, void *ctx
 }
 
 
-ssize_t fileWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset, void *ctx)
+ssize_t fileWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset, uint32 wait_event_info)
 {
-	assert(size <= MAX_BLOCK_SIZE);
+	Assert(size <= MAX_BLOCK_SIZE);
 
 	/* Output the length field first */
-	if (!fileWriteInt32(this, size, offset, ctx))
+	if (!fileWriteInt32(this, size, offset, wait_event_info))
 		return -1;
 
 	/* Write out the data */
-	return fileWriteAll(this, buf, size, offset+4, ctx);
+	return fileWriteAll(this, buf, size, offset+4, wait_event_info);
 }
 
 
 
-ssize_t fileReadSized(IoStack *this, Byte *buf, size_t size, off_t offset, void *ctx)
+ssize_t fileReadSized(IoStack *this, Byte *buf, size_t size, off_t offset, uint32 wait_event_info)
 {
-	assert(size <= MAX_BLOCK_SIZE);
+	Assert(size <= MAX_BLOCK_SIZE);
 
 	/* Read the length. Return immediately if EOF or error */
 	uint32_t expected;
-	ssize_t ret = fileReadInt32(this, &expected, offset, ctx);
+	ssize_t ret = fileReadInt32(this, &expected, offset, wait_event_info);
 	if (ret <= 0)
 		return ret;
 
@@ -109,7 +109,7 @@ ssize_t fileReadSized(IoStack *this, Byte *buf, size_t size, off_t offset, void 
 		return setIoStackError(this, "IoStack record length of %x is larger than %z", expected, size);
 
 	/* read the data, including the possiblility of a zero length record. */
-	ssize_t actual = fileReadAll(this, buf, expected, offset + 4, ctx);
+	ssize_t actual = fileReadAll(this, buf, expected, offset + 4, wait_event_info);
 	if (actual >= 0 && actual != expected)
 		return setIoStackError(this, "IoStack record corrupted. Expected %z bytes but read only %z byres", expected, actual);
 
@@ -142,15 +142,6 @@ bool fileErrorInfo(void *thisVoid, int *errNo, char *errMsg)
 	IoStack *this = thisVoid;
 	*errNo = errno = this->errNo;
 	strcpy(errMsg, this->errMsg);
-	return fileError(this);
-}
-
-bool fileErrorNext(void *thisVoid)
-{
-	IoStack *this = thisVoid;
-	Assert(this != NULL && this->next != NULL);
-	fileErrorInfo(this->next, &this->errNo, this->errMsg);
-	this->eof = fileEof(this->next);
 	return fileError(this);
 }
 

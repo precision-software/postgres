@@ -97,9 +97,19 @@
 #include "postmaster/startup.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
+#include "storage/vfd.h"
 #include "utils/guc.h"
 #include "utils/resowner_private.h"
-#include "storage/vfd.h"
+#include "utils/wait_event.h"
+
+/* Private versions being shared with vfd.c */
+File PathNameOpenFilePerm_Private(const char *fileName, int fileFlags, mode_t fileMode);
+int FileClose_Private(File file);
+int	FileRead_Private(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
+int	FileWrite_Private(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
+int	FileSync_Private(File file, uint32 wait_event_info);
+off_t FileSize_Private(File file);
+int	FileTruncate_Private(File file, off_t offset, uint32 wait_event_info);
 
 /* Define PG_FLUSH_DATA_WORKS if we have an implementation for pg_flush_data */
 #if defined(HAVE_SYNC_FILE_RANGE)
@@ -175,12 +185,18 @@ int			recovery_init_sync_method = RECOVERY_INIT_SYNC_METHOD_FSYNC;
 #define DO_DB(A) \
 	((void) 0)
 #endif
+
+#define VFD_CLOSED (-1)
+
+#define FileIsNotOpen(file) (VfdCache[file].fd == VFD_CLOSED)
+
+
 /*
  * Virtual File Descriptor array pointer and size.  This grows as
  * needed.  'File' values are indexes into this array.
  * Note that VfdCache[0] is not a usable VFD, just a list header.
  */
-Vfd *VfdCache;
+Vfd *VfdCache = NULL;
 Size SizeVfdCache = 0;
 
 /*
@@ -1236,7 +1252,6 @@ LruInsert(File file)
 		if (vfdP->fd < 0)
 		{
 			DO_DB(elog(LOG, "re-open failed: %m"));
-			vfdP->errNo = errno;
 			return -1;
 		}
 		else
@@ -1464,7 +1479,7 @@ PathNameOpenFile(const char *fileName, int fileFlags)
  * (which should always be $PGDATA when this code is running).
  */
 File
-PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
+PathNameOpenFilePerm_Private(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	char	   *fnamecopy;
 	File		file;
@@ -1519,8 +1534,6 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	vfdP->fdstate = 0x0;
 	vfdP->resowner = NULL;
 	vfdP->offset = (fileFlags & O_APPEND) == 0? 0: FileSize(file);
-	vfdP->errNo = 0;
-	vfdP->eof = false;
 
 	Insert(file);
 
@@ -1857,7 +1870,7 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
  * close a file when done with it. Return 0 if close was successfule.
  */
 int
-FileClose(File file)
+FileClose_Private(File file)
 {
 	Vfd		   *vfdP = getVfd(file);
 	int retval = 0;
@@ -1867,14 +1880,15 @@ FileClose(File file)
 	if (!FileIsNotOpen(file))
 	{
 		/* close the file */
+		int save_errno = errno;
 		if (close(vfdP->fd) != 0)
 		{
 			/*
 			 * Save the error code, but don't override an existing one.
 			 * We want to close on error without losing the original error code.
 			 */
-			if (vfdP->errNo == 0)
-				vfdP->errNo = errno;
+			if (save_errno == 0)
+				save_errno = errno;
 
 			/*
 			 * We may need to panic on failure to close non-temporary files;
@@ -1883,7 +1897,8 @@ FileClose(File file)
 			elog(vfdP->fdstate & FD_TEMP_FILE_LIMIT ? LOG : data_sync_elevel(LOG),
 				 "could not close file \"%s\": %m", vfdP->fileName);
 
-			retval = 1;
+			errno = save_errno;
+			retval = -1;
 		}
 
 		--nfile;
@@ -1945,10 +1960,6 @@ FileClose(File file)
 	/* Unregister it from the resource owner */
 	if (vfdP->resowner)
 		ResourceOwnerForgetFile(vfdP->resowner, file);
-
-	/* Return the original errno if there was one */
-	if (vfdP->errNo != 0)
-		errno = vfdP->errNo;
 
 	/*
 	 * Return the Vfd slot to the free list
@@ -2020,7 +2031,7 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 }
 
 int
-FileRead(File file, void *buffer, size_t amount, off_t offset,
+FileRead_Private(File file, void *buffer, size_t amount, off_t offset,
 		 uint32 wait_event_info)
 {
 	int			returnCode;
@@ -2069,18 +2080,14 @@ retry:
 	}
 
 	/* Update the file position and error status */
-	if (returnCode < 0)
-		vfdP->errNo = errno;
-	else if (returnCode == 0)
-		vfdP->eof = true;
-	else
-		vfdP->offset = offset + returnCode;
+	if (returnCode >= 0)
+	    vfdP->offset = offset + returnCode;
 
 	return returnCode;
 }
 
 int
-FileWrite(File file, const void *buffer, size_t amount, off_t offset,
+FileWrite_Private(File file, const void *buffer, size_t amount, off_t offset,
 		  uint32 wait_event_info)
 {
 	int			returnCode;
@@ -2166,56 +2173,14 @@ retry:
 		/* OK to retry if interrupted */
 		if (errno == EINTR)
 			goto retry;
-
-		/* Save the error information */
-		vfdP->errNo = errno;
 	}
 
 	return returnCode;
 }
 
-/*
- * Read sequentially from the file.
- */
-int
-FileReadSeq(File file, void *buffer, size_t amount,
-			uint32 wait_event_info)
-{
-	return FileRead(file, buffer, amount, getVfd(file)->offset, wait_event_info);
-}
-
-/*
- * Write sequentially to the file.
- */
-int
-FileWriteSeq(File file, const void *buffer, size_t amount,
-			uint32 wait_event_info)
-{
-	return FileWrite(file, buffer, amount, getVfd(file)->offset, wait_event_info);
-}
-
-/*
- * Seek to an absolute position within the file.
- * Relative positions can be calculated using FileTell or FileSize.
- */
-off_t
-FileSeek(File file, off_t offset)
-{
-	getVfd(file)->offset = offset;
-	return offset;
-}
-
-/*
- * Tell us the current file position
- */
-off_t
-FileTell(File file)
-{
-	return getVfd(file)->offset;
-}
 
 int
-FileSync(File file, uint32 wait_event_info)
+FileSync_Private(File file, uint32 wait_event_info)
 {
 	int			returnCode;
     Vfd *vfdP = getVfd(file);
@@ -2229,15 +2194,13 @@ FileSync(File file, uint32 wait_event_info)
 
 	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_fsync(vfdP->fd);
-	if (returnCode < 0)
-		vfdP->errNo = errno;
 	pgstat_report_wait_end();
 
 	return returnCode;
 }
 
 off_t
-FileSize(File file)
+FileSize_Private(File file)
 {
 	Vfd *vfdP = getVfd(file);
 
@@ -2251,14 +2214,12 @@ FileSize(File file)
 	}
 
 	int ret = lseek(vfdP->fd, 0, SEEK_END);
-	if (ret < 0)
-		vfdP->errNo = errno;
 
 	return ret;
 }
 
 int
-FileTruncate(File file, off_t offset, uint32 wait_event_info)
+FileTruncate_Private(File file, off_t offset, uint32 wait_event_info)
 {
 	int			returnCode;
 	Vfd *vfdP = getVfd(file);
@@ -2272,8 +2233,6 @@ FileTruncate(File file, off_t offset, uint32 wait_event_info)
 
 	pgstat_report_wait_start(wait_event_info);
 	returnCode = ftruncate(VfdCache[file].fd, offset);
-	if (returnCode < 0)
-		vfdP->errNo = errno;
 	pgstat_report_wait_end();
 
 	if (returnCode == 0 && vfdP->fileSize > offset)
@@ -3794,8 +3753,8 @@ data_sync_elevel(int elevel)
 	return data_sync_retry ? elevel : PANIC;
 }
 
-/*
- * Routines to emualate C library FILE routines (fgetc, fprintf, ...)
+/*========================================================================================
+ * Routines to emuulate C library FILE routines (fgetc, fprintf, ...)
  */
 
 /* Similar to fgetc */
@@ -3821,20 +3780,24 @@ int FilePutc(int c, File file)
 
 int FileError(File file)
 {
-	errno = getVfd(file)->errNo;
-	return errno != 0;
+	errno = getStack(file)->errNo;
+	return (errno != 0)? EOF: 0;
 }
 
 int FileEof(File file)
 {
-	return getVfd(file)->eof;
+	return getStack(file)->eof;
 }
 
 void FileClearError(File file)
 {
-	Vfd *vfdP = getVfd(file);
-	vfdP->eof = false;
-	vfdP->errNo = 0;
+	getStack(file)->eof = false;
+	getStack(file)->errNo = 0;
+}
+
+char *FileErrorMsg(File file)
+{
+	return getStack(file)->errMsg;
 }
 
 /*
@@ -3870,3 +3833,44 @@ int FilePrintf(File file, const char *format, ...)
  {
 	return FileWriteSeq(file, string, strlen(string), WAIT_EVENT_NONE);
  }
+
+
+/*
+ * Read sequentially from the file.
+ */
+int
+FileReadSeq(File file, void *buffer, size_t amount,
+			uint32 wait_event_info)
+{
+	return FileRead(file, buffer, amount, getVfd(file)->offset, wait_event_info);
+}
+
+/*
+ * Write sequentially to the file.
+ */
+int
+FileWriteSeq(File file, const void *buffer, size_t amount,
+			 uint32 wait_event_info)
+{
+	return FileWrite(file, buffer, amount, getVfd(file)->offset, wait_event_info);
+}
+
+/*
+ * Seek to an absolute position within the file.
+ * Relative positions can be calculated using FileTell or FileSize.
+ */
+off_t
+FileSeek(File file, off_t offset)
+{
+	getVfd(file)->offset = offset;
+	return offset;
+}
+
+/*
+ * Tell us the current file position
+ */
+off_t
+FileTell(File file)
+{
+	return getVfd(file)->offset;
+}
