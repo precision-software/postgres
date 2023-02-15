@@ -128,7 +128,7 @@ option('selinux', type : 'feature', value : 'disabled',
   description: 'build with SELinux support')
 
 option('ssl', type : 'combo', choices : ['none', 'openssl'],
-  value : 'none',
+  value : 'openssl',
   description: 'use LIB for SSL/TLS support (openssl)')
 
 option('systemd', type : 'feature', value: 'auto',

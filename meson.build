@@ -1171,7 +1171,7 @@ cdata.set('USE_SYSTEMD', systemd.found() ? 1 : false)
 # Library: SSL
 ###############################################################
 
-if get_option('ssl') == 'openssl'
+#if get_option('ssl') == 'openssl'
 
   # Try to find openssl via pkg-config et al, if that doesn't work
   # (e.g. because it's provided as part of the OS, like on FreeBSD), look for
@@ -1240,9 +1240,9 @@ if get_option('ssl') == 'openssl'
             description: 'Define to 1 to build with OpenSSL support. (-Dssl=openssl)')
   cdata.set('OPENSSL_API_COMPAT', '0x10001000L',
             description: '''Define to the OpenSSL API version in use. This avoids deprecation warnings from newer OpenSSL versions.''')
-else
-  ssl = not_found_dep
-endif
+#else
+#  ssl = not_found_dep
+#endif
 
 
 

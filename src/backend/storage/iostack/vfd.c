@@ -132,18 +132,6 @@ int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
 }
 
 
-
-/*
- * Construct the appropriate I/O Stack, based on flags and file name.
- * For now, always construct the noop I/O stack/
- */
-
-
-IoStack *IoStackNew(const char *name, int oflags, int mode)
-{
-	return vfdStackNew();
-}
-
 /*
  * Wrappers which fit the internal File* routines into the IoStack.
  */
@@ -232,8 +220,41 @@ IoStack *vfdStackNew()
 }
 
 
-/* Using 2 bits of flags, we can have 4 IoStack configurations */
-IoStackCreateFunction ioStackCreateFunction[4] =
+/* These need to be set properly */
+static Byte *tempKey = (Byte *)"0123456789ABCDEF0123456789ABCDEF";
+static size_t tempKeyLen = 32;
+static Byte *permKey = (Byte *)"abcdefghijklmnopqrstuvwxyzABCDEF";
+static size_t permKeyLen = 32;
+
+/* Function to create a test stack for unit testing */
+IoStack *(*testStackNew)() = NULL;
+
+/*
+ * Construct the appropriate I/O Stack, based on flags and file name.
+ */
+IoStack *IoStackNew(const char *name, int oflags, int mode)
+{
+
+	/* For normal work, look at oflags to determine which stack to use */
+	switch (oflags & PG_STACK_MASK)
 	{
-		vfdStackNew, /* Default stack which goes directly to the vfds */
-	};
+		case PG_NOCRYPT:
+			return vfdStackNew();
+
+		case PG_ENCRYPT:
+			return bufferedNew(1,
+							   aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
+									   vfdStackNew()));
+		case PG_ENCRYPT_PERM:
+			return bufferedNew(1,
+							   aeadNew("AES-256-GCM", 16 * 1024, permKey, permKeyLen,
+									   vfdStackNew()));
+
+		case PG_TESTSTACK:
+			Assert(testStackNew != NULL);
+			return testStackNew();
+
+		default:
+			elog(FATAL, "Unrecognized encryption oflag 0x%x", (oflags & PG_STACK_MASK));
+	}
+}
