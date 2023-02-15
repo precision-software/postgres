@@ -10,6 +10,7 @@
 #include "fileFramework.h"
 #include "unitTestInternal.h"
 #include "storage/fd.h"
+#include "storage/vfd.h"
 
 #define countof(array) (sizeof(array)/sizeof(array[0]))
 
@@ -256,25 +257,35 @@ static void regression(char *name)
 
 
 /*
- * For testing, we create a stack based on block size
- * but there are no parameters in the running code.
- * In a functional language we would simply bind the stack size,
- * but here we kludge it by passing size as an external, static value.
+ * Somewhat awkward code to define a function which creates a test stack with a specific block size.
+ * Would be really nice to use lambda bindings in a functional language.
+ * Instaed, emulate it using global values.
  */
 typedef IoStack *(*CreateTestStackFn)(size_t blockSize);
 
-static size_t testBlockSize;
-static CreateTestStackFn createTestStack;
+/* Function with bound block Size for creating a stack */
+size_t testBlockSize;
+CreateTestStackFn testCreateStack;
 
-static IoStack *createStack()
+IoStack *createTestStackWithSize()
 {
-	return createTestStack(testBlockSize);
+	return testCreateStack(testBlockSize);
 }
 
-extern IoStackCreateFunction ioStackCreateFunction[4];
+/* Bind blocksize and use the resulting function for creating stacks with PG_TEST_STACK */
+void setTestStackFn(CreateTestStackFn testStack, size_t blockSize)
+{
+	/* Create parameter-less function which emulates a lambda using global variables. */
+	testBlockSize = blockSize;
+	testCreateStack = testStack;
+
+	testStackNew = createTestStackWithSize;
+}
 
 
-/* Run a test on a single configuration determined by file size and buffer size */
+/*
+ * Run a test on a single configuration determined by file size and buffer size
+ */
 void singleSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t size, size_t bufferSize)
 {
     char fileName[PATH_MAX];
@@ -282,8 +293,7 @@ void singleSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t size, size
     beginTest(fileName);
 
 	/* Inject the procedure to create an I/O Stack */
-	createTestStack = testStack;
-	ioStackCreateFunction[0] = createStack;
+	setTestStackFn(testStack, bufferSize);
 
     /* create and read back as a stream */
     generateFile(fileName, size, bufferSize);
@@ -327,8 +337,7 @@ void singleStreamTest(CreateTestStackFn testStack, char *nameFmt, off_t size, si
     beginTest(fileName);
 
 	/* Inject the procedure to create an I/O Stack */
-	createTestStack = testStack;
-	ioStackCreateFunction[0] = createStack;
+	setTestStackFn(testStack, bufferSize);
 
 	generateFile(fileName, size, bufferSize);
     verifyFile(fileName, size, bufferSize);
@@ -362,8 +371,7 @@ void singleReadSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t size, 
     beginTest(fileName);
 
 	/* Inject the procedure to create an I/O Stack */
-	createTestStack = testStack;
-	ioStackCreateFunction[0] = createStack;
+	setTestStackFn(testStack, bufferSize);
 
 	generateFile(fileName, size, bufferSize);
     verifyFile(fileName, size, bufferSize);
@@ -380,6 +388,8 @@ void singleReadSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t size, 
 
 }
 
+/* Create a test stack with a certain blockSize */
+typedef IoStack *(*CreateTestStackFn)(size_t blockSize);
 
 /* run a matrix of tests for various file sizes and buffer sizes */
 void readSeekTest(CreateTestStackFn testStack, char *nameFmt)

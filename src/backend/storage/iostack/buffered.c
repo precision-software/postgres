@@ -55,7 +55,7 @@ static bool bufferedSeek(Buffered *this, off_t position, uint32 wait_info);
 /**
  * Open a buffered file, reading, writing or both.
  */
-bool bufferedOpen(Buffered *this, const char *path, int oflags, int perm)
+static int bufferedOpen(Buffered *this, const char *path, int oflags, int perm)
 {
 
 	/* Are we read/writing or both? */
@@ -68,8 +68,9 @@ bool bufferedOpen(Buffered *this, const char *path, int oflags, int perm)
 	fileClearError(this);
 
     /* Open the downstream file */
-    if (!fileOpen(nextStack(this), path, oflags, perm))
-		return setNextError(this, false);
+    int ret = fileOpen(nextStack(this), path, oflags, perm);
+	if (ret < 0)
+		return setNextError(this, ret);
 
     /* Position to the start of file with an empty buffer */
     this->bufPosition = 0;
@@ -89,18 +90,18 @@ bool bufferedOpen(Buffered *this, const char *path, int oflags, int perm)
 	{
 		checkSystemError(this, -1, "bufferedOpen failed to allocate %z bytes", this->bufSize);
 		fileClose(nextStack(this));
-		return false;
+		return -1;
 	}
 
 	/* Success */
-	return true;
+	return ret;
 }
 
 
 /**
  * Write data to the buffered file.
  */
-size_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t offset, uint32 wait_info)
+static size_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t offset, uint32 wait_info)
 {
     debug("bufferedWrite: size=%zu  offset=%lld \n", size, offset);
     assert(size > 0);
@@ -131,7 +132,7 @@ size_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t offset,
 /*
  * Optimize writes by going directly to the next file if we don't need buffering.
  */
-ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t offset, uint32 wait_event)
+static ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t offset, uint32 wait_event)
 {
 	debug("directWrite: size=%zu offset=%lld\n", size, offset);
 
@@ -147,7 +148,7 @@ ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t offset, 
  * Read bytes from the buffered stream.
  * Note it may take multiple reads to get all the data or to reach EOF.
  */
-ssize_t bufferedRead(Buffered *this, Byte *buf, size_t size, off_t offset, uint32 wait_info)
+static ssize_t bufferedRead(Buffered *this, Byte *buf, size_t size, off_t offset, uint32 wait_info)
 {
 	debug("bufferedRead: size=%zu  offset=%lld \n", size, offset);
 	assert(size > 0);
@@ -172,7 +173,7 @@ ssize_t bufferedRead(Buffered *this, Byte *buf, size_t size, off_t offset, uint3
 }
 
 
-ssize_t directRead(Buffered *this, Byte *buf, size_t size, off_t offset, uint32 wait_event)
+static ssize_t directRead(Buffered *this, Byte *buf, size_t size, off_t offset, uint32 wait_event)
 {
 	debug("directRead: size=%zu offset=%lld\n", size, offset);
 	/* Read multiple blocks, last one might be partial */
@@ -212,7 +213,7 @@ static bool bufferedSeek(Buffered *this, off_t position, uint32 wait_event)
 /**
  * Close the buffered file.
  */
-bool bufferedClose(Buffered *this)
+static int bufferedClose(Buffered *this)
 {
     /* Flush our buffers. */
     bool success = flushBuffer(this, this->wait_info);
@@ -226,14 +227,14 @@ bool bufferedClose(Buffered *this)
 	this->buf = NULL;
 
 	debug("bufferedClose(end): success=%d\n", success);
-	return success;
+	return success? 0: -1;
 }
 
 
 /*
  * Synchronize any written data to persistent storage.
  */
-bool bufferedSync(Buffered *this, uint32 wait_info)
+static int bufferedSync(Buffered *this, uint32 wait_info)
 {
     /* Flush our buffers. */
     bool success = flushBuffer(this, wait_info);
@@ -250,7 +251,7 @@ bool bufferedSync(Buffered *this, uint32 wait_info)
 /*
  * Truncate the file at the given offset
  */
-int bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
+static int bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
 {
 	/* Position our buffer with the given position */
 	if (!bufferedSeek(this, offset, this->wait_info))
@@ -269,7 +270,7 @@ int bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
 	return true;
 }
 
-off_t bufferedSize(Buffered *this)
+static off_t bufferedSize(Buffered *this)
 {
 	if (this->sizeConfirmed)
 		return this->fileSize;
@@ -300,8 +301,7 @@ IoStackInterface bufferedInterface = (IoStackInterface)
  */
 IoStack *bufferedNew(size_t suggestedSize, void *next)
 {
-	/* TODO: add buffer to end of struc, so we don't need to free */
-    Buffered *this = palloc(sizeof(Buffered));
+    Buffered *this = malloc(sizeof(Buffered));
     *this = (Buffered)
 		{
 		.suggestedSize = (suggestedSize == 0)? 16*1024: suggestedSize,
