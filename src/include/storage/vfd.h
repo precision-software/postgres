@@ -59,7 +59,21 @@ static inline IoStack *getStack(File file)
 	return getVfd(file)->ioStack;
 }
 
+
 #define FileIsNotOpen(file) (VfdCache[file].fd == VFD_CLOSED)
+
+/* open flags to enable encryption. */
+#define PG_NOCRYPT        (0 << 28)
+#define PG_ENCRYPT        (1 << 28)
+#define PG_ECOMPRESS      (2 << 28)
+#define PG_ENCRYPT_PERM   (3 << 28)
+#define PG_TESTSTACK      (4 << 28)
+
+#define PG_STACK_MASK     (7 << 28)
+
+/* Point to an I/O Stack create function for unit testing */
+extern IoStack *(*testStackNew)();
+
 
 
 #endif //VFD_H
