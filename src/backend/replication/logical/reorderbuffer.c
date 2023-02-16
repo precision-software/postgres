@@ -3690,7 +3690,7 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 
 			/* open segment, create it if necessary */
 			file = PathNameOpenTemporaryFile(path,
-								   O_CREAT | O_WRONLY | O_APPEND | PG_BINARY);
+								   O_CREAT | O_WRONLY | O_APPEND | PG_BINARY | PG_ENCRYPT);
 
 			if (file < 0)
 				ereport(ERROR,
@@ -4229,7 +4229,7 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 			ReorderBufferSerializedPath(path, MyReplicationSlot, txn->xid,
 										*segno);
 
-			*fileP = PathNameOpenFile(path, O_RDONLY | PG_BINARY);
+			*fileP = PathNameOpenFile(path, O_RDONLY | PG_BINARY | PG_ENCRYPT);
 
 			if (*fileP < 0 && errno == ENOENT)
 			{

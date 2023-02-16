@@ -4,6 +4,7 @@
 #define VFD_H
 #include "utils/resowner_private.h"
 #include "storage/iostack.h"
+#include "storage/fd.h"
 
 #define VFD_CLOSED (-1)
 
@@ -59,6 +60,13 @@ static inline IoStack *getStack(File file)
 	return getVfd(file)->ioStack;
 }
 
+/* Get the file's name, mainly for debugging */
+static inline const char *getName(File file)
+{
+	if (file < 0)
+		return "FileClosed";
+	return getVfd(file)->fileName;
+}
 
 #define FileIsNotOpen(file) (VfdCache[file].fd == VFD_CLOSED)
 

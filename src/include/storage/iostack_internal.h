@@ -20,13 +20,13 @@ This is a "header only" file.
 
 #include "./iostack.h"
 
+#define DEBUG
 #ifndef DEBUG
 #define debug(...) ((void) 0)
 #else
 
-#define debug(args...) elog(DEBUG2, args)
-
-bool fileErrorNext(void *thisVoid);
+//#define debug(args...) fprintf(stderr, args)
+#define debug(args...) elog(DEBUG2, args);
 
 /*
  * Quick and dirty debug function to display a buffer in hex.
@@ -34,7 +34,7 @@ bool fileErrorNext(void *thisVoid);
  */
 static inline char *asHex(uint8_t *buf, size_t size)
 {
-	/* Static buffer for formatting hex string.
+	/* Static buffer for formatting hex string. */
     static char hex[1024];
     static char *bp = hex;
 

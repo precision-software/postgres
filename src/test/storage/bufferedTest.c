@@ -18,6 +18,6 @@ void testMain()
 	system("rm -rf " TEST_DIR "raw; mkdir -p " TEST_DIR "raw");
 
 	beginTestGroup("Raw Files");
-	singleSeekTest(createStack, TEST_DIR "buffered/testfile_%u_%u.dat", 1024, 4096);
+	singleSeekTest(createStack, TEST_DIR "buffered/testfile_%u_%u.dat", 0, 3096);
 	seekTest(createStack, TEST_DIR "buffered/testfile_%u_%u.dat");
 }
