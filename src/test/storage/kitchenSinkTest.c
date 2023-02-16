@@ -1,25 +1,23 @@
-/*  */
+/*
+ *
+ */
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/fcntl.h>
-
-#include "../src/iostack.h"
+#include "storage/iostack.h"
 #include "./framework/fileFramework.h"
 #include "./framework/unitTest.h"
 
+static IoStack *createStack(size_t blockSize)
+{
+	return bufferedNew(1, vfdStackNew());
+}
 
 void testMain()
 {
-    system("rm -rf " TEST_DIR "kitchen; mkdir -p " TEST_DIR "kitchen");
+	system("rm -rf " TEST_DIR "raw; mkdir -p " TEST_DIR "raw");
 
-    beginTestGroup("Kitchen Sink");
-    IoStack *stream =
-        ioStackNew(
-			bufferedNew(16*1024,
-                lz4CompressNew(16*1024,
-                    bufferedNew(1024,
-                        aeadFilterNew("AES-256-GCM", 1024, (Byte *)"0123456789ABCDEF0123456789ABCDEF", 32,
-                            fileSplitNew(2 * 1024, formatPath, "%s-%06d.seg",
-                                fileSystemBottomNew()))))));
-
-    readSeekTest(stream, TEST_DIR "kitchen/testfile_%u_%u.dat");
+	beginTestGroup("Raw Files");
+	singleSeekTest(createStack, TEST_DIR "buffered/testfile_%u_%u.dat", 0, 3096);
+	seekTest(createStack, TEST_DIR "buffered/testfile_%u_%u.dat");
 }

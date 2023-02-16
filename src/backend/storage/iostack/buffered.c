@@ -219,7 +219,7 @@ static int bufferedClose(Buffered *this)
     bool success = flushBuffer(this, this->wait_info);
 
     /* Pass on the close request., */
-    success &= fileClose(nextStack(this));
+    success &= fileClose(nextStack(this)) == 0;
 
     this->readable = this->writeable = false;
     if (this->buf != NULL)
@@ -366,6 +366,7 @@ static bool fillBuffer (Buffered *this, uint32 wait_info)
 		return setIoStackError(this, "buffereedStack: creating holes (offset=%lld, fileSize=%lld", this->bufPosition, this->fileSize);
 
 	/* Read in the current buffer */
+	this->bufActual = fileReadAll(nextStack(this), this->buf, this->bufSize, this->bufPosition, wait_info);
 	if (this->bufActual < 0)
 		return setNextError(this, false);
 

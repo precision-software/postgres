@@ -174,6 +174,7 @@ bool		data_sync_retry = false;
 int			recovery_init_sync_method = RECOVERY_INIT_SYNC_METHOD_FSYNC;
 
 /* Debugging.... */
+#define FDDEBUG
 #ifdef FDDEBUG
 #define DO_DB(A) \
 	do { \
@@ -1533,7 +1534,7 @@ PathNameOpenFilePerm_Private(const char *fileName, int fileFlags, mode_t fileMod
 	vfdP->fileSize = 0;
 	vfdP->fdstate = 0x0;
 	vfdP->resowner = NULL;
-	vfdP->offset = (fileFlags & O_APPEND) == 0? 0: FileSize(file);
+	//vfdP->offset = (fileFlags & O_APPEND) == 0? 0: FileSize(file);
 
 	Insert(file);
 
@@ -2079,10 +2080,6 @@ retry:
 			goto retry;
 	}
 
-	/* Update the file position and error status */
-	if (returnCode >= 0)
-	    vfdP->offset = offset + returnCode;
-
 	return returnCode;
 }
 
@@ -2139,16 +2136,14 @@ retry:
 
 	if (returnCode >= 0)
 	{
-		/* Update the new file position */
-		vfdP->offset = offset + amount;
-
 		/*
 		 * Maintain fileSize and temporary_files_size if it's a temp file.
 		 */
-		if (vfdP->fdstate & FD_TEMP_FILE_LIMIT && vfdP->offset > vfdP->fileSize)
+		off_t newOffset = offset + returnCode;
+		if (vfdP->fdstate & FD_TEMP_FILE_LIMIT && newOffset > vfdP->fileSize)
 		{
-			temporary_files_size += vfdP->offset - vfdP->fileSize;
-			vfdP->fileSize = vfdP->offset;
+			temporary_files_size += newOffset - vfdP->fileSize;
+			vfdP->fileSize = newOffset;
 		}
 	}
 	else
