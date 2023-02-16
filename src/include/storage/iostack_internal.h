@@ -72,12 +72,12 @@ static inline char *asHex(uint8_t *buf, size_t size)
  * Also, adopt the general form:   setXXXError(this, retval, msg); */
 
 /* Set error information and return -1 */
-inline static int setError(void *thisVoid, int errNo, const char *fmt, va_list args)
+inline static int setError(void *thisVoid, int errNo, const char *fmt, va_list ap)
 {
 	IoStack *this = thisVoid;
 
 	this->errNo = errNo;
-	snprintf(this->errMsg, sizeof(this->errMsg), fmt, args);
+	vsnprintf(this->errMsg, sizeof(this->errMsg), fmt, ap);
 	debug("setError  this=%p  errNo=%d  msg=%s eof=%d\n", this, this->errNo, this->errMsg, this->eof);
 
 	/* restore the errno so caller can still test it */
@@ -101,6 +101,8 @@ inline static ssize_t setIoStackError(void *this, size_t retval, const char *fmt
 /* Test retval for system error, returning the retval */
 inline static ssize_t checkSystemError(void *thisVoid, ssize_t retval, const char *fmt, ...)
 {
+	va_list ap;
+	va_start(ap, fmt);
 	IoStack *this = thisVoid;
 
 	/* If a system error occured ... */
@@ -110,16 +112,14 @@ inline static ssize_t checkSystemError(void *thisVoid, ssize_t retval, const cha
 		int save_errno = errno;
 
 		/* Create a new format string with system error info prepended */
-		char newFmt[121];
+		char newFmt[121]; /* TODO: allocate? */
 		snprintf(newFmt, sizeof(newFmt), "(%d - %s) %s", save_errno, strerror(errno), fmt);
 
 		/* Save the error information so "fileError" can retrieve it later */
-		va_list ap;
-		va_start(ap, fmt);
 		setError(this, save_errno, newFmt, ap);
-		va_end(ap);
 	}
 
+	va_end(ap);
 	return retval;
 }
 
