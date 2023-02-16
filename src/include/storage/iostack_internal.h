@@ -24,9 +24,11 @@ This is a "header only" file.
 #ifndef DEBUG
 #define debug(...) ((void) 0)
 #else
-
+#include <assert.h>
 //#define debug(args...) fprintf(stderr, args)
+
 #define debug(args...) elog(DEBUG2, args);
+
 
 /*
  * Quick and dirty debug function to display a buffer in hex.
@@ -85,14 +87,14 @@ inline static int setError(void *thisVoid, int errNo, const char *fmt, va_list a
 
 
 /* Report a new I/O Stack error */
-inline static ssize_t setIoStackError(void *this, const char *fmt, ...)
+inline static ssize_t setIoStackError(void *this, size_t retval, const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
     setError(this, EIOSTACK, fmt, ap);
 	va_end(ap);
 
-	return -1;
+	return retval;
 }
 
 

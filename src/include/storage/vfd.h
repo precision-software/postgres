@@ -40,7 +40,7 @@ extern Vfd *VfdCache;
 extern Size SizeVfdCache;
 
 /* True if the file index is valid */
-inline bool FileIsValid(File file)
+static inline bool FileIsValid(File file)
 {
 	return (file > 0 && file < SizeVfdCache && VfdCache[file].fileName != NULL);
 }
@@ -49,14 +49,14 @@ inline bool FileIsValid(File file)
 /* Point to the corresponding VfdCache entry if the file index is valid */
 static inline Vfd *getVfd(File file)
 {
-	Assert(FileIsValid(File file));
+	//Assert(FileIsValid(file));
 	return &VfdCache[file];
 }
 
 /* Point to the file's I/O Stack */
 static inline IoStack *getStack(File file)
 {
-	Assert(getVfd(file)->ioStack != NULL);
+	//Assert(getVfd(file)->ioStack != NULL);
 	return getVfd(file)->ioStack;
 }
 

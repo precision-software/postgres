@@ -33,6 +33,8 @@
 #include "utils/resowner_private.h"
 #include "utils/snapmgr.h"
 
+#include "storage/iostack_internal.h"  // for debug
+
 
 /*
  * All resource IDs managed by this code are required to fit into a Datum,
@@ -694,6 +696,7 @@ ResourceOwnerReleaseInternal(ResourceOwner owner,
 		while (ResourceArrayGetAny(&(owner->filearr), &foundres))
 		{
 			File		res = DatumGetFile(foundres);
+			debug("Closing temp file: file=%d\n", res);
 
 			if (isCommit)
 				PrintFileLeakWarning(res);

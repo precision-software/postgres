@@ -324,7 +324,7 @@ IoStack *bufferedNew(size_t suggestedSize, void *next)
 static bool flushBuffer(Buffered *this, uint32 wait_info)
 {
     debug("flushBuffer: bufPosition=%lld  bufActual=%zu  dirty=%d\n", this->bufPosition, this->bufActual, this->dirty);
-	assert(this->bufPosition % this->bufSize == 0);
+	Assert(this->bufPosition % this->bufSize == 0);
 
     /* Clean the buffer if dirty */
 	if (this->dirty)
@@ -363,7 +363,7 @@ static bool fillBuffer (Buffered *this, uint32 wait_info)
 
 	/* Check for holes */
 	if (this->sizeConfirmed && this->bufPosition > this->fileSize)
-		return setIoStackError(this, "buffereedStack: creating holes (offset=%lld, fileSize=%lld", this->bufPosition, this->fileSize);
+		return setIoStackError(this, -1, "buffereedStack: creating holes (offset=%lld, fileSize=%lld", this->bufPosition, this->fileSize);
 
 	/* Read in the current buffer */
 	this->bufActual = fileReadAll(nextStack(this), this->buf, this->bufSize, this->bufPosition, wait_info);
@@ -386,7 +386,7 @@ static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t positi
     /* Check to see if we are creating holes. */
 	if (position > this->bufPosition + this->bufActual)
 	{
-		setIoStackError(this, "Buffered I/O stack would create a hole");
+		setIoStackError(this, -1, "Buffered I/O stack would create a hole");
 		return -1;
 	}
 
@@ -412,7 +412,7 @@ static ssize_t copyOut(Buffered *this, Byte *buf, size_t size, off_t position)
 	size_t offset = position - this->bufPosition;
 	if (offset > this->bufActual)
 	{
-		setIoStackError(this, "Buffered I/O stack hole");
+		setIoStackError(this, -1, "Buffered I/O stack hole");
 		return -1;
 	}
 
