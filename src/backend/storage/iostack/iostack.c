@@ -106,12 +106,12 @@ ssize_t fileReadSized(IoStack *this, Byte *buf, size_t size, off_t offset, uint3
 
 	/* Validate the length */
 	if (expected > MAX_BLOCK_SIZE)
-		return setIoStackError(this, "IoStack record length of %x is larger than %z", expected, size);
+		return setIoStackError(this, -1, "IoStack record length of %x is larger than %z", expected, size);
 
 	/* read the data, including the possiblility of a zero length record. */
 	ssize_t actual = fileReadAll(this, buf, expected, offset + 4, wait_event_info);
 	if (actual >= 0 && actual != expected)
-		return setIoStackError(this, "IoStack record corrupted. Expected %z bytes but read only %z byres", expected, actual);
+		return setIoStackError(this, -1, "IoStack record corrupted. Expected %z bytes but read only %z byres", expected, actual);
 
 	return actual;
 }
