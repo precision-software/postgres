@@ -213,4 +213,14 @@ extern int	data_sync_elevel(int elevel);
 #define PG_TEMP_FILES_DIR "pgsql_tmp"
 #define PG_TEMP_FILE_PREFIX "pgsql_tmp"
 
+/* Additional open flags to support encryption/compresion */
+#define PG_NOCRYPT        (0 << 28)
+#define PG_ENCRYPT        (1 << 28)
+#define PG_ECOMPRESS      (2 << 28)
+#define PG_ENCRYPT_PERM   (3 << 28)
+#define PG_TESTSTACK      (4 << 28)
+
+#define PG_STACK_MASK     (7 << 28)
+
+
 #endif							/* FD_H */
