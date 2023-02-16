@@ -21,7 +21,7 @@ void setTestStack(CreateTestStackFn fn, size_t blockSize);
 #define countof(array) (sizeof(array)/sizeof(array[0]))
 
 /* Matrix of file and block sizes for testing. */
-off_t fileSize[] = {0, 1024, 1, 64, 1027, 7*1024, 32*1024 + 127};
+off_t fileSize[] = {0, 1024, 1, 64, 1027, 7*1024, 32*1024 + 127, 6*1024*1024+153};
 size_t blockSize[] = {1024, 4 * 1024, 3 * 1024 + 357, 1024 - 237, 64, 1};
 
 
@@ -72,7 +72,7 @@ static void generateFile(char *path, off_t size, size_t bufferSize)
     {
         off_t expected = MIN(bufferSize, size-position);
         generateBuffer(position, buf, expected);
-        size_t actual = FileWrite(file, buf, expected, position, 0);
+        size_t actual = FileWriteSeq(file, buf, expected, 0);
         PG_ASSERT_EQ(expected, actual);
     }
 
@@ -93,7 +93,7 @@ static void verifyFile(char *path, off_t size, size_t bufferSize)
     for (off_t actual, position = 0; position < size; position += actual)
     {
         size_t expected = MIN(bufferSize, size - position);
-        actual = FileRead(file, buf, bufferSize, position, 0);
+        actual = FileReadSeq(file, buf, bufferSize, 0);
         PG_ASSERT_EQ(expected, actual);
         PG_ASSERT(verifyBuffer(position, buf, actual));
 		PG_ASSERT(!FileEof(file));
@@ -102,7 +102,7 @@ static void verifyFile(char *path, off_t size, size_t bufferSize)
 
     // Read a final EOF.
 	PG_ASSERT(!FileEof(file));
-    FileRead(file, buf, 1, size, 0);
+    FileReadSeq(file, buf, 1, 0);
     PG_ASSERT(FileEof(file));
 
     PG_ASSERT(FileClose(file) == 0);
@@ -170,18 +170,18 @@ static void generateRandomFile(char *path, off_t size, size_t blockSize)
 static void appendFile(char *path, off_t size, size_t blockSize)
 {
     debug("appendFile: path=%s\n", path);
-    File file = FileOpen(path, O_RDWR|PG_TESTSTACK);
+    File file = FileOpen(path, O_RDWR|O_APPEND|PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
     Byte *buf = malloc(blockSize);
 
     /* Seek to the end of the file - should match file size */
-    off_t endPosition = FileSize(file);
+    off_t endPosition = FileTell(file);
 
     /* Write a new block at the end of file */
     generateBuffer(endPosition, buf, blockSize);
 
     /* Write the block */
-    size_t actual = FileWrite(file, buf, blockSize, endPosition, 0);
+    size_t actual = FileWriteSeq(file, buf, blockSize, 0);
     PG_ASSERT_EQ(actual, blockSize);
 
     /* Close the file and verify it is correct. */
@@ -423,5 +423,5 @@ void setTestStack(CreateTestStackFn fn, size_t blockSize)
 
 	/* Install boundFunction for PG_TESTSTACK */
 	extern IoStack *(*testStackFn)(void);
-	testStackFn = boundFunction;
+	testStackNew = boundFunction;
 }

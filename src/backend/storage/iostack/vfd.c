@@ -87,7 +87,7 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 		FileClose(file);
 		return -1;
 	}
-	
+
 	return file;
 }
 
@@ -104,11 +104,11 @@ int FileClose(File file)
 		return -1;
 	}
 
-	/* Close the file */
-	int retval = fileClose(getStack(file));
-	freeIoStack(getStack(file));
-	getVfd(file)->ioStack = NULL;
-
+	/* Close the file.  The low level routine will invalidate the "file" index */
+	IoStack *stack = getStack(file);
+	int retval = fileClose(stack);
+	freeIoStack(stack);
+    debug("FileClose(done): file=%d retval=%d\n", file, retval);
 	return retval;
 }
 
@@ -116,6 +116,8 @@ int FileClose(File file)
 int FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
 	debug("FileRead: name=%s file=%d  amount=%zu offset=%lld\n", getName(file), file, amount, offset);
+	Assert(offset >= 0);
+	Assert((ssize_t)amount > 0);
 
 	/* Read the data as requested */
 	ssize_t actual = fileReadAll(getStack(file), buffer, amount, offset, wait_event_info);
@@ -124,7 +126,7 @@ int FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_e
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	debug("FileRead(done): actual=%zd\n", actual);
+	debug("FileRead(done): file=%d  name=%s  actual=%zd\n", file, getName(file), actual);
 	return actual;
 }
 
@@ -132,6 +134,7 @@ int FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_e
 int FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
 	debug("FileWrite: name=%s file=%d  amount=%zu offset=%lld\n", getName(file), file, amount, offset);
+	Assert(offset >= 0 && (ssize_t)amount > 0);
 
 	/* Write the data as requested */
 	ssize_t actual = fileWriteAll(getStack(file), buffer, amount, offset, wait_event_info);
@@ -140,7 +143,7 @@ int FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	debug("FileRead(done): actual=%zd\n", actual);
+	debug("FileWrite(done): file=%d  name=%s  actual=%zd\n", file, getName(file), actual);
 	return actual;
 }
 
@@ -178,6 +181,7 @@ static int vfdOpen(VfdStack *this, const char *path, int oflags, int mode)
 	/* Clear the I/O Stack flags so we don't get confused */
 	oflags &= ~PG_STACK_MASK;
 	this->file = PathNameOpenFilePerm_Private(path, oflags, mode);
+	debug("vfdOpen(done): file=%d  name=%s oflags=0x%x  mode=0x%x\n", this->file, path, oflags, mode);
 
 	return checkSystemError(this, this->file, "Unable to open vfd file %s", path);
 }
@@ -186,20 +190,36 @@ static int vfdOpen(VfdStack *this, const char *path, int oflags, int mode)
 static ssize_t vfdWrite(VfdStack *this, const Byte *buf,size_t bufSize, off_t offset, uint32 wait_event_info)
 {
 	ssize_t actual = FileWrite_Private(this->file, buf, bufSize, offset, wait_event_info);
+	debug("vfdWrite: file=%d  name=%s  size=%zu  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
 	return checkSystemError(this, actual, "Unable to write to file");
 }
 
 static ssize_t vfdRead(VfdStack *this, Byte *buf,size_t bufSize, off_t offset, uint32 wait_event_info)
 {
+	Assert(bufSize > 0 && offset >= 0);
+
 	ssize_t actual = FileRead_Private(this->file, buf, bufSize, offset, wait_event_info);
-	return checkSystemError(this, actual, "Unable to read from file");
+	debug("vfdRead: file=%d  name=%s  size=%zu  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
+	return checkSystemError(this, actual, "Unable to read from file %s", getName(this->file));
 }
 
 static int vfdClose(VfdStack *this)
 {
-	int retval = FileClose_Private(this->file);
-	return checkSystemError(this, retval, "Unable to close file");
+	debug("vfdClose: file=%d name=%s\n", this->file, getName(this->file));
+	Assert(this->file != -1);
 
+	/* Mark this stack as closed */
+	File file = this->file;
+	this->file = -1;
+	getVfd(file)->ioStack = NULL;
+
+	/* Close the file for real. We are at the bottom of the IoStack. */
+	int retval = FileClose_Private(file);
+	this->file = -1;
+
+	/* Note: We allocated ioStack in FileOpen, so we will free it in FileClose */
+	debug("vfdClose(done): file=%d  retval=%d\n", file, retval);
+	return checkSystemError(this, retval, "Unable to close file");
 }
 
 
@@ -261,7 +281,7 @@ static Byte *permKey = (Byte *)"abcdefghijklmnopqrstuvwxyzABCDEF";
 static size_t permKeyLen = 32;
 
 /* Function to create a test stack for unit testing */
-IoStack *(*testStackFn)() = NULL;
+IoStack *(*testStackNew)() = NULL;
 
 /*
  * Construct the appropriate I/O Stack.
@@ -272,28 +292,24 @@ IoStack *(*testStackFn)() = NULL;
  */
 IoStack *IoStackNew(const char *name, int oflags, int mode)
 {
-
+	debug("IoStackNew: name=%s  oflags=0x%x  mode=o%o\n", name, oflags, mode);
 	/* Look at oflags to determine which stack to use */
 	switch (oflags & PG_STACK_MASK)
 	{
-		case PG_NOCRYPT:
-			return vfdStackNew();
+		case PG_NOCRYPT: return vfdStackNew();
 
 		case PG_ENCRYPT:
-			return bufferedNew(1024, vfdStackNew());
-	/*		return bufferedNew(1,
+			return bufferedNew(1,
 				aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
-					vfdStackNew())); */
+					vfdStackNew()));
 		case PG_ENCRYPT_PERM:
 			return bufferedNew(1,
 							   aeadNew("AES-256-GCM", 16 * 1024, permKey, permKeyLen,
 									   vfdStackNew()));
 
-		case PG_TESTSTACK:
-			Assert(testStackNew != NULL);
-			return testStackFn();
+		case PG_TESTSTACK: Assert(testStackNew != NULL);
+			return testStackNew();
 
-		default:
-			elog(FATAL, "Unrecognized encryption oflag 0x%x", (oflags & PG_STACK_MASK));
+		default: elog(FATAL, "Unrecognized encryption oflag 0x%x", (oflags & PG_STACK_MASK));
 	}
 }

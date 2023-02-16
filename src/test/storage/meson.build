@@ -1,6 +1,6 @@
 
 # Create an archive library containing all the backend object files.
-# When building test app, use same link args as the backend.
+
 test_lib = static_library('test_lib',
    objects: backend_objs,
    )
@@ -24,6 +24,14 @@ storage_bufferedtest = executable('storage_bufferedtest',
 
 storage_kitchensinktest = executable('storage_kitchensinktest',
   files('kitchenSinkTest.c',  'framework/fileFramework.c', ),
+  include_directories: [include_directories('.'), postgres_inc],
+  link_args: backend_link_args,
+  link_with: [test_lib, backend_link_with],
+  link_depends: backend_link_depends,
+)
+
+storage_aeadtest = executable('storage_aeadtest',
+  files('aeadTest.c',  'framework/fileFramework.c', ),
   include_directories: [include_directories('.'), postgres_inc],
   link_args: backend_link_args,
   link_with: [test_lib, backend_link_with],
