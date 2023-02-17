@@ -570,7 +570,7 @@ pgss_shmem_startup(void)
 	unlink(PGSS_TEXT_FILE);
 
 	/* Allocate new query text temp file */
-	qfile = PathNameOpenFile(PGSS_TEXT_FILE, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+	qfile = PathNameOpenFile(PGSS_TEXT_FILE, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (qfile < 0)
 		goto write_error;
 
@@ -588,7 +588,7 @@ pgss_shmem_startup(void)
 	/*
 	 * Attempt to load old statistics from the dump file.
 	 */
-	file = PathNameOpenFile(PGSS_DUMP_FILE, O_RDONLY);
+	file = PathNameOpenFile(PGSS_DUMP_FILE, O_RDONLY | PG_ENCRYPT);
 	if (file < 0)
 	{
 		if (errno != ENOENT)
@@ -742,7 +742,7 @@ pgss_shmem_shutdown(int code, Datum arg)
 	if (!pgss_save)
 		return;
 
-	file = PathNameOpenFile(PGSS_DUMP_FILE ".tmp", O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+	file = PathNameOpenFile(PGSS_DUMP_FILE ".tmp", O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (file < 0)
 		goto error;
 
@@ -2115,7 +2115,7 @@ qtext_store(const char *query, int query_len,
 	}
 
 	/* Now write the data into the successfully-reserved part of the file */
-	fd = PathNameOpenFile(PGSS_TEXT_FILE, O_RDWR | O_CREAT | PG_BINARY);
+	fd = PathNameOpenFile(PGSS_TEXT_FILE, O_RDWR | O_CREAT | PG_BINARY | PG_ENCRYPT);
 	if (fd < 0)
 		goto error;
 
@@ -2176,7 +2176,7 @@ qtext_load_file(Size *buffer_size)
 	File		fd;
 	Size		nread;
 
-	fd = PathNameOpenFile(PGSS_TEXT_FILE, O_RDONLY | PG_BINARY);
+	fd = PathNameOpenFile(PGSS_TEXT_FILE, O_RDONLY | PG_BINARY | PG_ENCRYPT);
 	if (fd < 0)
 	{
 		if (errno != ENOENT)
@@ -2374,7 +2374,7 @@ gc_qtexts(void)
 	 * larger, this should always work on traditional filesystems; though we
 	 * could still lose on copy-on-write filesystems.
 	 */
-	qfile = PathNameOpenFile(PGSS_TEXT_FILE, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+	qfile = PathNameOpenFile(PGSS_TEXT_FILE, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (qfile < 0)
 	{
 		ereport(LOG,
@@ -2489,7 +2489,7 @@ gc_fail:
 	 * Destroy the query text file and create a new, empty one
 	 */
 	(void) unlink(PGSS_TEXT_FILE);
-	qfile = PathNameOpenFile(PGSS_TEXT_FILE, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+	qfile = PathNameOpenFile(PGSS_TEXT_FILE, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (qfile < 0)
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -2609,7 +2609,7 @@ entry_reset(Oid userid, Oid dbid, uint64 queryid)
 	 * Write new empty query file, perhaps even creating a new one to recover
 	 * if the file was missing.
 	 */
-	qfile = PathNameOpenFile(PGSS_TEXT_FILE, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+	qfile = PathNameOpenFile(PGSS_TEXT_FILE, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (qfile < 0)
 	{
 		ereport(LOG,
