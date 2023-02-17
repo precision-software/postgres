@@ -1746,7 +1746,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 
 	/* we have valid data now, open tempfile and write it there */
 	file = PathNameOpenTemporaryFile(tmppath,
-						   O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
+						   O_CREAT | O_EXCL | O_WRONLY | PG_BINARY | PG_ENCRYPT);
 	if (file < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -1842,7 +1842,7 @@ SnapBuildRestore(SnapBuild *builder, XLogRecPtr lsn)
 	sprintf(path, "pg_logical/snapshots/%X-%X.snap",
 			LSN_FORMAT_ARGS(lsn));
 
-	file = PathNameOpenTemporaryFile(path, O_RDONLY | PG_BINARY);
+	file = PathNameOpenTemporaryFile(path, O_RDONLY | PG_BINARY | PG_ENCRYPT);
     if (file < 0 && errno == ENOENT)
 		return false;
 
