@@ -596,7 +596,7 @@ CheckPointReplicationOrigin(void)
 	 * can happen at a time.
 	 */
 	file = PathNameOpenTemporaryFile(tmppath,
-							  O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
+							  O_CREAT | O_EXCL | O_WRONLY | PG_BINARY | PG_ENCRYPT);
 	if (file < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
@@ -701,7 +701,7 @@ StartupReplicationOrigin(void)
 
 	elog(DEBUG2, "starting up replication origin progress state");
 
-	file = PathNameOpenTemporaryFile(path, O_RDONLY | PG_BINARY);
+	file = PathNameOpenTemporaryFile(path, O_RDONLY | PG_BINARY | PG_ENCRYPT);
 
 	/*
 	 * might have had max_replication_slots == 0 last run, or we just brought
