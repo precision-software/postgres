@@ -811,7 +811,7 @@ read_relmap_file(RelMapFile *map, char *dbpath, bool lock_held, int elevel)
 	 */
 	snprintf(mapfilename, sizeof(mapfilename), "%s/%s", dbpath,
 			 RELMAPPER_FILENAME);
-	file = PathNameOpenFile(mapfilename, O_RDONLY | PG_BINARY);
+	file = PathNameOpenFile(mapfilename, O_RDONLY | PG_BINARY | PG_ENCRYPT);
 	if (file < 0)
 		ereport(elevel,
 				(errcode_for_file_access(),
@@ -917,7 +917,7 @@ write_relmap_file(RelMapFile *newmap, bool write_wal, bool send_sinval,
 	 * calls to this function are not allowed.
 	 */
 	file = PathNameOpenFile(maptempfilename,
-						   O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+						   O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (file < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
