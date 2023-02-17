@@ -20,7 +20,7 @@
 typedef struct Aead Aead;
 
 /* Forward references */
-
+static off_t aeadSize(Aead *this);
 static bool openSSLError(int code);
 void generateNonce(Byte *nonce, Byte *iv, size_t ivSize, size_t seqNr);
 ssize_t aead_encrypt(Aead *this, const Byte *plainBlock, size_t plainSize, Byte *header,
@@ -263,7 +263,7 @@ static int aeadClose(Aead *this)
 		off_t size = fileSize(this);
 		if (size == -1)
 			return false;
-		fileWrite(this, NULL, 0, size, this->wait_info);  /* sets errno and msg */
+		aeadWrite(this, NULL, 0, size, this->wait_info);  /* sets errno and msg */
 	}
 
 	/* Release resources, including closing the downstream file */
@@ -328,7 +328,7 @@ static bool needsFinalBlock(Aead *this)
 	if (cryptOffset(this, this->fileSize) < nextSize) return false;
 
 	 /* Get accurate file size info and retry */
-	 this->fileSize = fileSize(this);
+	 this->fileSize = aeadSize(this);
 	 this->sizeConfirmed = true;
 
 	 /* The last block definitely was a partial block. No need. */
