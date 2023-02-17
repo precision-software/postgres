@@ -5004,7 +5004,7 @@ ApplyLogicalMappingFile(HTAB *tuplecid_data, Oid relid, const char *fname)
 	LogicalRewriteMappingData map;
 
 	sprintf(path, "pg_logical/mappings/%s", fname);
-	file = PathNameOpenTemporaryFile(path, O_RDONLY | PG_BINARY);
+	file = PathNameOpenTemporaryFile(path, O_RDONLY | PG_BINARY | PG_ENCRYPT);
 	if (file < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),

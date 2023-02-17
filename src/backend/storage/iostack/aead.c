@@ -393,14 +393,43 @@ static off_t aeadSize(Aead *this)
 
 static int aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
 {
-	errno = EINVAL;
-	return checkSystemError(this, -1, "aeadTruncate not implemented");
+	/* If truncating at a partial block, read in the block being truncated */
+	off_t blockOffset = ROUNDDOWN(offset, this->plainSize);
+	if (blockOffset != offset)
+	{
+		int blockSize = aeadRead(this, this->plainBuf, this->plainSize, blockOffset, wait_info);
+		if (blockSize < 0)
+			return blockSize;
+
+		/* Make sure the block is big enough to be truncated */
+		if (blockSize < offset-blockOffset)
+			return setIoStackError(this, -1, "AeadTruncate - file is smaller than truncate offset");
+	}
+
+	/* Truncate the downstream file at the beginning of the block */
+	off_t cryptOff = cryptOffset(this, blockOffset);
+	int retval = fileTruncate(nextStack(this), cryptOff, wait_info);
+	if (retval < 0)
+		return setNextError(this, retval);
+
+	/* Set the new file size to the beginning of the block */
+	this->fileSize = blockOffset;
+	this->sizeConfirmed = true;
+
+	/* If we have a partial block, then write it out */
+	if (offset != blockOffset)
+	    if (aeadWrite(this, this->plainBuf, offset-blockOffset, blockOffset, wait_info) < 0)
+		    return -1;
+
+	return 0;
 }
+
 
 static int aeadSync(Aead *this, uint32 wait_info)
 {
-	errno = EINVAL;
-	return checkSystemError(this, -1, "aeadSync not implemented");
+	/* Sync the downstream file */
+	int retval = fileSync(nextStack(this), wait_info);
+	return setNextError(this, retval);
 }
 
 /**
