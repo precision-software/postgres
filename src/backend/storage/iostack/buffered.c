@@ -264,6 +264,8 @@ static int bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
 	/* Update our buffer so it ends at that position */
 	this->bufActual = offset - this->bufPosition;
 	this->fileSize = offset;
+	this->sizeConfirmed = true;
+
 	if (this->bufActual == 0)
 		this->dirty = false;
 
