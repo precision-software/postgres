@@ -1291,7 +1291,7 @@ pgstat_write_statsfile(void)
 	/*
 	 * Open the statistics temp file to write out the current values.
 	 */
-	file = PathNameOpenTemporaryFile(tmpfile, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+	file = PathNameOpenTemporaryFile(tmpfile, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (file < 0)
 	{
 		ereport(LOG,
@@ -1460,7 +1460,7 @@ pgstat_read_statsfile(void)
 	 * has not yet written the stats file for the first time.  Any other
 	 * failure condition is suspicious.
 	 */
-	file = PathNameOpenTemporaryFile(statfile, O_RDONLY | PG_BINARY);
+	file = PathNameOpenTemporaryFile(statfile, O_RDONLY | PG_BINARY | PG_ENCRYPT);
 	if (file < 0)
 	{
 		if (errno != ENOENT)
