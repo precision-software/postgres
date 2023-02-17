@@ -1624,7 +1624,7 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	sprintf(tmppath, "%s/state.tmp", dir);
 	sprintf(path, "%s/state", dir);
 
-	file = PathNameOpenTemporaryFile(tmppath, O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
+	file = PathNameOpenTemporaryFile(tmppath, O_CREAT | O_EXCL | O_WRONLY | PG_BINARY | PG_ENCRYPT);
 	if (file < 0)
 	{
 		/*
@@ -1772,7 +1772,7 @@ RestoreSlotFromDisk(const char *name)
 	elog(DEBUG1, "restoring replication slot from \"%s\"", path);
 
 	/* on some operating systems fsyncing a file requires O_RDWR */
-	file = PathNameOpenTemporaryFile(path, O_RDWR | PG_BINARY);
+	file = PathNameOpenTemporaryFile(path, O_RDWR | PG_BINARY | PG_ENCRYPT);
 
 	/*
 	 * We do not need to handle this as we are rename()ing the directory into
