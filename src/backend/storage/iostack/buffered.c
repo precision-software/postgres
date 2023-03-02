@@ -70,7 +70,7 @@ static int bufferedOpen(Buffered *this, const char *path, int oflags, int perm)
     /* Open the downstream file */
     int ret = fileOpen(nextStack(this), path, oflags, perm);
 	if (ret < 0)
-		return setNextError(this, ret);
+		return copyNextError(this, ret);
 
     /* Position to the start of file with an empty buffer */
     this->bufPosition = 0;
@@ -141,7 +141,7 @@ static ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t o
     ssize_t actual = fileWrite(nextStack(this), buf, alignedSize, offset, wait_event);
 
 	this->fileSize = MAX(this->fileSize, offset + actual);
-    return setNextError(this, actual);
+    return copyNextError(this, actual);
 }
 
 /**
@@ -184,7 +184,7 @@ static ssize_t directRead(Buffered *this, Byte *buf, size_t size, off_t offset, 
 	if (actual > 0)
         this->fileSize = MAX(this->fileSize, offset + actual);
 
-	return setNextError(this, actual);
+	return copyNextError(this, actual);
 }
 
 
@@ -243,7 +243,7 @@ static int bufferedSync(Buffered *this, uint32 wait_info)
     success &= fileSync(nextStack(this), wait_info); /* TODO: fileErrorNext */
 
 	if (!fileError(this))
-		setNextError(this, success);
+		copyNextError(this, success);
 
 	return success;
 }
@@ -259,7 +259,7 @@ static int bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
 
 	/* Truncate the underlying file */
 	if (fileTruncate(nextStack(this), offset, wait_event) != 0)
-		return setNextError(this, -1);
+		return copyNextError(this, -1);
 
 	/* Update our buffer so it ends at that position */
 	this->bufActual = offset - this->bufPosition;
@@ -281,7 +281,7 @@ static off_t bufferedSize(Buffered *this)
 		return -1;
 
 	off_t size = fileSize(nextStack(this));
-	return setNextError(this, size);
+	return copyNextError(this, size);
 }
 
 
@@ -332,7 +332,7 @@ static bool flushBuffer(Buffered *this, uint32 wait_info)
 	if (this->dirty)
 	{
 		if (fileWriteAll(nextStack(this), this->buf, this->bufActual, this->bufPosition, wait_info) < 0)
-			return setNextError(this, false);
+			return copyNextError(this, false);
 
 		/* Update file size */
 		this->fileSize = MAX(this->fileSize, this->bufPosition + this->bufActual);
@@ -370,7 +370,7 @@ static bool fillBuffer (Buffered *this, uint32 wait_info)
 	/* Read in the current buffer */
 	this->bufActual = fileReadAll(nextStack(this), this->buf, this->bufSize, this->bufPosition, wait_info);
 	if (this->bufActual < 0)
-		return setNextError(this, false);
+		return copyNextError(this, false);
 
 	/* if EOF or partial read, update the known file size */
 	this->sizeConfirmed |= (this->bufActual < this->bufSize);

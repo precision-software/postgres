@@ -126,29 +126,21 @@ inline static ssize_t checkSystemError(void *thisVoid, ssize_t retval, const cha
 /*
  * Copy error information from the next lower stack level to the current level.
  */
-inline static bool fileErrorNext(void *thisVoid)
+inline static ssize_t copyError(void *thisVoid, ssize_t retval, void *thatVoid);
 {
 	IoStack *this = thisVoid;
-	Assert(this != NULL && this->next != NULL);
-	fileErrorInfo(this->next, &this->errNo, this->errMsg);
-	this->eof = fileEof(this->next);
-	return fileError(this);
+	IoStack *that = thatVoid;
+	Assert(this != NULL && that != NULL);
+	fileErrorInfo(that, &this->errNo, this->errMsg);
+	this->eof = fileEof(that);
+	return retval;
 }
 
 
 
-inline static ssize_t setNextError(void *thisVoid, ssize_t retval)
+inline static ssize_t copyNextError(void *this, ssize_t retval)
 {
-	IoStack *this = thisVoid;
-
-	/* Get the EOF info from our successor */
-	thisStack(this)->eof = fileEof(nextStack(this));
-
-	/* Fetch the error info as well */
-	fileErrorInfo(nextStack(this), &thisStack(this)->errNo, thisStack(this)->errMsg);
-
-	/* return the passed in retval */
-	return retval;
+	return copyError(this, retval, nextStack(this));
 }
 
 

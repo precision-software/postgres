@@ -119,7 +119,7 @@ static int aeadOpen(Aead *this, const char *path, int oflags, int mode)
     /* Open the downstream file. No resources allocated, so return directly if it fails. */
     int retval = fileOpen(nextStack(this), path, oflags, mode);
 	if (retval < 0)
-        return setNextError(this, retval);
+        return copyNextError(this, retval);
 
 	/* Read the downstream file to get header information and configure encryption */
 	if (!aeadConfigure(this))
@@ -173,7 +173,7 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset, uint32
     /* Read a block of downstream encrypted text into our buffer. */
     ssize_t actual = fileReadAll(nextStack(this), this->cryptBuf, this->cryptSize, cipherOffset, wait_event);
     if (actual <= 0)
-        return setNextError(this, actual);
+        return copyNextError(this, actual);
 
     /* Extract the tag from the end of our buffer. */
     Byte tag[EVP_MAX_MD_SIZE];
@@ -235,7 +235,7 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset, 
 
     /* Write the encrypted block out */
     if (fileWriteAll(nextStack(this), this->cryptBuf, cipherSize, cipherOffset, wait_info) != cipherSize)
-	    return setNextError(this, -1);
+	    return copyNextError(this, -1);
 
     /* Track our position for EOF handling */
     this->maxWritePosition = MAX(this->maxWritePosition, offset+plainSize);
@@ -293,7 +293,7 @@ static int freeResources(Aead *this)
     /* Close the downstream file */
 	if (fileClose(nextStack(this)) != 0)
 		if (!fileError(this))
-			return setNextError(this, false);
+			return copyNextError(this, false);
 
 	return 0;
 }
@@ -356,7 +356,7 @@ static off_t aeadSize(Aead *this)
 	/* Get the index of the last cipher block in the downstream encrypted file */
 	off_t cryptFileSize = fileSize(nextStack(this));
 	if (cryptFileSize < 0)
-		return setNextError(this, -1);
+		return copyNextError(this, -1);
 
 	/* If the actual file doesn't have a full header, then there is an error. */
 	if (cryptFileSize < this->headerSize)
@@ -410,7 +410,7 @@ static int aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
 	off_t cryptOff = cryptOffset(this, blockOffset);
 	int retval = fileTruncate(nextStack(this), cryptOff, wait_info);
 	if (retval < 0)
-		return setNextError(this, retval);
+		return copyNextError(this, retval);
 
 	/* Set the new file size to the beginning of the block */
 	this->fileSize = blockOffset;
@@ -429,7 +429,7 @@ static int aeadSync(Aead *this, uint32 wait_info)
 {
 	/* Sync the downstream file */
 	int retval = fileSync(nextStack(this), wait_info);
-	return setNextError(this, retval);
+	return copyNextError(this, retval);
 }
 
 /**
@@ -518,7 +518,7 @@ bool aeadHeaderRead(Aead *this)
     Byte header[MAX_AEAD_HEADER_SIZE] = {0};
     ssize_t headerSize = fileReadSized(nextStack(this), header, sizeof(header), 0, this->wait_info );
 	if (headerSize <= 0)
-		return setNextError(this, false);
+		return copyNextError(this, false);
 
     /* Remember the full header size as stored in the file. Since it was a "sized" write, add 4 bytes for the size field. */
     this->headerSize = headerSize + 4;
@@ -631,7 +631,7 @@ bool aeadHeaderWrite(Aead *this)
 
     /* Write the header to the output file */
     if (fileWriteSized(nextStack(this), header, bp - header, 0, this->wait_info) <=  0)
-		return setNextError(this, false);
+		return copyNextError(this, false);
 
     /* Remember the header size. Since we did a "sized" write, add 4 bytes for the record size. */
     this->headerSize = bp - header + 4;

@@ -1130,7 +1130,7 @@ ExportSnapshot(Snapshot snapshot)
 	int			nchildren;
 	int			addTopXid;
 	StringInfoData buf;
-	FILE	   *f;
+	File	    f;
 	int			i;
 	MemoryContext oldcxt;
 	char		path[MAXPGPATH];
@@ -1257,19 +1257,20 @@ ExportSnapshot(Snapshot snapshot)
 	 * (ImportSnapshot won't allow it because of its valid-characters check).
 	 */
 	snprintf(pathtmp, sizeof(pathtmp), "%s.tmp", path);
-	if (!(f = AllocateFile(pathtmp, PG_BINARY_W)))
+	f = PathNameOpenTemporaryFile(pathtmp, O_RDONLY | PG_BINARY);
+    if (f < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create file \"%s\": %m", pathtmp)));
 
-	if (fwrite(buf.data, buf.len, 1, f) != 1)
+	if (FileWriteSeq(f, buf.data, buf.len, WAIT_EVENT_NONE) != buf.len)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", pathtmp)));
 
 	/* no fsync() since file need not survive a system crash */
 
-	if (FreeFile(f))
+	if (FileClose(f) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", pathtmp)));

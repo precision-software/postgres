@@ -39,7 +39,7 @@ bool filePut8(void *this, uint64_t value);
 uint8_t fileGet1(void *this);
 uint16_t fileGet2(void *this);
 uint32_t fileGet4(void *this);
-uint64_t fileGet8(void *this);
+uint64_t fileGet8(void *this, off_t i);
 
 /* Release memory for I/O stack (after close) */
 void freeIoStack(IoStack *ioStack);
@@ -53,7 +53,7 @@ typedef struct IoStackInterface IoStackInterface;
 
 /* Filter for buffering data.  blockSize specifies the minimum size */
 IoStack *bufferedNew(size_t suggestedSize, void *next);
-IoStack *lz4CompressNew(size_t blockSize, void *next);
+IoStack *lz4CompressNew(size_t blockSize, void *indexFile, void *next);
 IoStack *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keyLen, void *next);
 IoStack *vfdStackNew(void);
 
