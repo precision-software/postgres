@@ -70,8 +70,6 @@ char	   *wkey_filenames[KMGR_NUM_DATA_KEYS] = {
 	"wal"
 };
 
-int cluster_encryption_method = DISABLED_ENCRYPTION_METHOD;
-
 /*
  * Wrap the given CryptoKey.
  *

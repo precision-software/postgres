@@ -51,7 +51,7 @@ void SetExtendedFeatureConfigOptions(PageFeatureSet features);
 uint16 PageFeatureSetCalculateSize(PageFeatureSet features);
 PageFeatureSet PageFeatureSetAddFeatureByName(PageFeatureSet features, const char *feat_name);
 PageFeatureSet PageFeatureSetAddFeature(PageFeatureSet features, PageFeature feature);
-void InitPageFeatures(void);
+void InitPageFeatures(int file_encryption_method);
 
 /* macros dealing with the current cluster's page features */
 char *PageGetFeatureOffset(Page page, PageFeature feature);

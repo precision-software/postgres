@@ -40,7 +40,7 @@
 
 /* When using XTS, our cluster key length is twice the AES size; this is a max size */
 #define KMGR_CLUSTER_KEY_MAX_LEN 	PG_AES256_KEY_LEN * 2
-#define KMGR_CLUSTER_KEY_LEN(m) 	(encryption_methods[m].keylen)
+#define KMGR_CLUSTER_KEY_LEN(m) 	(encryption_methods[m].bit_length)
 #define KMGR_KEK_KEY_LEN 	PG_AES256_KEY_LEN
 
 /* double for hex format, plus some for spaces, \r,\n, and null byte */
@@ -85,8 +85,6 @@ typedef struct encryption_method
 
 extern encryption_method encryption_methods[NUM_ENCRYPTION_METHODS];
 extern char *wkey_filenames[KMGR_NUM_DATA_KEYS];
-
-extern int cluster_encryption_method;
 
 extern bool kmgr_wrap_data_key(PgCipherCtx *ctx, CryptoKey *in, unsigned char *out, int *outlen);
 extern bool kmgr_unwrap_data_key(PgCipherCtx *ctx, unsigned char *in, int inlen, CryptoKey *out);

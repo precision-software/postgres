@@ -85,9 +85,10 @@ static inline bool PageHasFeature(Page page, PageFeature feature)
 
 /* Setup, must be called before using any page features at postmaster init time */
 void
-InitPageFeatures()
+InitPageFeatures(int file_encryption_method)
 {
-	feature_descs[PF_ENCRYPTION_TAG].length = encryption_methods[cluster_encryption_method].authtag_len;
+	if (file_encryption_method != DISABLED_ENCRYPTION_METHOD)
+		feature_descs[PF_ENCRYPTION_TAG].length = encryption_methods[file_encryption_method].authtag_len;
 }
 
 /*

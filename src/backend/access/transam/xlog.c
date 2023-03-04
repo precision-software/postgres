@@ -4200,11 +4200,8 @@ ReadControlFile(void)
 
 	CalculateCheckpointSegments();
 
-	/* set our global encryption method */
-	cluster_encryption_method = ControlFile->file_encryption_method;
-
 	/* tell page features about authtag size */
-	InitPageFeatures();
+	InitPageFeatures(GetFileEncryptionMethod());
 
 	/* set our page-level space reservation from ControlFile if any extended feature flags are set*/
 	reserved_page_size = PageFeatureSetCalculateSize(ControlFile->page_features);
@@ -4818,7 +4815,7 @@ BootStrapXLOG(void)
 	Assert(recptr - (char *) record == record->xl_tot_len);
 
 	BootStrapKmgr();
-	InitializeBufferEncryption();
+	InitializeBufferEncryption(bootstrap_file_encryption_method);
 
 	if (bootstrap_file_encryption_method != DISABLED_ENCRYPTION_METHOD)
 	{

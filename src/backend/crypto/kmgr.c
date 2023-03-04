@@ -136,8 +136,8 @@ BootStrapKmgr(void)
 					  (char *) cluster_key) !=
 		KMGR_CLUSTER_KEY_LEN(bootstrap_file_encryption_method))
 		ereport(ERROR,
-				(errmsg("(bootstrap) cluster key must be %d hexadecimal characters; %d",
-						KMGR_CLUSTER_KEY_LEN(bootstrap_file_encryption_method) * 2, bootstrap_file_encryption_method)));
+				(errmsg("cluster key must be %d hexadecimal characters",
+						KMGR_CLUSTER_KEY_LEN(bootstrap_file_encryption_method) * 2)));
 
 	/* We are not in copy mode?  Generate new cluster file encryption keys. */
 	if (bootstrap_old_key_datadir == NULL)
@@ -210,7 +210,7 @@ BootStrapKmgr(void)
 
 	/* bzero KEK */
 	explicit_bzero(cluster_key_hex, cluster_key_hex_len);
-	explicit_bzero(cluster_key, KMGR_CLUSTER_KEY_LEN(cluster_encryption_method));
+	explicit_bzero(cluster_key, KMGR_CLUSTER_KEY_LEN(GetFileEncryptionMethod()));
 }
 
 /* Report shared-memory space needed by KmgrShmem */
@@ -315,10 +315,10 @@ InitializeKmgr(void)
 	/* decode supplied hex */
 	if (hex_decode(cluster_key_hex, cluster_key_hex_len,
 					  (char *) cluster_key) !=
-		KMGR_CLUSTER_KEY_LEN(cluster_encryption_method))
+		KMGR_CLUSTER_KEY_LEN(GetFileEncryptionMethod()))
 		ereport(ERROR,
-				(errmsg("(initialize) cluster key must be %d hexadecimal characters: %d",
-						KMGR_CLUSTER_KEY_LEN(cluster_encryption_method) * 2, cluster_encryption_method)));
+				(errmsg("cluster key must be %d hexadecimal characters",
+						KMGR_CLUSTER_KEY_LEN(GetFileEncryptionMethod()) * 2)));
 
 	/* Load wrapped DEKs from their files into an array */
 	kmgr_read_wrapped_data_keys(LIVE_KMGR_DIR, keys_wrap, key_lens);
@@ -350,7 +350,7 @@ InitializeKmgr(void)
 
 	/* bzero KEK */
 	explicit_bzero(cluster_key_hex, cluster_key_hex_len);
-	explicit_bzero(cluster_key, KMGR_CLUSTER_KEY_LEN(cluster_encryption_method));
+	explicit_bzero(cluster_key, KMGR_CLUSTER_KEY_LEN(GetFileEncryptionMethod()));
 }
 
 static void
