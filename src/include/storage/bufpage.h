@@ -193,8 +193,7 @@ typedef struct PageHeaderData
 
 typedef PageHeaderData *PageHeader;
 #define PageEncryptOffset	offsetof(PageHeaderData, pd_special)
-#define SizeOfEncryptionTag (PG_CIPHER_DEFAULT == PG_CIPHER_AES_GCM ? 16 : 0)
-#define SizeOfPageEncryption (BLCKSZ - PageEncryptOffset - SizeOfEncryptionTag)
+#define SizeOfPageEncryption(m) (BLCKSZ - PageEncryptOffset - SizeOfEncryptionTag(m))
 
 /*
  * pd_flags contains the following flag bits.  Undefined bits are initialized

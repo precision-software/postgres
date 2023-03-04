@@ -29,7 +29,8 @@
 #define PG_CIPHER_AES_KWP			2
 #define PG_CIPHER_AES_XTS			3
 #define PG_MAX_CIPHER_ID			3
-#define PG_CIPHER_DEFAULT			PG_CIPHER_AES_GCM
+#define SizeOfEncryptionTag(m) encryption_methods[m].authtag_len
+#define EncryptionAlgorithm(m) encryption_methods[m].algorithm
 
 /* AES128/192/256 various length definitions */
 #define PG_AES128_KEY_LEN			(128 / 8)

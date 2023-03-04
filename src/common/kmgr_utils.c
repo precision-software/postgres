@@ -58,9 +58,10 @@ static void read_wrapped_data_key(const char *cryptoKeyDir, uint32 id, unsigned 
  */
 encryption_method encryption_methods[NUM_ENCRYPTION_METHODS] = {
 	{"", 0},
-	{"AES128", 128},
-	{"AES192", 192},
-	{"AES256", 256}
+	{"AES-128-XTS", 256, PG_CIPHER_AES_XTS, 0},
+	{"AES-256-XTS", 512, PG_CIPHER_AES_XTS, 0},
+	{"AES-128-GCM", 128, PG_CIPHER_AES_GCM, 16},
+	{"AES-256-GCM", 256, PG_CIPHER_AES_GCM, 16}
 };
 
 /* This maps wrapped key filesnames to their array slots */
@@ -69,6 +70,7 @@ char	   *wkey_filenames[KMGR_NUM_DATA_KEYS] = {
 	"wal"
 };
 
+int cluster_encryption_method = DISABLED_ENCRYPTION_METHOD;
 
 /*
  * Wrap the given CryptoKey.

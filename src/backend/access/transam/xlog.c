@@ -4200,6 +4200,12 @@ ReadControlFile(void)
 
 	CalculateCheckpointSegments();
 
+	/* set our global encryption method */
+	cluster_encryption_method = ControlFile->file_encryption_method;
+
+	/* tell page features about authtag size */
+	InitPageFeatures();
+
 	/* set our page-level space reservation from ControlFile if any extended feature flags are set*/
 	reserved_page_size = PageFeatureSetCalculateSize(ControlFile->page_features);
 	Assert(reserved_page_size == MAXALIGN(reserved_page_size));

@@ -71,13 +71,13 @@ InitializeBufferEncryption(void)
 #endif
 
 
-	BufEncCtx = pg_cipher_ctx_create(PG_CIPHER_DEFAULT,
+	BufEncCtx = pg_cipher_ctx_create(EncryptionAlgorithm(cluster_encryption_method),
 									 (unsigned char *) key->key,
 									 (key->klen), true);
 	if (!BufEncCtx)
 		my_error("cannot initialize encryption context");
 
-	BufDecCtx = pg_cipher_ctx_create(PG_CIPHER_DEFAULT,
+	BufDecCtx = pg_cipher_ctx_create(EncryptionAlgorithm(cluster_encryption_method),
 									 (unsigned char *) key->key,
 									 (key->klen), false);
 	if (!BufDecCtx)
@@ -150,18 +150,18 @@ EncryptPage(Page page, bool relation_is_permanent, BlockNumber blkno, RelFileNum
 	set_buffer_encryption_iv(page, blkno, relation_is_permanent);
 
 	/* setup tag and AAD */
-	if (SizeOfEncryptionTag > 0)
+	if (SizeOfEncryptionTag(cluster_encryption_method) > 0)
 	{
-		tag = (unsigned char*)page + BLCKSZ - SizeOfEncryptionTag;
-		taglen = SizeOfEncryptionTag;
+		tag = (unsigned char*)page + BLCKSZ - SizeOfEncryptionTag(cluster_encryption_method);
+		taglen = SizeOfEncryptionTag(cluster_encryption_method);
 		setup_additional_authenticated_data(page, blkno, relation_is_permanent, fileno);
 		aad = (unsigned char *)&auth_data;
 		aadlen = sizeof(AdditionalAuthenticatedData);
 	}
 
-	if (unlikely(!pg_cipher_encrypt(BufEncCtx, PG_CIPHER_DEFAULT,
+	if (unlikely(!pg_cipher_encrypt(BufEncCtx, EncryptionAlgorithm(cluster_encryption_method),
 									(const unsigned char *) ptr,	/* input  */
-									SizeOfPageEncryption,
+									SizeOfPageEncryption(cluster_encryption_method),
 									ptr,	/* length */
 									&enclen,	/* resulting length */
 									buf_encryption_iv,	/* iv */
@@ -170,7 +170,7 @@ EncryptPage(Page page, bool relation_is_permanent, BlockNumber blkno, RelFileNum
 									tag, taglen)))
 		my_error("cannot encrypt page %u", blkno);
 
-	Assert(enclen == SizeOfPageEncryption);
+	Assert(enclen == SizeOfPageEncryption(cluster_encryption_method));
 }
 
 /* Decrypt the given page with the relation key */
@@ -187,18 +187,18 @@ DecryptPage(Page page, bool relation_is_permanent, BlockNumber blkno, RelFileNum
 	set_buffer_encryption_iv(page, blkno, relation_is_permanent);
 
 	/* setup tag and AAD */
-	if (SizeOfEncryptionTag > 0)
+	if (SizeOfEncryptionTag(cluster_encryption_method) > 0)
 	{
-		tag = (unsigned char*)page + BLCKSZ - SizeOfEncryptionTag;
-		taglen = SizeOfEncryptionTag;
+		tag = (unsigned char*)page + BLCKSZ - SizeOfEncryptionTag(cluster_encryption_method);
+		taglen = SizeOfEncryptionTag(cluster_encryption_method);
 		setup_additional_authenticated_data(page, blkno, relation_is_permanent, fileno);
 		aad = (unsigned char *)&auth_data;
 		aadlen = sizeof(AdditionalAuthenticatedData);
 	}
 
-	if (unlikely(!pg_cipher_decrypt(BufDecCtx, PG_CIPHER_DEFAULT,
+	if (unlikely(!pg_cipher_decrypt(BufDecCtx, EncryptionAlgorithm(cluster_encryption_method),
 									(const unsigned char *) ptr,	/* input  */
-									SizeOfPageEncryption,
+									SizeOfPageEncryption(cluster_encryption_method),
 									ptr,	/* output */
 									&enclen,	/* resulting length */
 									buf_encryption_iv,	/* iv */
@@ -207,7 +207,7 @@ DecryptPage(Page page, bool relation_is_permanent, BlockNumber blkno, RelFileNum
 									tag, taglen)))
 		my_error("cannot decrypt page %u", blkno);
 
-	Assert(enclen == SizeOfPageEncryption);
+	Assert(enclen == SizeOfPageEncryption(cluster_encryption_method));
 }
 
 /* Construct iv for the given page */

@@ -29,7 +29,6 @@ extern XLogRecPtr LSNForEncryption(bool use_wal_lsn);
 #define my_error(...) elog(ERROR, __VA_ARGS__)
 #endif
 
-
 extern void InitializeBufferEncryption(void);
 extern void EncryptPage(Page page, bool relation_is_permanent,
 						BlockNumber blkno, RelFileNumber fileno);

@@ -36,6 +36,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+#include "common/controldata_utils.h"
 #include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "common/restricted_token.h"
@@ -60,8 +61,8 @@ int			terminal_fd = -1;
 static bool repair_mode = false;
 static char *old_cluster_key_cmd = NULL,
 		   *new_cluster_key_cmd = NULL;
-static char old_cluster_key[KMGR_CLUSTER_KEY_LEN],
-			new_cluster_key[KMGR_CLUSTER_KEY_LEN];
+static char old_cluster_key[KMGR_CLUSTER_KEY_MAX_LEN],
+	new_cluster_key[KMGR_CLUSTER_KEY_MAX_LEN];
 static CryptoKey data_key;
 unsigned char in_key[MAX_WRAPPED_KEY_LENGTH],
 			out_key[MAX_WRAPPED_KEY_LENGTH];
@@ -75,6 +76,7 @@ static char top_path[MAXPGPATH],
 
 static char *DataDir = NULL;
 static const char *progname;
+static ControlFileData *ControlFile;
 
 static void create_lockfile(void);
 static void recover_failure(void);
@@ -222,6 +224,8 @@ main(int argc, char *argv[])
 	}
 #endif
 
+	ControlFile = get_controlfile(DataDir, NULL);
+	
 	get_restricted_token();
 
 	/* Set mask based on PGDATA permissions */
@@ -487,7 +491,7 @@ void
 retrieve_cluster_keys(void)
 {
 	int			cluster_key_len;
-	char		cluster_key_hex[ALLOC_KMGR_CLUSTER_KEY_LEN];
+	char		cluster_key_hex[ALLOC_KMGR_CLUSTER_KEY_MAX_LEN];
 
 	/*
 	 * If we have been asked to pass an open file descriptor to the user
@@ -511,13 +515,13 @@ retrieve_cluster_keys(void)
 	/* Get old key encryption key from the cluster key command */
 	cluster_key_len = kmgr_run_cluster_key_command(old_cluster_key_cmd,
 												   (char *) cluster_key_hex,
-												   ALLOC_KMGR_CLUSTER_KEY_LEN,
+												   ALLOC_KMGR_CLUSTER_KEY_MAX_LEN,
 												   live_path, terminal_fd);
 	if (hex_decode(cluster_key_hex, cluster_key_len,
 					  (char *) old_cluster_key) !=
-		KMGR_CLUSTER_KEY_LEN)
+		KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method))
 	{
-		pg_log_error("cluster key must be at %d hex bytes", KMGR_CLUSTER_KEY_LEN);
+		pg_log_error("cluster key must be at %d hex bytes", KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method));
 		bzero_keys_and_exit(ERROR_EXIT);
 	}
 
@@ -534,13 +538,13 @@ retrieve_cluster_keys(void)
 	/* Get new key */
 	cluster_key_len = kmgr_run_cluster_key_command(new_cluster_key_cmd,
 												   (char *) cluster_key_hex,
-												   ALLOC_KMGR_CLUSTER_KEY_LEN,
+												   ALLOC_KMGR_CLUSTER_KEY_MAX_LEN,
 												   new_path, terminal_fd);
 	if (hex_decode(cluster_key_hex, cluster_key_len,
 					  (char *) new_cluster_key) !=
-		KMGR_CLUSTER_KEY_LEN)
+		KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method))
 	{
-		pg_log_error("cluster key must be at %d hex bytes", KMGR_CLUSTER_KEY_LEN);
+		pg_log_error("cluster key must be at %d hex bytes", KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method));
 		bzero_keys_and_exit(ERROR_EXIT);
 	}
 
@@ -550,7 +554,7 @@ retrieve_cluster_keys(void)
 	/* output newline */
 	puts("");
 
-	if (memcmp(old_cluster_key, new_cluster_key, KMGR_CLUSTER_KEY_LEN) == 0)
+	if (memcmp(old_cluster_key, new_cluster_key, KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method)) == 0)
 	{
 		pg_log_error("cluster keys are identical, exiting\n");
 		bzero_keys_and_exit(RMDIR_EXIT);

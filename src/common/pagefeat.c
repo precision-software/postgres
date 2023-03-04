@@ -49,7 +49,7 @@ typedef struct PageFeatureDesc
 
 static PageFeatureDesc feature_descs[PF_MAX_FEATURE] = {
 	/* PF_ENCRYPTION_TAG */
-	{ SizeOfEncryptionTag, "encryption_tags" },
+	{ 0, "encryption_tags" },	/* set by InitPageFeatures after we know the encryption method */
 	/* PF_EXT_CHECKSUMS */
 	{ 8, "extended_checksums" }
 };
@@ -82,6 +82,13 @@ static inline bool PageHasFeature(Page page, PageFeature feature)
 		((PageHeader)page)->pd_feat.features & (1<<feature);
 }
 
+
+/* Setup, must be called before using any page features at postmaster init time */
+void
+InitPageFeatures()
+{
+	feature_descs[PF_ENCRYPTION_TAG].length = encryption_methods[cluster_encryption_method].authtag_len;
+}
 
 /*
  * Get the page offset for the given feature given the page, flags, and
