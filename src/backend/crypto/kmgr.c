@@ -158,7 +158,7 @@ BootStrapKmgr(void)
 
 			/* generate a DEK */
 			key = generate_crypto_key(
-									  encryption_methods[bootstrap_file_encryption_method].bit_length / 8);
+									  encryption_methods[bootstrap_file_encryption_method].key_length);
 
 			/* output generated random string as hex, for testing */
 			{
@@ -334,8 +334,8 @@ InitializeKmgr(void)
 
 	/* Check that retrieved key lengths match controldata length. */
 	for (int id = 0; id < KMGR_NUM_DATA_KEYS; id++)
-		if (KmgrShmem->intlKeys[id].klen * 8 !=
-			encryption_methods[GetFileEncryptionMethod()].bit_length)
+		if (KmgrShmem->intlKeys[id].klen  !=
+			encryption_methods[GetFileEncryptionMethod()].key_length)
 		{
 			char		path[MAXPGPATH];
 
@@ -344,8 +344,8 @@ InitializeKmgr(void)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("data encryption key %s of length %d does not match controldata key length %d",
-							path, KmgrShmem->intlKeys[id].klen * 8,
-							encryption_methods[GetFileEncryptionMethod()].bit_length)));
+							path, KmgrShmem->intlKeys[id].klen,
+							encryption_methods[GetFileEncryptionMethod()].key_length)));
 		}
 
 	/* bzero KEK */

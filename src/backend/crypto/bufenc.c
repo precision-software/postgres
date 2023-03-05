@@ -76,13 +76,15 @@ InitializeBufferEncryption(int init_file_encryption_method)
 
 	BufEncCtx = pg_cipher_ctx_create(EncryptionAlgorithm(file_encryption_method),
 									 (unsigned char *) key->key,
-									 (key->klen), true);
+									 EncryptionBlockLength(file_encryption_method),
+									 true);
 	if (!BufEncCtx)
-		my_error("cannot initialize encryption context");
+		my_error("cannot initialize encryption context: method: %d; len: %d", file_encryption_method, key->klen);
 
 	BufDecCtx = pg_cipher_ctx_create(EncryptionAlgorithm(file_encryption_method),
 									 (unsigned char *) key->key,
-									 (key->klen), false);
+									 EncryptionBlockLength(file_encryption_method),
+									 false);
 	if (!BufDecCtx)
 		my_error("cannot initialize decryption context");
 
@@ -92,14 +94,16 @@ InitializeBufferEncryption(int init_file_encryption_method)
 	key = KmgrGetKey(KMGR_KEY_ID_WAL);
 
 	XLogEncCtx = pg_cipher_ctx_create(PG_CIPHER_AES_GCM,
-									 (unsigned char *) key->key,
-									 (key->klen), true);
+									  (unsigned char *) key->key,
+									  EncryptionBlockLength(file_encryption_method),
+									  true);
 	if (!XLogEncCtx)
 		my_error("cannot initialize xlog encryption context");
 
 	XLogDecCtx = pg_cipher_ctx_create(PG_CIPHER_AES_GCM,
-									 (unsigned char *) key->key,
-									 (key->klen), false);
+									  (unsigned char *) key->key,
+									  EncryptionBlockLength(file_encryption_method),
+									  false);
 	if (!XLogDecCtx)
 		my_error("cannot initialize xlog decryption context");
 }

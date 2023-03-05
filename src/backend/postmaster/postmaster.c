@@ -1342,7 +1342,7 @@ PostmasterMain(int argc, char *argv[])
 	}
 
 	InitializeKmgr();
-	InitializeBufferEncryption(ControlFile->file_encryption_method);
+	InitializeBufferEncryption(GetFileEncryptionMethod());
 
 	if (terminal_fd != -1)
 		close(terminal_fd);

@@ -521,7 +521,7 @@ retrieve_cluster_keys(void)
 					  (char *) old_cluster_key) !=
 		KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method))
 	{
-		pg_log_error("cluster key must be at %d hex bytes", KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method));
+		pg_log_error("cluster key must be at %d hex bytes", KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method) * 2);
 		bzero_keys_and_exit(ERROR_EXIT);
 	}
 
@@ -544,7 +544,7 @@ retrieve_cluster_keys(void)
 					  (char *) new_cluster_key) !=
 		KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method))
 	{
-		pg_log_error("cluster key must be at %d hex bytes", KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method));
+		pg_log_error("cluster key must be at %d hex bytes", KMGR_CLUSTER_KEY_LEN(ControlFile->file_encryption_method) * 2);
 		bzero_keys_and_exit(ERROR_EXIT);
 	}
 

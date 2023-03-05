@@ -56,12 +56,13 @@ static void read_wrapped_data_key(const char *cryptoKeyDir, uint32 id, unsigned 
  * You can only add to the end of this array since the array index is
  * stored in pg_control.
  */
-encryption_method encryption_methods[NUM_ENCRYPTION_METHODS] = {
+const encryption_method encryption_methods[NUM_ENCRYPTION_METHODS] = {
 	{"", 0},
-	{"AES-128-XTS", 256, PG_CIPHER_AES_XTS, 0},
-	{"AES-256-XTS", 512, PG_CIPHER_AES_XTS, 0},
-	{"AES-128-GCM", 128, PG_CIPHER_AES_GCM, 16},
-	{"AES-256-GCM", 256, PG_CIPHER_AES_GCM, 16}
+	{"AES-128-XTS", 128, 32, PG_CIPHER_AES_XTS, 0},
+	{"AES-256-XTS", 256, 64, PG_CIPHER_AES_XTS, 0},
+	{"AES-128-GCM", 128, 16, PG_CIPHER_AES_GCM, 16},
+	{"AES-192-GCM", 128, 24, PG_CIPHER_AES_GCM, 16},
+	{"AES-256-GCM", 128, 32, PG_CIPHER_AES_GCM, 16},
 };
 
 /* This maps wrapped key filesnames to their array slots */
