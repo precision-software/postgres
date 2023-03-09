@@ -175,7 +175,7 @@ relation creation is WAL logged/crash safe, even though the relation's
 contents are not.  When the init fork is copied to represent an empty
 relation during crash recovery, it becomes a non-permanent page and must
 be successfully decrypted as such.  Therefore, when it is copied, its
-LSN is changed to e fake LSN and then encrypted.  This prevents a real
+LSN is changed to a fake LSN and then encrypted.  This prevents a real
 LSN from being encrypted with the fake nonce bit.
 
 LSN Assignment, GiST, & Non-Permanent Relations
@@ -233,3 +233,108 @@ same page from clean to dirty during the same checkpoint, we need a new
 LSN, and wal_log_hints doesn't give us a new LSN here.  The fix for this
 is to update the page LSN by writing a dummy WAL record via
 xloginsert.c::LSNForEncryption() in such cases.
+
+
+Types of Encryption
+-------------------
+
+PostgreSQL will utilize either XTS or GCM encryption, chosen depending on your
+specific needs.
+
+
+Why XTS?
+- - - -
+
+XTS encryption provides industry standard AES encryption, however this is
+non-authenticated encryption. What this means is that there is no validation
+that the decrypted payload or non-encrypted portions of the authenticated data
+have not been changed or tampered with.  So given that this is not guaranteed,
+why would you consider using XTS encryption?
+
+The major answer here is that you can enable encryption in a new cluster while
+using just normal streaming backup tools without needing to resort to logical
+replication, so this enables you to easily switch to an encrypted cluster just
+by creating a new replica with the target encryption settings, catching up
+replication, and faililng over to the new cluster.
+
+
+Setting up with XTS
+- - - - - - - - - -
+
+XTS replication can be at initdb time for a new cluster.  If you define a new
+standby with XTS encryption, you can then stream changes from PostgreSQL, with
+the relation data being encrypted as you go.  XXX - mention rekeying the cluster
+here?
+
+
+Why GCM?
+- - - -
+
+GCM is the "authenticated encryption" portion, which ensures that encrypted and
+non-encryption portions of page data has not been tampered with.  This stores a
+16-byte tag on each Page which stores the authtag for GCM-encrypted data. If any
+of the data is modified, this authtag will no longer match and you will not be
+able to decrypt the corresponding data.  This ensures that you cannot change
+ciphertext or non-encrypted pieces of data on the page in order to leak key
+information.
+
+Since GCM-based encryption needs to store the authtag with the Page itself, this
+does mean that we cannot convert existing disk pages to this new format in a way
+that is compatible with a different cluster, so moving to a GCM-based cluster
+will require Logical Replication or a dump/restore to enable this encryption
+method, which definitely is a heavier operation.
+
+GCM encryption uses a Page Feature to reserve space in the Page structure for
+its own usage.  Since there are different benefits to either approach, we offer
+both.
+
+When GCM is used, the following data is included as AAD:
+ - PageHeaderData, up to the pg_special field:
+	PageXLogRecPtr pd_lsn;		/* LSN: next byte after last byte of xlog
+								 * record for last change to this page */
+	union {
+		uint16		checksum;	/* checksum */
+		uint16		features;	/* page feature flags */
+	} pd_feat;
+	uint16		pd_flags;		/* flag bits, see below */
+	LocationIndex pd_lower;		/* offset to start of free space */
+	LocationIndex pd_upper;		/* offset to end of free space */
+
+The rest of the page is encrypted.
+
+"pg_feat" and "pg_flags" need to be unencrypted since they are key to the interpretation of the PageFeature, and hence determine whether the page itself has an encryption tag.
+
+XXX - should we include pd_lower onward in encrypted data? Why starting with pd_special?
+
+
+Authenticated WAL encryption
+- - - - - - - - - - - - - -
+
+Regardless of whether XTS or GCM is chosen to encrypt the relation files, the
+WAL records are encrypted using AES-GCM, storing the authtag for the record
+inside the CRC field of the XLogRecordHeader. This is expanded to 64-bits from
+32-bit, and said WAL will include as Authenticated Data the following fields:
+
+IV:
+- uses the current TLI and the LSN of the WAL record as the IV
+
+Authenticated Data:
+- the entirety of the XLogRecord header up to the 
+	uint32		xl_tot_len;		/* total len of entire record */
+	TransactionId xl_xid;		/* xact id */
+	XLogRecPtr	xl_prev;		/* ptr to previous record in log */
+	uint8		xl_info;		/* flag bits, see below */
+	RmgrId		xl_rmid;		/* resource manager for this record */
+	char		xl_pad[6];		/* explicit padding; should be 0'd */
+
+The authtag for the WAL record is stored in the 8-byte xl_integrity.authtag
+field. For the purposes of single use IV/key this provides us validation for a
+significant number of transactions (XXX: find exact reuse stats), which would
+require a rekey to be set only every XXX transactions for the Relation key.
+
+Encrypted Data:
+
+- Any additional data in the XLogRecord will be encrypted using the key/IV.  For
+  everything except the XLOG_SWITCH record, this will contain at least 2 bytes
+  of a payload.  This means that there will be xl_tot_len - sizeof(XLogRecord)
+  bytes of encrypted data following this.
