@@ -271,6 +271,79 @@ pg_cipher_decrypt(PgCipherCtx *ctx, const int cipher,
 }
 
 /*
+ * current written in a way that assumes a single concurrent encryption state;
+ * may want to eventually allocate this dynamically in pg_cipher_incr_init()
+ */
+typedef struct IncrState {
+	PgCipherCtx *ctx;
+	int cipher;
+} IncrState;
+
+static IncrState incrState;
+
+/* handle incremental encryption; returns context */
+EncryptionHandle
+pg_cipher_incr_init(PgCipherCtx *ctx, const int cipher,
+					const unsigned char *iv, const int ivlen)
+{
+	bzero(&incrState, sizeof(IncrState));
+	incrState.ctx = ctx;
+	incrState.cipher = cipher;
+
+	if (cipher == PG_CIPHER_AES_GCM &&
+		!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, ivlen, NULL))
+		return NULL;
+
+	/* Set the IV for this encryption. */
+	if (!EVP_EncryptInit_ex(ctx, NULL, NULL, NULL, iv))
+		return NULL;
+	
+	return (EncryptionHandle)&incrState;
+}
+
+bool
+pg_cipher_incr_add_authenticated_data(EncryptionHandle incr,
+									  const unsigned char *aad,
+									  const int aadlen)
+{
+	int len;
+
+	/* XXX: do we need to return `len` somehow here? */
+	if (aad && aadlen && !EVP_EncryptUpdate(((IncrState *)incr)->ctx, NULL, &len, aad, aadlen))
+		return false;
+	return true;
+}
+
+bool
+pg_cipher_incr_encrypt(EncryptionHandle incr,
+					   const unsigned char *plaintext,
+					   const int inlen,
+					   unsigned char *ciphertext, int *outlen)
+{
+	if (!EVP_EncryptUpdate(((IncrState *)incr)->ctx, ciphertext, outlen, plaintext, inlen))
+		return false;
+	return true;
+}
+
+bool
+pg_cipher_incr_finish(EncryptionHandle incr,
+					  unsigned char *ciphertext, int *outlen,
+					  unsigned char *tag, const int taglen)
+{
+	if (!EVP_EncryptFinal_ex(((IncrState *)incr)->ctx, ciphertext, outlen))
+		return false;
+
+	/*
+	 * Once all of the encryption has been completed we grab the tag.
+	 */
+	if (((IncrState *)incr)->cipher == PG_CIPHER_AES_GCM &&
+		!EVP_CIPHER_CTX_ctrl(((IncrState *)incr)->ctx, EVP_CTRL_GCM_GET_TAG, taglen, tag))
+		return false;
+
+	return true;
+}
+
+/*
  * Routine to perform key wrapping for data provided.
  *
  * ctx is the encryption context which must have been created previously.

@@ -52,6 +52,8 @@ typedef EVP_CIPHER_CTX PgCipherCtx;
 typedef void PgCipherCtx;
 #endif
 
+typedef Pointer EncryptionHandle;
+
 extern PgCipherCtx *pg_cipher_ctx_create(int cipher, unsigned char *key, int klen,
 										 bool enc);
 
@@ -75,6 +77,21 @@ extern bool pg_cipher_decrypt(PgCipherCtx *ctx, const int cipher,
 							  const unsigned char *iv, const int ivlen,
 							  const unsigned char *aad, const int aadlen,
 							  unsigned char *intag, const int taglen);
+
+
+/* handle incremental encryption; returns context */
+extern EncryptionHandle pg_cipher_incr_init(PgCipherCtx *ctx, const int cipher,
+											const unsigned char *iv, const int ivlen);
+extern bool pg_cipher_incr_add_authenticated_data(EncryptionHandle incr,
+												  const unsigned char *aad,
+												  const int aadlen);
+extern bool pg_cipher_incr_encrypt(EncryptionHandle incr,
+								   const unsigned char *plaintext,
+								   const int inlen,
+								   unsigned char *ciphertext, int *outlen);
+extern bool pg_cipher_incr_finish(EncryptionHandle incr,
+								  unsigned char *ciphertext, int *outlen,
+								  unsigned char *tag, const int taglen);
 
 extern bool pg_cipher_keywrap(PgCipherCtx *ctx,
 							  const unsigned char *plaintext, const int inlen,

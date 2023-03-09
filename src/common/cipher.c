@@ -69,6 +69,44 @@ pg_cipher_decrypt(PgCipherCtx *ctx, const int cipher,
 	return false;				/* keep compiler quiet */
 }
 
+/* handle incremental encryption; returns context */
+EncryptionHandle
+pg_cipher_incr_init(PgCipherCtx *ctx, const int cipher,
+					const unsigned char *iv, const int ivlen)
+{
+	cipher_failure();
+	return NULL;				/* keep compiler quiet */
+}
+
+/* add authenticated data; can be added multiple times */
+bool
+pg_cipher_incr_add_authenticated_data(EncryptionHandle incr, const unsigned char *aad, const int aadlen)
+{
+	cipher_failure();
+	return false;				/* keep compiler quiet */
+}
+
+/* add authenticated data; can be added multiple times */
+bool
+pg_cipher_incr_encrypt(EncryptionHandle incr,
+					   const unsigned char *plaintext,
+					   const int inlen,
+					   unsigned char *ciphertext, int *outlen)
+{
+	cipher_failure();
+	return false;				/* keep compiler quiet */
+}
+
+/* finish incremental encryption */
+bool
+pg_cipher_incr_finish(EncryptionHandle incr,
+					  unsigned char *ciphertext, int *outlen,
+					  unsigned char *tag, const int taglen)
+{
+	cipher_failure();
+	return false;				/* keep compiler quiet */
+}
+
 bool
 pg_cipher_keywrap(PgCipherCtx *ctx, const unsigned char *plaintext,
 				  const int inlen, unsigned char *ciphertext, int *outlen)
