@@ -161,7 +161,7 @@ static void generateRandomFile(char *path, off_t size, size_t blockSize)
 
         /* Write the block */
         size_t actual = FileWrite(file, buf, expected, position, 0);
-        PG_ASSERT_EQ(actual, expected);
+        PG_ASSERT_EQ(expected,actual);
     }
 
     PG_ASSERT(FileClose(file) == 0);
