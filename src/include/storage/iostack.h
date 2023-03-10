@@ -15,13 +15,17 @@ typedef uint8_t Byte;
 typedef struct IoStack IoStack;
 
 /*
- * Universal functions - across all I/O stacks.
+ * Universal helper functions - across all I/O stacks.
  * TODO: Should "this" be void* or IoStack* ?  Leaning towards IoStack ...
  */
 ssize_t fileWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset, uint32 wait_event_info);
 ssize_t fileReadAll(IoStack *this, Byte *buf, size_t size, off_t offset, uint32 wait_event_info);
 ssize_t fileReadSized(IoStack *this, Byte *buf, size_t size, off_t offset, uint32 wait_event_info);
 ssize_t fileWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset, uint32 wait_event_info);
+bool fileWriteInt32(IoStack *this, uint32_t data, off_t offset, uint32 wait_event_info);
+bool fileReadInt32(IoStack *this, uint32_t *data, off_t offset, uint32 wait_event_info);
+bool fileWriteInt64(IoStack *this, uint64_t data, off_t offset, uint32 wait_event_info);
+bool fileReadInt64(IoStack *this, uint64_t *data, off_t offset, uint32 wait_event_info);
 
 
 bool filePrintf(IoStack *this, const char *format, ...);
@@ -30,28 +34,15 @@ bool fileError(void *thisVoid);
 bool fileEof(void *thisVoid);
 void fileClearError(void *thisVoid);
 bool fileErrorInfo(void *thisVoid, int *errNo, char *errMsg);
-
-/* read/write integers in network byte order (big endian) */
-bool filePut1(void *this, uint8_t value);
-bool filePut2(void *this, uint16_t value);
-bool filePut4(void *this, uint32_t value);
-bool filePut8(void *this, uint64_t value);
-uint8_t fileGet1(void *this);
-uint16_t fileGet2(void *this);
-uint32_t fileGet4(void *this);
-uint64_t fileGet8(void *this, off_t i);
+char *fileErrorMsg(void *thisVoid);
+int fileErrorNo(void *thisVoid);
 
 /* Release memory for I/O stack (after close) */
 void freeIoStack(IoStack *ioStack);
 
 /*
- * Additional filters provided by IoStack. Mix and match.
+ * Specific ilters provided by IoStack. Mix and match.
  */
-typedef struct IoStackInterface IoStackInterface;
-
-/* Universal header - minimum for an IoStack */
-
-/* Filter for buffering data.  blockSize specifies the minimum size */
 IoStack *bufferedNew(size_t suggestedSize, void *next);
 IoStack *lz4CompressNew(size_t blockSize, void *indexFile, void *next);
 IoStack *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keyLen, void *next);
@@ -65,16 +56,28 @@ IoStack *fileSystemBottomNew();
 
 /*
  * Internals moved here so fileRead, fileWrite, etc wrappers can be inlined.
+ *
+ * First, some comments about block size.
+ *  - a file consists of a sequence of blocks, where all blocks are the same
+ *    size except the last, which might be smaller.
+ *  - The size of the block expected by the stack layer is saved in ioStack->blockSize.
+ *  - Different layers in the stack may translate the data, and in doing so, change the blockSize.
+ *  - In some cases, it is necessary to negotiate block sizes between the layers.
+ *    For example, an encryption layer may add fillers or checksums to the encrypted data.
+ *  - The negotiation, if needed, is handled during the Open() call.
+ *       - At construction of the stack, all blockSizes are initialized to 0.
+ *       - When calling Open(), a layer can request a blockSize by setting nextStack(this)->blockSize to the requested size.
+ *       - During the Open(), the sublayer assigns a block size by filling in its own value for this->blockSize.
+ *       - After Open(), the calling layer verifies nextStack(this)->blockSize is acceptable.
+ *         Generally, the assigned block size must be a multiple of the requested size.
+ *       - For layers where block size doesn't matter (buffering or Posix files), the block size will be assigned as "1".
  */
-#define invoke(call, stack, args...)   (((IoStack *)(stack))->iface->fn##call((void*)(stack), args))
-#define invokeNoParms(call, stack)     (((IoStack *)(stack))->iface->fn##call((void*)(stack)))
-
-
+typedef struct IoStackInterface IoStackInterface;
 struct IoStack
 {
 	IoStack *next;
 	IoStackInterface *iface;
-	size_t blockSize;
+	ssize_t blockSize;
 	bool eof;
 	int errNo;
 	char errMsg[121];   /* alloc? */
@@ -114,5 +117,9 @@ struct IoStackInterface {
 #define fileClose(this)      									invokeNoParms(Close, this)
 
 typedef IoStack *(*IoStackCreateFunction)(void);
+
+/* Helper macros used above */
+#define invoke(call, stack, args...)   (((IoStack *)(stack))->iface->fn##call((void*)(stack), args))
+#define invokeNoParms(call, stack)     (((IoStack *)(stack))->iface->fn##call((void*)(stack)))
 
 #endif /*FILTER_IoStack_H */

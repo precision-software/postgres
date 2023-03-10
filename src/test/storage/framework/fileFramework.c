@@ -226,7 +226,7 @@ static void deleteFile(char *name)
 }
 
 
-static void regression(char *name)
+static void regression(char *name, size_t blockSize)
 {
 
     deleteFile(name);
@@ -260,14 +260,15 @@ static void regression(char *name)
 	PG_ASSERT(!FileError(file));
 	PG_ASSERT(FileClose(file) == 0);
 
-	/* Should seek to end and read EOF */
-	Byte zeros[128] = {0};
+	/* Should write a block and then read EOF */
+	Byte *block = calloc(blockSize, 1);
 	file = FileOpen(name, O_RDWR|PG_TESTSTACK);
-	PG_ASSERT_EQ(sizeof(buf), FileWrite(file, zeros, sizeof(zeros), 0, WAIT_EVENT_NONE));
-	PG_ASSERT_EQ(0, FileRead(file, buf, sizeof(buf), sizeof(zeros), WAIT_EVENT_NONE));
+	PG_ASSERT_EQ(blockSize, FileWriteSeq(file, block, blockSize, WAIT_EVENT_NONE));
+	PG_ASSERT_EQ(0, FileReadSeq(file, block, blockSize,  WAIT_EVENT_NONE));
 	PG_ASSERT(FileEof(file));
 	PG_ASSERT(!FileError(file));
 	PG_ASSERT(FileClose(file) == 0);
+	free(block);
 
 
 	deleteFile(name);
@@ -304,7 +305,7 @@ void singleSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t size, size
     /* Read back as random reads */
     verifyRandomFile(fileName, size+bufferSize, bufferSize);
 
-	regression(fileName);
+	regression(fileName, bufferSize);
 
     /* Clean things up */
     deleteFile(fileName);
@@ -338,7 +339,7 @@ void singleStreamTest(CreateTestStackFn testStack, char *nameFmt, off_t size, si
     appendFile(fileName, size, bufferSize);
     verifyFile(fileName, size + bufferSize, 16 * 1024);
 
-	regression(fileName);
+	regression(fileName, bufferSize);
 
     /* Clean things up */
     deleteFile(fileName);
@@ -350,7 +351,8 @@ void streamTest(CreateTestStackFn testStack, char *nameFmt)
 {
     for (int fileIdx = 0; fileIdx<countof(fileSize); fileIdx++)
         for (int bufIdx = 0; bufIdx<countof(blockSize); bufIdx++)
-            singleStreamTest(testStack, nameFmt, fileSize[fileIdx], blockSize[bufIdx]);
+			if  (fileSize[fileIdx] / blockSize[bufIdx] < 4 * 1024 * 1024)  // Keep nr blocks under 4M to complete in reasonable time.
+                singleStreamTest(testStack, nameFmt, fileSize[fileIdx], blockSize[bufIdx]);
 }
 
 
@@ -374,7 +376,7 @@ void singleReadSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t size, 
     appendFile(fileName, size, bufferSize);
     verifyRandomFile(fileName, size + bufferSize, bufferSize);
 
-	regression(fileName);
+	regression(fileName, bufferSize);
 
     /* Clean things up */
     deleteFile(fileName);
@@ -389,7 +391,8 @@ void readSeekTest(CreateTestStackFn testStack, char *nameFmt)
 {
     for (int fileIdx = 0; fileIdx<countof(fileSize); fileIdx++)
         for (int bufIdx = 0; bufIdx<countof(blockSize); bufIdx++)
-            singleReadSeekTest(testStack, nameFmt, fileSize[fileIdx], blockSize[bufIdx]);
+			if  (fileSize[fileIdx] / blockSize[bufIdx] < 4 * 1024 * 1024)  // Keep nr blocks under 4M to complete in reasonable time.
+                singleReadSeekTest(testStack, nameFmt, fileSize[fileIdx], blockSize[bufIdx]);
 }
 
 /*

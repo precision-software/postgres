@@ -37,3 +37,11 @@ storage_aeadtest = executable('storage_aeadtest',
   link_with: [test_lib, backend_link_with],
   link_depends: backend_link_depends,
 )
+
+storage_lz4test = executable('storage_lz4test',
+  files('lz4Test.c',  'framework/fileFramework.c', ),
+  include_directories: [include_directories('.'), postgres_inc],
+  link_args: backend_link_args,
+  link_with: [test_lib, backend_link_with],
+  link_depends: backend_link_depends,
+)

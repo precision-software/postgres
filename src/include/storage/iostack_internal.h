@@ -2,9 +2,8 @@
 Header file for developers of I/O Stacks
 
 As a quick prototype, we are NOT doing alloc/free of memory. Consequently,
-  - Errors must contain static strings.
-  - Nested errors are not supported yet.
-Probably need to manage own memory since errors could occur on malloc/free failures.
+  - Error messages are preallocated as part of the IoStack structure.
+  - Nested errors are not supported yet. (but easily done with dynamic memory allocations)
 
 This is a "header only" file.
 ***********************************************************************************************************************/
@@ -18,16 +17,17 @@ This is a "header only" file.
 #include <string.h>
 #include <stdio.h>
 
+
 #include "./iostack.h"
 
-#define DEBUG
+//#define DEBUG
 #ifndef DEBUG
 #define debug(...) ((void) 0)
 #else
-#include <assert.h>
-//#define debug(args...) fprintf(stderr, args)
+#define USE_ASSERT_CHECKING 1
+#define debug(args...) fprintf(stderr, args)
 
-#define debug(args...) elog(DEBUG2, args);
+//#define debug(args...) elog(DEBUG2, args);
 
 
 /*
@@ -99,7 +99,7 @@ inline static ssize_t setIoStackError(void *this, size_t retval, const char *fmt
 
 
 /* Test retval for system error, returning the retval */
-inline static ssize_t checkSystemError(void *thisVoid, ssize_t retval, const char *fmt, ...)
+static ssize_t checkSystemError(void *thisVoid, ssize_t retval, const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
@@ -126,7 +126,7 @@ inline static ssize_t checkSystemError(void *thisVoid, ssize_t retval, const cha
 /*
  * Copy error information from the next lower stack level to the current level.
  */
-inline static ssize_t copyError(void *thisVoid, ssize_t retval, void *thatVoid);
+inline static ssize_t copyError(void *thisVoid, ssize_t retval, void *thatVoid)
 {
 	IoStack *this = thisVoid;
 	IoStack *that = thatVoid;

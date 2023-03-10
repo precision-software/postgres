@@ -116,10 +116,14 @@ static int aeadOpen(Aead *this, const char *path, int oflags, int mode)
 	this->fileSize = 0;
 	this->sizeConfirmed = (oflags & O_TRUNC) != 0;
 
+	/* Our downstream layers must be byte oriented in order to support our header. */
+	nextStack(this)->blockSize = 1;
+
     /* Open the downstream file. No resources allocated, so return directly if it fails. */
     int retval = fileOpen(nextStack(this), path, oflags, mode);
 	if (retval < 0)
         return copyNextError(this, retval);
+	Assert(nextStack(this)->blocksize == 1);
 
 	/* Read the downstream file to get header information and configure encryption */
 	if (!aeadConfigure(this))
@@ -138,7 +142,6 @@ static int aeadOpen(Aead *this, const char *path, int oflags, int mode)
 		return setIoStackError(this, -1, "Aead block sizes incompatible:  ours=%zu  theirs=%zu", this->cryptSize,
 							   nextStack(this)->blockSize);
 	}
-
 
 	/* Allocate our own buffers based on the encryption config */
 	this->cryptBuf = malloc(this->cryptSize); /* TODO: memory allocation */

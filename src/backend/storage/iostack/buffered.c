@@ -81,9 +81,12 @@ static int bufferedOpen(Buffered *this, const char *path, int oflags, int perm)
     this->fileSize = 0;
 	this->sizeConfirmed = (oflags & O_TRUNC) != 0;
 
-	/* Peek ahead and choo)se a buffer size which is a multiple of our successor's block size */
+	/* Peek ahead and choose a buffer size which is a multiple of our successor's block size */
 	this->bufSize = ROUNDUP(this->suggestedSize, nextStack(this)->blockSize);
     this->buf = malloc(this->bufSize);
+
+	/* We are byte oriented, so we support all block sizes from our caller */
+	thisStack(this)->blockSize = 1;
 
 	/* Close our successor if we couldn't allocate memory */
 	if (this->buf == NULL)
@@ -311,7 +314,6 @@ IoStack *bufferedNew(size_t suggestedSize, void *next)
 			{
 			.next = next,
 			.iface = &bufferedInterface,
-			.blockSize = 1,
 			}
 		};
 
