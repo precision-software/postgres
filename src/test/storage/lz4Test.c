@@ -5,19 +5,21 @@
 #include "./framework/fileFramework.h"
 #include "./framework/unitTest.h"
 
-
+static IoStack *createStack(size_t blockSize)
+{
+	return bufferedNew(64, lz4CompressNew(blockSize,
+				vfdStackNew(),
+				vfdStackNew()));
+}
 void testMain()
 {
     system("rm -rf " TEST_DIR "compressed; mkdir -p " TEST_DIR "compressed");
 
-    beginTestGroup("LZ4 Compression");
-    IoStack *lz4 =
-                bufferedNew(1024,
-                    lz4CompressNew(1024,
-                        bufferedNew(1024, vfdStackNew()),
-						bufferedNew(1024, vfdStackNew())));
 
-    singleReadSeekTest(lz4, TEST_DIR "compressed/testfile_%u_%u.lz4", 1024, 64);
-    readSeekTest(lz4, TEST_DIR "compressed/testfile_%u_%u.lz4");
+    beginTestGroup("LZ4 Compression");
+	beginTest("LZ4 Compression");
+
+    singleReadSeekTest(createStack, TEST_DIR "compressed/testfile_%u_%u.lz4", 1027, 1);
+    readSeekTest(createStack, TEST_DIR "compressed/testfile_%u_%u.lz4");
 
 }

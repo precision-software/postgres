@@ -13,6 +13,6 @@ top_builddir = ../../../..
 include $(top_builddir)/src/Makefile.global
 
 OBJS = \
-	iostack.o vfd.o
+	iostack.o vfd.o buffered.o aead.o lz4.o
 
 include $(top_srcdir)/src/backend/common.mk

@@ -67,6 +67,7 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/varlena.h"
+#include "utils/wait_event.h"
 
 
 /* Globally visible state variables */
@@ -3439,7 +3440,7 @@ read_whole_file(const char *filename, int *length)
 	size_t		bytes_to_read;
 	struct stat fst;
 
-	file = FileOpenTemp(filename, PG_READ);
+	file = PathNameOpenTemporaryFile(filename, O_RDONLY);
 	if (file < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),

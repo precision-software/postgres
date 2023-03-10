@@ -53,7 +53,7 @@ ssize_t fileReadAll(IoStack *this, Byte *buf, size_t size, off_t offset, uint32 
 /*
  * Write a 4 byte int in network byte order (big endian)
  */
-static bool fileWriteInt32(IoStack *this, uint32_t data, off_t offset, uint32 wait_event_info)
+bool fileWriteInt32(IoStack *this, uint32_t data, off_t offset, uint32 wait_event_info)
 {
 	debug("fileWriteInt32: data=%d  offset=%lld\n", data, offset);
 	static Byte buf[4];
@@ -68,7 +68,7 @@ static bool fileWriteInt32(IoStack *this, uint32_t data, off_t offset, uint32 wa
 /*
  * Read a 4 byte int in network byte order (big endian)
  */
-static bool fileReadInt32(IoStack *this, uint32_t *data, off_t offset, uint32 wait_event_info)
+bool fileReadInt32(IoStack *this, uint32_t *data, off_t offset, uint32 wait_event_info)
 {
 	Byte buf[4];
 	if (fileReadAll(this, buf, 4, offset, wait_event_info) != 4)
@@ -116,6 +116,40 @@ ssize_t fileReadSized(IoStack *this, Byte *buf, size_t size, off_t offset, uint3
 	return actual;
 }
 
+
+bool fileWriteInt64(IoStack *this, uint64_t data, off_t offset, uint32 wait_event_info)
+{
+	debug("fileWriteInt64: data=%lld  offset=%lld\n", data, offset);
+	static Byte buf[8];
+	buf[0] = (Byte)(data >> 56);
+	buf[1] = (Byte)(data >> 48);
+	buf[2] = (Byte)(data >> 40);
+	buf[3] = (Byte)(data >> 32);
+	buf[4] = (Byte)(data >> 24);
+	buf[5] = (Byte)(data >> 16);
+	buf[6] = (Byte)(data >> 8);
+	buf[7] = (Byte)data;
+
+	return (fileWriteAll(this, buf, 8, offset, wait_event_info) == 8);
+}
+
+/*
+ * Read an 8 byte int in network byte order (big endian)
+ */
+bool fileReadInt64(IoStack *this, uint64_t *data, off_t offset, uint32 wait_event_info)
+{
+	Byte buf[8];
+	if (fileReadAll(this, buf, 8, offset, wait_event_info) != 8)
+		return false;
+
+	*data = (uint64_t)buf[0] << 56 | (uint64_t)buf[1] << 48 | (uint64_t)buf[2] << 40 |
+		(uint64_t)buf[3] << 32 | (uint64_t)buf[4] << 24 | (uint64_t)buf[5] << 16 |
+		(uint64_t)buf[6] << 8 | (uint64_t)buf[7];
+	debug("fileReadInt64: data=%lld  offset=%lld\n", *data, offset);
+	return true;
+}
+
+
 bool fileEof(void *thisVoid)
 {
 	IoStack *this = thisVoid;
@@ -143,6 +177,18 @@ bool fileErrorInfo(void *thisVoid, int *errNo, char *errMsg)
 	*errNo = errno = this->errNo;
 	strcpy(errMsg, this->errMsg);
 	return fileError(this);
+}
+
+char *fileErrorMsg(void *thisVoid)
+{
+	IoStack *this = thisVoid;
+	return this->errMsg;
+}
+
+int fileErrorNo(void *thisVoid)
+{
+	IoStack *this = thisVoid;
+	return this->errNo;
 }
 
 

@@ -183,6 +183,9 @@ static int vfdOpen(VfdStack *this, const char *path, int oflags, int mode)
 	this->file = PathNameOpenFilePerm_Private(path, oflags, mode);
 	debug("vfdOpen(done): file=%d  name=%s oflags=0x%x  mode=0x%x\n", this->file, path, oflags, mode);
 
+	/* We are byte oriented and can support all block sizes */
+	thisStack(this)->blockSize = 1;
+
 	return checkSystemError(this, this->file, "Unable to open vfd file %s", path);
 }
 
@@ -267,7 +270,6 @@ IoStack *vfdStackNew()
 			.ioStack = (IoStack){
 				.iface=&vfdInterface,
 				.next=NULL,
-				.blockSize = 1,
 			}
 		};
 	return (IoStack *)this;
