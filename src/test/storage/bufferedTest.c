@@ -15,7 +15,7 @@ static IoStack *createStack(size_t blockSize)
 
 void testMain()
 {
-	system("rm -rf " TEST_DIR "raw; mkdir -p " TEST_DIR "raw");
+	system("rm -rf " TEST_DIR "buffered; mkdir -p " TEST_DIR "buffered");
 
 	beginTestGroup("Raw Files");
 	singleSeekTest(createStack, TEST_DIR "buffered/testfile_%u_%u.dat", 0, 3096);
