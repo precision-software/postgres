@@ -52,6 +52,8 @@ PgCipherCtx *BufDecCtx = NULL;
 PgCipherCtx *XLogEncCtx = NULL;
 PgCipherCtx *XLogDecCtx = NULL;
 
+EncryptionHandle encr_state;
+
 static void set_buffer_encryption_iv(Page page, BlockNumber blkno,
 									 bool relation_is_permanent);
 static void
@@ -399,12 +401,15 @@ CalculateXLogRecordAuthtag(XLogRecData *recdata, XLogRecPtr address, char *tag)
 	memcpy(xlog_encryption_iv, &address, sizeof(address));
 
 	/* initialize our IV context */
-	EVP_CIPHER_CTX_ctrl(XLogEncCtx, EVP_CTRL_GCM_SET_IVLEN, 16, NULL);
-	EVP_EncryptInit_ex(XLogEncCtx, NULL, NULL, NULL, xlog_encryption_iv);
+
+	encr_state = pg_cipher_incr_init(XLogEncCtx, PG_CIPHER_AES_GCM,
+									 xlog_encryption_iv, 16);
 
 	/* initial AAD is not full length, so handle this page separately */
-	if (!EVP_EncryptUpdate(XLogEncCtx, NULL, &len, (unsigned char*)recheader,
-									 offsetof(XLogRecord,xl_integrity)))
+	if (!pg_cipher_incr_add_authenticated_data(
+			encr_state,
+			(unsigned char*)recheader,
+			offsetof(XLogRecord,xl_integrity)))
 		my_error("error when trying to update AAD");
 
 	/* also for initial page, anything past SizeOfXLogRecord needs to be
@@ -420,9 +425,7 @@ CalculateXLogRecordAuthtag(XLogRecData *recdata, XLogRecPtr address, char *tag)
 		do {
 			step = mylen > SCRATCH_SIZE ? SCRATCH_SIZE : mylen;
 
-			if (!EVP_EncryptUpdate(XLogEncCtx, scratch, &len,
-											 ptr,
-											 step))
+			if (!pg_cipher_incr_encrypt(encr_state, ptr, step, scratch, &len))
 				my_error("error when trying to update data");
 			ptr += step;
 		} while (step > 0 && (mylen -= step) > 0);
@@ -439,19 +442,17 @@ CalculateXLogRecordAuthtag(XLogRecData *recdata, XLogRecPtr address, char *tag)
 		do {
 			step = mylen > SCRATCH_SIZE ? SCRATCH_SIZE : mylen;
 
-			EVP_EncryptUpdate(XLogEncCtx, scratch, &len,
-										ptr,
-										step);
+			if (!pg_cipher_incr_encrypt(encr_state, ptr, step, scratch, &len))
+				my_error("error when trying to update data");
 			ptr += step;
 		} while (step > 0 && (mylen -= step) > 0);
 	}
 
-    /* Finalize the encryption, which could add more to output. */
-	EVP_EncryptFinal_ex(XLogEncCtx, scratch, &len);
-
-	/* Finally, extract our 64-bit tag to target location */
-	EVP_CIPHER_CTX_ctrl(XLogEncCtx, EVP_CTRL_GCM_GET_TAG, 8, authtag);
-
+    /*
+	 * Finalize the encryption, which could add more to output, and extract
+	 * our authtag.
+	 */
+	pg_cipher_incr_finish(encr_state, scratch, &len, (unsigned char*)authtag, 8);
 	memcpy(tag,authtag,8);
 }
 
@@ -483,8 +484,11 @@ void StartEncryptXLogRecord(XLogRecord *record, XLogRecPtr address)
 	memcpy(xlog_encryption_iv, &address, sizeof(address));
 
 	/* initialize our IV context */
-	EVP_CIPHER_CTX_ctrl(XLogEncCtx, EVP_CTRL_GCM_SET_IVLEN, 16, NULL);
-	EVP_EncryptInit_ex(XLogEncCtx, NULL, NULL, NULL, xlog_encryption_iv);
+	encr_state = pg_cipher_incr_init(XLogEncCtx, PG_CIPHER_AES_GCM,
+									 xlog_encryption_iv, 16);
+
+	if (!encr_state)
+		my_error("Couldn't initialize incremental encryption context");
 
 	/* reset our other state vars */
 	bytes_processed = 0;
@@ -504,8 +508,6 @@ int EncryptXLogRecordIncremental(char *plaintext, char *encdest, int len)
 
 		if (len >= remaining)
 		{
-			int aad_len;
-
 			/* copy remaining bytes into our local XLogRecord header buffer */
 			memcpy(xrechdr + bytes_processed, plaintext, remaining);
 
@@ -521,9 +523,11 @@ int EncryptXLogRecordIncremental(char *plaintext, char *encdest, int len)
 			/* initialize our encryption for the record minus the xl_integrity
 			 * field, which is calculated in an initial pass without
 			 * encrypting the underlying data. */
-			EVP_EncryptUpdate(XLogEncCtx, NULL, &aad_len, (unsigned char*)xrechdr,
-							  offsetof(XLogRecord, xl_integrity));
-			Assert(aad_len == offsetof(XLogRecord, xl_integrity));
+			pg_cipher_incr_add_authenticated_data(
+				encr_state,
+				(unsigned char*)xrechdr,
+				offsetof(XLogRecord, xl_integrity)
+			);
 
 			/* at this point, we're done with the unencrypted header and any
 			 * further data will be encrypted incrementally */
@@ -543,8 +547,14 @@ int EncryptXLogRecordIncremental(char *plaintext, char *encdest, int len)
 	{
 		int enclen;
 
-		EVP_EncryptUpdate(XLogEncCtx, (unsigned char*)encdest, &enclen, (unsigned char*)plaintext, len);
-		bytes_processed += len;
+		pg_cipher_incr_encrypt(
+			encr_state,
+			(unsigned char*)plaintext,
+			len,
+			(unsigned char*)encdest,
+			&enclen
+		);
+		bytes_processed += enclen;
 	}
 	return bytes_processed;
 }
@@ -552,15 +562,13 @@ int EncryptXLogRecordIncremental(char *plaintext, char *encdest, int len)
 void FinishEncryptXLogRecord(char *loc)
 {
 	int len;
-	char tag[8] = {0};
+	unsigned char tag[8] = {0};
 
 	Assert(bytes_processed <= bytes_tot);
 
     /* Finalize the encryption, which could add more to output. */
-	EVP_EncryptFinal_ex(XLogEncCtx, (unsigned char*)loc, &len);
+	pg_cipher_incr_finish(encr_state, (unsigned char*)loc, &len, tag, 8);
 	bytes_processed += len;
-
-	EVP_CIPHER_CTX_ctrl(XLogEncCtx, EVP_CTRL_GCM_GET_TAG, 8, tag);
 
 	/* ensure we copied all the data we expected */
 	Assert(bytes_processed == bytes_tot);
