@@ -190,15 +190,3 @@ int fileErrorNo(void *thisVoid)
 	IoStack *this = thisVoid;
 	return this->errNo;
 }
-
-
-void freeIoStack(IoStack *ioStack)
-{
-	/* Scan down the stack, freeing along the way */
-	while (ioStack != NULL)
-	{
-		IoStack *next = ioStack->next;
-		free(ioStack);
-		ioStack = next;
-	}
-}

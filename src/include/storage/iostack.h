@@ -41,12 +41,12 @@ int fileErrorNo(void *thisVoid);
 void freeIoStack(IoStack *ioStack);
 
 /*
- * Specific ilters provided by IoStack. Mix and match.
+ * Specific layers provided by IoStack. Mix and match.
  */
-IoStack *bufferedNew(size_t suggestedSize, void *next);
-IoStack *lz4CompressNew(size_t blockSize, void *indexFile, void *next);
-IoStack *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keyLen, void *next);
-IoStack *vfdStackNew(void);
+void *bufferedNew(size_t suggestedSize, void *next);
+void *lz4CompressNew(size_t blockSize, void *indexFile, void *next);
+void *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keyLen, void *next);
+void *vfdStackNew(void);
 
 /* Filter for talking to Posix files. Not used by Postgres, but handy for unit tests. */
 IoStack *fileSystemBottomNew();
@@ -55,7 +55,7 @@ IoStack *fileSystemBottomNew();
 #define EIOSTACK EBADF
 
 /*
- * Internals moved here so fileRead, fileWrite, etc wrappers can be inlined.
+ * Internals moved here so fileRead, fileWrite, etc can be inlined.
  *
  * First, some comments about block size.
  *  - a file consists of a sequence of blocks, where all blocks are the same
@@ -64,7 +64,7 @@ IoStack *fileSystemBottomNew();
  *  - Different layers in the stack may translate the data, and in doing so, change the blockSize.
  *  - In some cases, it is necessary to negotiate block sizes between the layers.
  *    For example, an encryption layer may add fillers or checksums to the encrypted data.
- *  - The negotiation, if needed, is handled during the Open() call.
+ *  - The negotiation, if needed, is handled during the Open() call. TODO: OUT OF DATE.
  *       - At construction of the stack, all blockSizes are initialized to 0.
  *       - When calling Open(), a layer can request a blockSize by setting nextStack(this)->blockSize to the requested size.
  *       - During the Open(), the sublayer assigns a block size by filling in its own value for this->blockSize.
@@ -75,24 +75,25 @@ IoStack *fileSystemBottomNew();
 typedef struct IoStackInterface IoStackInterface;
 struct IoStack
 {
-	IoStack *next;
-	IoStackInterface *iface;
-	ssize_t blockSize;
-	bool eof;
-	int errNo;
-	char errMsg[121];   /* alloc? */
+	IoStack *next;					/* Pointer to the next lower layer of the IoStack */
+	IoStackInterface *iface;		/* The implementation of the IoStack functions, eg Read, Write, Open */
+	ssize_t blockSize;				/* The block size this layer is expecting. Can be queried by the layer above */
+	ssize_t openVal; 				/* The value returned by the bottom layer's open call */
+	bool eof;						/* True if End of file.  Reset by next read */
+	int errNo;                      /* System error number - cleared by ??? */
+	char errMsg[121];               /* Error message */
 };
 
 /*
  * A set of functions each IoStack must provide.
  */
-typedef int (*IoStackOpen)(void *this, const char *path, int mode, int perm);
+typedef IoStack *(*IoStackOpen)(void *this, const char *path, int mode, int perm);
 typedef ssize_t (*IoStackRead)(void *this, Byte *buf, size_t size, off_t offset, uint32 wait_event_info);
 typedef ssize_t (*IoStackWrite)(void *this, const Byte *buf, size_t size, off_t offset, uint32 wait_event_info);
-typedef int (*IoStackSync)(void *this, uint32 wait_event_info);
-typedef int (*IoStackClose)(void *this);
+typedef ssize_t (*IoStackSync)(void *this, uint32 wait_event_info);
+typedef ssize_t (*IoStackClose)(void *this);
 typedef off_t (*IoStackSize)(void *this);
-typedef int (*IoStackTruncate) (void *this, off_t offset, uint32 wait_event_info);
+typedef off_t (*IoStackTruncate) (void *this, off_t offset, uint32 wait_event_info);
 
 struct IoStackInterface {
 	IoStackOpen fnOpen;
@@ -108,7 +109,7 @@ struct IoStackInterface {
  * Abstract functions required for each filter in an I/O Stack. TODO: declare as inline functions.
  * TODO: Rename, file-->stack, and Write-->WritePartial and WriteAll-->Write
  */
-#define fileOpen(this, path, oflags, mode)       				(fileClearError(this), invoke(Open, this, path, oflags, mode))
+#define fileOpen(this, path, oflags, mode)       				(IoStack *)(fileClearError(this), invoke(Open, this, path, oflags, mode))
 #define fileWrite(this, buf, size, offset, wait_event_info)  	invoke(Write, this, buf, size, offset, wait_event_info)
 #define fileRead(this, buf, size, offset, wait_event_info)   	invoke(Read,  this, buf, size, offset, wait_event_info)
 #define fileSync(this, wait_event_info)                      	invoke(Sync, this, wait_event_info)

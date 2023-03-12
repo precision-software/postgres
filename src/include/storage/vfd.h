@@ -72,11 +72,11 @@ static inline const char *getName(File file)
 
 /* open flags to select which I/O Stack to use (eg. plaintext, encryption, ...) */
 #define PG_STACK_MASK     (7 << 28)
-#define PG_PLAIN          (0 << 28)
 #define PG_ENCRYPT        (1 << 28)
 #define PG_ECOMPRESS      (2 << 28)
 #define PG_ENCRYPT_PERM   (3 << 28)
 #define PG_TESTSTACK      (4 << 28)
+#define PG_PLAIN          (5 << 28)
 
 /* These are flag combinations frequently used in postgres */
 #define PG_CREATE (O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY)
@@ -89,6 +89,6 @@ static inline const char *getName(File file)
 #define PG_LIMIT 0      /* Temp file limits apply */
 
 /* Points to the I/O Stack create function for unit testing (PG_TESTSTACK) */
-extern IoStack *(*testStackNew)();
+extern IoStack *ioStackTest;
 
 #endif //VFD_H

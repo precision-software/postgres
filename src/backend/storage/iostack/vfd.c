@@ -41,8 +41,8 @@ extern int FileSync_Private(File file, uint32 wait_event_info);
 extern off_t FileSize_Private(File file);
 extern int	FileTruncate_Private(File file, off_t offset, uint32 wait_event_info);
 
-/* Prototypes */
-IoStack *IoStackNew(const char *path, int oflags, int mode);
+/* Forward References. */
+static IoStack *selectIoStack(const char *path, int oflags, int mode);
 IoStack *vfdNew();
 
 /* Wrapper for backwards compatibility */
@@ -61,24 +61,26 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x\n", fileName, fileFlags, fileMode);
 	/* Allocate an I/O stack for this file. */
-	IoStack *ioStack = IoStackNew(fileName, fileFlags, fileMode);
-	if (ioStack == NULL)
+	IoStack *proto = selectIoStack(fileName, fileFlags, fileMode);
+
+	if (proto == NULL)
 		return -1;
 
 	/* I/O stacks don't implement O_APPEND, so position to FileSize instead */
 	bool append = (fileFlags & O_APPEND) != 0;
 	fileFlags &= ~O_APPEND;
 
-	/* Open the I/O stack. If successful, save it in vfd structure. */
-	File file = fileOpen(ioStack, fileName, fileFlags, fileMode);
+	/* Open the  prototype I/O stack */
+	IoStack *ioStack = fileOpen(proto, fileName, fileFlags, fileMode);
+	File file = ioStack->openVal;
 	if (file < 0)
 	{
-		freeIoStack(ioStack);
+		free(ioStack);
 		return -1;
 	}
-	Vfd *vfdP = getVfd(file);
 
-	/* Save the I/O stack associated with this file */
+	/* Save the I/O stack in the vfd structure */
+	Vfd *vfdP = getVfd(file);
 	vfdP->ioStack = ioStack;
 
 	/* Position at end of file if appending. This only impacts WriteSeq and ReadSeq. */
@@ -107,7 +109,7 @@ int FileClose(File file)
 	/* Close the file.  The low level routine will invalidate the "file" index */
 	IoStack *stack = getStack(file);
 	int retval = fileClose(stack);
-	freeIoStack(stack);
+	free(stack); // TODO: ensure errno is preserved.
     debug("FileClose(done): file=%d retval=%d\n", file, retval);
 	return retval;
 }
@@ -167,37 +169,53 @@ int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
 
 
 /*
- * Wrappers which fit the internal File* routines into the IoStack.
+ * Bottom of an I/O stack using PostgreSql's Virtual File Descriptors.
  */
 typedef struct VfdStack
 {
-	IoStack ioStack;
-	File file;
-} VfdStack;
+	IoStack ioStack;   /* Header used for all I/O stack types */
+	File file;         /* Virtual file descriptor of the underlying file. */
+} VfdBottom;
 
 
-static int vfdOpen(VfdStack *this, const char *path, int oflags, int mode)
+/*
+ * Open a file using a virtual file descriptor.
+ */
+static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, int mode)
 {
+	/* Clone the bottom prototype. */
+	VfdBottom *this = vfdStackNew(); /* No parameters to copy */
+
 	/* Clear the I/O Stack flags so we don't get confused */
 	oflags &= ~PG_STACK_MASK;
+
+	/* Open the file and get a VFD. */
 	this->file = PathNameOpenFilePerm_Private(path, oflags, mode);
-	debug("vfdOpen(done): file=%d  name=%s oflags=0x%x  mode=0x%x\n", this->file, path, oflags, mode);
+	checkSystemError(this, this->file, "Unable to open vfd file %s", path);
 
 	/* We are byte oriented and can support all block sizes */
 	thisStack(this)->blockSize = 1;
+	thisStack(this)->openVal = this->file;
 
-	return checkSystemError(this, this->file, "Unable to open vfd file %s", path);
+	/* Always return a new I/O stack structure. It contains error info if problems occurred. */
+	debug("vfdOpen(done): file=%d  name=%s oflags=0x%x  mode=0x%x\n", this->file, path, oflags, mode);
+	return this;
 }
 
-
-static ssize_t vfdWrite(VfdStack *this, const Byte *buf,size_t bufSize, off_t offset, uint32 wait_event_info)
+/*
+ * Write a random block of data to a virtual file descriptor.
+ */
+static ssize_t vfdWrite(VfdBottom *this, const Byte *buf, size_t bufSize, off_t offset, uint32 wait_event_info)
 {
 	ssize_t actual = FileWrite_Private(this->file, buf, bufSize, offset, wait_event_info);
 	debug("vfdWrite: file=%d  name=%s  size=%zu  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
 	return checkSystemError(this, actual, "Unable to write to file");
 }
 
-static ssize_t vfdRead(VfdStack *this, Byte *buf,size_t bufSize, off_t offset, uint32 wait_event_info)
+/*
+ * Read a random block of data from a virtual file descriptor.
+ */
+static ssize_t vfdRead(VfdBottom *this, Byte *buf, size_t bufSize, off_t offset, uint32 wait_event_info)
 {
 	Assert(bufSize > 0 && offset >= 0);
 
@@ -206,19 +224,26 @@ static ssize_t vfdRead(VfdStack *this, Byte *buf,size_t bufSize, off_t offset, u
 	return checkSystemError(this, actual, "Unable to read from file %s", getName(this->file));
 }
 
-static int vfdClose(VfdStack *this)
+/*
+ * Close the virtual file descriptor.
+ */
+static ssize_t vfdClose(VfdBottom *this)
 {
 	debug("vfdClose: file=%d name=%s\n", this->file, getName(this->file));
-	Assert(this->file != -1);
+	/* If the file is closed, mark it as a bad file descriptor */
+	if (this->file < 0)
+	{
+		errno = EBADF;
+		return checkSystemError(this, -1, "Closing a file which is alread closed");
+	}
 
 	/* Mark this stack as closed */
 	File file = this->file;
 	this->file = -1;
 	getVfd(file)->ioStack = NULL;
 
-	/* Close the file for real. We are at the bottom of the IoStack. */
+	/* Close the file for real. */
 	int retval = FileClose_Private(file);
-	this->file = -1;
 
 	/* Note: We allocated ioStack in FileOpen, so we will free it in FileClose */
 	debug("vfdClose(done): file=%d  retval=%d\n", file, retval);
@@ -226,20 +251,20 @@ static int vfdClose(VfdStack *this)
 }
 
 
-static int vfdSync(VfdStack *this, uint32 wait_event_info)
+static ssize_t vfdSync(VfdBottom *this, uint32 wait_event_info)
 {
 	int retval = FileSync_Private(this->file, wait_event_info);
 	return checkSystemError(this, retval, "Unable to sync file");
 }
 
-static off_t vfdSize(VfdStack *this)
+static off_t vfdSize(VfdBottom *this)
 {
 	off_t offset = FileSize_Private(this->file);
 	return checkSystemError(this, offset, "Unable to get file size");
 }
 
 
-static int vfdTruncate(VfdStack *this, off_t offset, uint32 wait_event_info)
+static off_t vfdTruncate(VfdBottom *this, off_t offset, uint32 wait_event_info)
 {
 	int retval = FileTruncate_Private(this->file, offset, wait_event_info);
 	return checkSystemError(this, retval, "Unable to truncate file");
@@ -261,10 +286,10 @@ IoStackInterface vfdInterface = (IoStackInterface)
 /**
  * Create a new Vfd I/O Stack.
  */
-IoStack *vfdStackNew()
+void *vfdStackNew()
 {
-	VfdStack *this = malloc(sizeof(VfdStack));
-	*this = (VfdStack)
+	VfdBottom *this = malloc(sizeof(VfdBottom));
+	*this = (VfdBottom)
 		{
 			.file = -1,
 			.ioStack = (IoStack){
@@ -272,7 +297,7 @@ IoStack *vfdStackNew()
 				.next=NULL,
 			}
 		};
-	return (IoStack *)this;
+	return this;
 }
 
 /* TODO: the following may belong in a different file ... */
@@ -292,26 +317,57 @@ IoStack *(*testStackNew)() = NULL;
  * or create different stacks if reading vs writing.
  * The current version uses special "PG_*" open flags.
  */
-IoStack *IoStackNew(const char *name, int oflags, int mode)
+
+/* Prototype stacks */
+static bool ioStacksInitialized = false;
+IoStack *ioStackPlain;
+IoStack *ioStackEncrypt;
+IoStack *ioStackPerm;
+IoStack *ioStackTest;
+IoStack *ioStackRaw;
+
+/*
+ * Initialize the I/O stack infrastructure.
+ */
+void ioStackSetup()
 {
-	debug("IoStackNew: name=%s  oflags=0x%x  mode=o%o\n", name, oflags, mode);
+	/* Set up the prototype stacks */
+	ioStackRaw = vfdStackNew();
+	ioStackEncrypt = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen, vfdStackNew()));
+	ioStackPerm = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, permKey, permKeyLen, vfdStackNew()));
+	ioStackPlain = bufferedNew(64*1024, vfdStackNew());
+
+	ioStackEncrypt = bufferedNew(1, lz4CompressNew(64 * 1024, vfdStackNew(), vfdStackNew()));
+
+	/* Note we are now initialized */
+	ioStacksInitialized = true;
+}
+
+/*
+ * Select the appropriate I/O Stack.
+ * This function provides flexibility in how I/O stacks are created.
+ * It can look at open flags, do GLOB matching on pathnames,
+ * or create different stacks if reading vs writing.
+ * The current version looks for special "PG_*" open flags.
+ */
+static IoStack *selectIoStack(const char *path, int oflags, int mode)
+{
+	debug("IoStackNew: name=%s  oflags=0x%x  mode=o%o\n", path, oflags, mode);
+
+	/* Set up the I/O prototype stacks if not already done */
+	if (!ioStacksInitialized)
+		ioStackSetup();
+
+	/* TODO: create prototypes at beginning. Here, we just select them */
 	/* Look at oflags to determine which stack to use */
 	switch (oflags & PG_STACK_MASK)
 	{
-		case PG_NOCRYPT: return vfdStackNew();
+		case PG_PLAIN:            return ioStackPlain;
+		case PG_ENCRYPT:          return ioStackEncrypt;
+		case PG_ENCRYPT_PERM:     return ioStackPerm;
+		case PG_TESTSTACK:        return ioStackEncrypt;
+		case 0:                   return ioStackRaw;
 
-		case PG_ENCRYPT:
-			return bufferedNew(1,
-				aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
-					vfdStackNew()));
-		case PG_ENCRYPT_PERM:
-			return bufferedNew(1,
-							   aeadNew("AES-256-GCM", 16 * 1024, permKey, permKeyLen,
-									   vfdStackNew()));
-
-		case PG_TESTSTACK: Assert(testStackNew != NULL);
-			return testStackNew();
-
-		default: elog(FATAL, "Unrecognized encryption oflag 0x%x", (oflags & PG_STACK_MASK));
+		default: elog(FATAL, "Unrecognized I/O Stack oflag 0x%x", (oflags & PG_STACK_MASK));
 	}
 }
