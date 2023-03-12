@@ -23,7 +23,7 @@
 
 struct Buffered
 {
-    IoStack iostack;        /* Common to all filters */
+    IoStack ioStack;        /* Common to all filters */
     size_t suggestedSize;   /* The suggested buffer size. We may make it a bit bigger */
 
     Byte *buf;             /* Local buffer, precisely one block in size. */
@@ -50,27 +50,33 @@ static bool flushBuffer(Buffered *this, uint32 wait_info);
 static bool fillBuffer(Buffered *this, uint32 wait_info);
 static ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t offset, uint32 wait_info);
 static ssize_t directRead(Buffered *this, Byte *buf, size_t size, off_t offset, uint32 wait_info);
-static bool bufferedSeek(Buffered *this, off_t position, uint32 wait_info);
+static bool positionToBuffer(Buffered *this, off_t position, uint32 wait_info);
+static Buffered *bufferedCleanup(Buffered *this);
 
 /**
  * Open a buffered file, reading, writing or both.
  */
-static int bufferedOpen(Buffered *this, const char *path, int oflags, int perm)
+static Buffered *bufferedOpen(Buffered *proto, const char *path, int oflags, int perm)
 {
+    /* Below us, we need to read/modify/write even if write only. */
+    if ( (oflags & O_ACCMODE) == O_WRONLY)
+        oflags = (oflags & ~O_ACCMODE) | O_RDWR;
+
+    /* Open the downstream file and clone our prototype */
+    IoStack *next = fileOpen(nextStack(proto), path, oflags, perm);
+	Buffered *this = bufferedNew(proto->suggestedSize, next);
+
+	/* Extra return parameters */
+	this->ioStack.openVal = next->openVal;
+	this->ioStack.blockSize = 1;
+
+	/* If an open error occurred, save the error and free the downstream node */
+	if (next->openVal < 0)
+	    return bufferedCleanup(this);
 
 	/* Are we read/writing or both? */
 	this->readable = (oflags & O_ACCMODE) != O_WRONLY;
 	this->writeable = (oflags & O_ACCMODE) != O_RDONLY;
-
-    /* Below us, we need to read/modify/write even if write only. */
-    if ( (oflags & O_ACCMODE) == O_WRONLY)
-        oflags = (oflags & ~O_ACCMODE) | O_RDWR;
-	fileClearError(this);
-
-    /* Open the downstream file */
-    int ret = fileOpen(nextStack(this), path, oflags, perm);
-	if (ret < 0)
-		return copyNextError(this, ret);
 
     /* Position to the start of file with an empty buffer */
     this->bufPosition = 0;
@@ -85,19 +91,15 @@ static int bufferedOpen(Buffered *this, const char *path, int oflags, int perm)
 	this->bufSize = ROUNDUP(this->suggestedSize, nextStack(this)->blockSize);
     this->buf = malloc(this->bufSize);
 
-	/* We are byte oriented, so we support all block sizes from our caller */
-	thisStack(this)->blockSize = 1;
-
 	/* Close our successor if we couldn't allocate memory */
 	if (this->buf == NULL)
 	{
 		checkSystemError(this, -1, "bufferedOpen failed to allocate %z bytes", this->bufSize);
-		fileClose(nextStack(this));
-		return -1;
+		return bufferedCleanup(this);
 	}
 
 	/* Success */
-	return ret;
+	return this;
 }
 
 
@@ -113,7 +115,7 @@ static size_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t 
 	this->wait_info = wait_info;
 
 	/* Position to the new block if it changed. */
-	if (!bufferedSeek(this, offset, wait_info))
+	if (!positionToBuffer(this, offset, wait_info))
 		return -1;
 
     /* If buffer is empty, offset is aligned, and the data exceeds block size, write directly to next stage */
@@ -157,7 +159,7 @@ static ssize_t bufferedRead(Buffered *this, Byte *buf, size_t size, off_t offset
 	assert(size > 0);
 
 	/* Position to the new block if it changed. */
-	if (!bufferedSeek(this, offset, wait_info))
+	if (!positionToBuffer(this, offset, wait_info))
 		return -1;
 
 	/* If buffer is empty, offset is aligned, and the data exceeds block size, write directly to next stage */
@@ -171,7 +173,7 @@ static ssize_t bufferedRead(Buffered *this, Byte *buf, size_t size, off_t offset
 	/* Copy data from the current buffer */
 	ssize_t actual = copyOut(this, buf, size, offset);
 
-	this->iostack.eof = (actual == 0);
+	this->ioStack.eof = (actual == 0);
 	return actual;
 }
 
@@ -194,16 +196,16 @@ static ssize_t directRead(Buffered *this, Byte *buf, size_t size, off_t offset, 
 /**
  * Seek to a position
  */
-static bool bufferedSeek(Buffered *this, off_t position, uint32 wait_event)
+static bool positionToBuffer(Buffered *this, off_t position, uint32 wait_info)
 {
     /* Do nothing if we are already position at the proper block */
     off_t newBlock = ROUNDDOWN(position, this->bufSize);
-    debug("bufferedSeek: position=%lld  newBlock=%lld bufPosition=%lld\n", position, newBlock, this->bufPosition);
+    debug("positionToBuffer: position=%lld  newBlock=%lld bufPosition=%lld\n", position, newBlock, this->bufPosition);
     if (newBlock == this->bufPosition)
 	    return true;
 
 	/* flush current block. */
-	if (!flushBuffer(this, wait_event))
+	if (!flushBuffer(this, wait_info))
 		return false;
 
 	/* Update position */
@@ -219,18 +221,13 @@ static bool bufferedSeek(Buffered *this, off_t position, uint32 wait_event)
 static int bufferedClose(Buffered *this)
 {
     /* Flush our buffers. */
-    bool success = flushBuffer(this, this->wait_info);
+    flushBuffer(this, this->wait_info);
 
-    /* Pass on the close request., */
-    success &= fileClose(nextStack(this)) == 0;
+	/* Clean things up */
+    bufferedCleanup(this);
 
-    this->readable = this->writeable = false;
-    if (this->buf != NULL)
-        free(this->buf);
-	this->buf = NULL;
-
-	debug("bufferedClose(end): success=%d\n", success);
-	return success? 0: -1;
+	debug("bufferedClose(end): msg=%s\n", this->ioStack.errMsg);
+	return stackHasError(this)? -1: 0;
 }
 
 
@@ -257,7 +254,7 @@ static int bufferedSync(Buffered *this, uint32 wait_info)
 static int bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
 {
 	/* Position our buffer with the given position */
-	if (!bufferedSeek(this, offset, this->wait_info))
+	if (!positionToBuffer(this, offset, this->wait_info))
 	    return false;
 
 	/* Truncate the underlying file */
@@ -304,20 +301,20 @@ IoStackInterface bufferedInterface = (IoStackInterface)
  Create a new buffer filter object.
  It converts input bytes to records expected by the next filter in the pipeline.
  */
-IoStack *bufferedNew(size_t suggestedSize, void *next)
+void *bufferedNew(size_t suggestedSize, void *next)
 {
     Buffered *this = malloc(sizeof(Buffered));
     *this = (Buffered)
 		{
 		.suggestedSize = (suggestedSize == 0)? 16*1024: suggestedSize,
-		.iostack = (IoStack)
+		.ioStack = (IoStack)
 			{
 			.next = next,
 			.iface = &bufferedInterface,
 			}
 		};
 
-    return (IoStack *)this;
+    return this;
 }
 
 
@@ -361,7 +358,7 @@ static bool fillBuffer (Buffered *this, uint32 wait_info)
 	if (this->sizeConfirmed && this->bufPosition == this->fileSize)
 	{
 		this->bufActual = 0;
-		this->iostack.eof = true;
+		this->ioStack.eof = true;
 		return true;
 	}
 
@@ -389,10 +386,7 @@ static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t positi
 
     /* Check to see if we are creating holes. */
 	if (position > this->bufPosition + this->bufActual)
-	{
-		setIoStackError(this, -1, "Buffered I/O stack would create a hole");
-		return -1;
-	}
+	    return setIoStackError(this, -1, "Buffered I/O stack would create a hole");
 
 	/* Copy bytes into the buffer, up to end of data or end of buffer */
 	off_t offset = position - this->bufPosition;
@@ -415,10 +409,7 @@ static ssize_t copyOut(Buffered *this, Byte *buf, size_t size, off_t position)
 	/* Check to see if we are skipping over holes */
 	size_t offset = position - this->bufPosition;
 	if (offset > this->bufActual)
-	{
-		setIoStackError(this, -1, "Buffered I/O stack hole");
-		return -1;
-	}
+	    return setIoStackError(this, -1, "Buffered I/O stack hole");
 
 	/* Copy bytes out of the buffer, up to end of data or end of buffer */
     ssize_t actual = MIN(this->bufActual - offset, size);
@@ -426,4 +417,34 @@ static ssize_t copyOut(Buffered *this, Byte *buf, size_t size, off_t position)
     debug("copyOut: size=%zu bufPosition=%lld bufActual=%zu offset=%zu  actual=%zu\n",
           size, this->bufPosition, this->bufActual, offset, actual);
     return actual;
+}
+
+
+/*
+ * Clean up when no longer needed.
+ */
+static Buffered *bufferedCleanup(Buffered *this)
+{
+	IoStack *next = this->ioStack.next;
+
+	/* Close the next layer if opened */
+	if (next != NULL && next->openVal >= 0)
+		fileClose(next);
+	this->ioStack.openVal = -1;
+
+	/* If we have no errors, then use error info from successor */
+	if (!stackHasError(this) && next != NULL && stackHasError(next))
+		copyNextError(this, -1);
+
+	/* Free the next layer if allocated */
+	if (next!= NULL)
+		free(next);
+	this->ioStack.next = NULL;
+
+	/* Free the buffer if allocated */
+	if (this->buf != NULL)
+		free(this->buf);
+	this->buf = NULL;
+
+	return this;
 }

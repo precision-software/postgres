@@ -20,7 +20,7 @@ This is a "header only" file.
 
 #include "./iostack.h"
 
-//#define DEBUG
+#define DEBUG
 #ifndef DEBUG
 #define debug(...) ((void) 0)
 #else
@@ -141,6 +141,26 @@ inline static ssize_t copyError(void *thisVoid, ssize_t retval, void *thatVoid)
 inline static ssize_t copyNextError(void *this, ssize_t retval)
 {
 	return copyError(this, retval, nextStack(this));
+}
+
+/*
+ * Does the stack have an error condition?
+ */
+inline static bool stackHasError(void *this)
+{
+	return thisStack(this)->errNo != 0;
+}
+
+/*
+ * Clear the error condition. True if there was one.
+ */
+inline static bool stackClearError(void *thisVoid)
+{
+	IoStack *this = thisVoid;
+	bool retVal = stackHasError(this);
+	this->errNo = 0;
+	this->errMsg[0] = 0;
+	return retVal;
 }
 
 

@@ -420,11 +420,5 @@ static IoStack *boundFunction()
  */
 void setTestStack(CreateTestStackFn fn, size_t blockSize)
 {
-	/* Create "boundFunction" by binding fn with blockSize */
-	boundBlockSize = blockSize;
-	boundTestStackFn = fn;
-
-	/* Install boundFunction for PG_TESTSTACK */
-	extern IoStack *(*testStackFn)(void);
-	testStackNew = boundFunction;
+	ioStackTest = fn(blockSize);
 }

@@ -37,6 +37,7 @@ bool aeadHeaderRead(Aead *this);
 bool aeadHeaderWrite(Aead *this);
 static ssize_t setOpenSSLError(Aead *this, ssize_t ret);
 static int freeResources(Aead *this);
+static Aead *aeadCleanup(Aead *this);
 
 
 /**
@@ -66,7 +67,7 @@ struct Aead
     EVP_CIPHER_CTX *ctx;         /* libcrypto context. */
 
     /* Our state after we've opened the encrypted file */
-    size_t headerSize;            /* Size of the header we read/wrote to the encrypted file */
+    ssize_t headerSize;            /* Size of the header we read/wrote to the encrypted file */
     size_t blockNr;               /* The block sequence number, starting at 0 and incrementing. */
 	Byte *cryptBuf;               /* Buffer to hold the current encrypted block */
     size_t cryptSize;             /* The size of the encrypted blocks */
@@ -93,8 +94,18 @@ struct Aead
  * @param mode - if creating a file, the permissions.
  * @return - Error status.
  */
-static int aeadOpen(Aead *this, const char *path, int oflags, int mode)
+static Aead *aeadOpen(Aead *proto, const char *path, int oflags, int mode)
 {
+	/* Open our successor and clone ourself */
+	IoStack *next = fileOpen(nextStack(proto), path, oflags, mode);
+	Aead *this = aeadNew(proto->cipherName, proto->suggestedSize, proto->key, proto->keySize, next);
+	this->ioStack.openVal = next->openVal;
+
+	if (next->openVal < 0)
+		return aeadCleanup(this);
+
+	/* Our successor must by byte oriented to support header */
+	Assert(next->blockSize == 1);
 
 	/* Is the file readable/writable? */
 	this->writable = (oflags & O_ACCMODE) != O_RDONLY;
@@ -105,50 +116,36 @@ static int aeadOpen(Aead *this, const char *path, int oflags, int mode)
 	if ((oflags & O_ACCMODE) == O_WRONLY)
 		oflags = (oflags & ~O_ACCMODE) | O_RDWR;
 
-	/* Clear buf pointers so we don't try to free them on error */
-	this->cryptBuf = NULL;
-	this->plainBuf = NULL;
-	this->cipher = NULL;
-	this->ctx = NULL;
-
 	/* Track the file size as we know it so far, so we avoid having to query fileSize to get it */
 	this->maxWritePosition = 0;
 	this->fileSize = 0;
 	this->sizeConfirmed = (oflags & O_TRUNC) != 0;
 
-	/* Our downstream layers must be byte oriented in order to support our header. */
-	nextStack(this)->blockSize = 1;
-
-    /* Open the downstream file. No resources allocated, so return directly if it fails. */
-    int retval = fileOpen(nextStack(this), path, oflags, mode);
-	if (retval < 0)
-        return copyNextError(this, retval);
-	Assert(nextStack(this)->blocksize == 1);
-
 	/* Read the downstream file to get header information and configure encryption */
 	if (!aeadConfigure(this))
-	{
-		freeResources(this);
-		return -1;
-	}
+	    return aeadCleanup(this);
 
-	/* Make note of our file's plaintext blocksize */
+	/* Inform our caller of our file's plaintext blocksize */
 	thisStack(this)->blockSize = this->plainSize;
 
-	/* Verify our block sizes are compatible */
-	if (this->cryptSize % nextStack(this)->blockSize != 0)
+	/* Allocate our own buffers based on the encryption config */
+	this->cryptBuf = malloc(this->cryptSize);
+	if (this->cryptBuf == NULL)
 	{
-		freeResources(this);
-		return setIoStackError(this, -1, "Aead block sizes incompatible:  ours=%zu  theirs=%zu", this->cryptSize,
-							   nextStack(this)->blockSize);
+		checkSystemError(this, -1, "Unable to allocate encryption buffer of size %zd", this->cryptSize);
+		return aeadCleanup(this);
 	}
 
-	/* Allocate our own buffers based on the encryption config */
-	this->cryptBuf = malloc(this->cryptSize); /* TODO: memory allocation */
 	this->plainBuf = malloc(this->plainSize);
+	if (this->plainBuf == NULL)
+	{
+		checkSystemError(this, -1, "Unable to allocate plaintext buffer of size %zd", this->plainSize);
+		return aeadCleanup(this);
+	}
 
-	this->open = true;
-	return retval;
+	/* Inform our caller of our file's plaintext blocksize */
+	thisStack(this)->blockSize = this->plainSize;
+	return this;
 }
 
 
@@ -252,7 +249,7 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset, 
 /**
  * Close this encryption stack releasing resources.
  */
-static int aeadClose(Aead *this)
+static ssize_t aeadClose(Aead *this)
 {
 	debug("aeadClose: maxWrite=%llu fileSize=%lld\n", this->maxWritePosition, this->fileSize);
 
@@ -270,9 +267,9 @@ static int aeadClose(Aead *this)
 	}
 
 	/* Release resources, including closing the downstream file */
-	int retval = freeResources(this);
-	debug("aeadClose(done): retval=%d\n", retval);
-	return retval;
+	aeadCleanup(this);
+	debug("aeadClose(done): retval=%d\n", this->ioStack.openVal);
+	return stackHasError(this)? -1: 0;
 }
 
 static int freeResources(Aead *this)
@@ -394,7 +391,7 @@ static off_t aeadSize(Aead *this)
 	return this->fileSize;
 }
 
-static int aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
+static off_t aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
 {
 	/* If truncating at a partial block, read in the block being truncated */
 	off_t blockOffset = ROUNDDOWN(offset, this->plainSize);
@@ -451,7 +448,7 @@ IoStackInterface aeadInterface = {
 /*
  * Create a new aead encryption/decryption filter
  */
-IoStack *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keySize, void *next)
+void *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keySize, void *next)
 {
     Aead *this = malloc(sizeof(Aead));
 	*this = (Aead) {
@@ -863,4 +860,42 @@ static ssize_t setOpenSSLError(Aead *this, ssize_t ret)
 	int code = ERR_get_error();
 	char *msg = ERR_error_string(code, NULL);
 	return setIoStackError(this, ret, "OpenSSL error: (%d) %s", code, msg);
+}
+
+
+static Aead *aeadCleanup(Aead *this)
+{
+	IoStack *next = this->ioStack.next;
+
+	/* Close the downstream layer if opened */
+	if (next != NULL && next->openVal >= 0)
+		fileClose(next);
+	this->ioStack.openVal = -1;
+
+	/* If we have no errors, then report error info from successor */
+	if (!stackHasError(this) && next != NULL && stackHasError(next))
+		copyNextError(this, -1);
+
+	/* Free the next layer if allocated */
+	if (next != NULL)
+		free(next);
+	this->ioStack.next = NULL;
+
+	/* Free the buffers if allocated */
+	if (this->cryptBuf != NULL)
+		free(this->cryptBuf);
+	this->cryptBuf = NULL;
+	if (this->plainBuf != NULL)
+		free(this->plainBuf);
+	this->plainBuf = NULL;
+
+	/* Free the OpenSSL structures */
+	if (this->ctx != NULL)
+		EVP_CIPHER_CTX_free(this->ctx);
+	this->ctx = NULL;
+	if (this->cipher != NULL)
+		EVP_CIPHER_free(this->cipher);
+	this->cipher = NULL;
+
+	return this;
 }

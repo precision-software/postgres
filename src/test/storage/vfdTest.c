@@ -8,14 +8,19 @@
 #include "./framework/fileFramework.h"
 #include "./framework/unitTest.h"
 
+extern IoStack *ioStackEncrypt;
+extern void ioStackSetup(void);
+
 static IoStack *createStack(size_t blockSize)
 {
-	return vfdStackNew();
+	return ioStackEncrypt;
 }
 
 void testMain()
 {
     system("rm -rf " TEST_DIR "vfd; mkdir -p " TEST_DIR "vfd");
+
+	ioStackSetup();
 
 	beginTest("Storage");
     beginTestGroup("Vfd Stack");
