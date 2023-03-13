@@ -9,7 +9,7 @@
 
 static IoStack *createStack(size_t blockSize)
 {
-	return aeadNew("AES-GCM-SIV", blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32, vfdStackNew());
+	return aeadNew("AES-256-GCM", blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32, vfdStackNew());
 }
 
 void testMain()
