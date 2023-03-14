@@ -7,7 +7,7 @@
 
 static IoStack *createStack(size_t blockSize)
 {
-	return bufferedNew(64, lz4CompressNew(blockSize, vfdStackNew(), vfdStackNew()));
+	return bufferedNew(64, lz4CompressNew(blockSize, bufferedNew(64, vfdStackNew()), bufferedNew(64,vfdStackNew())));
 }
 
 
