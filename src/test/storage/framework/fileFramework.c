@@ -255,7 +255,7 @@ static void regression(char *name, size_t blockSize)
 	/* Should read EOF on empty file */
 	Byte buf[128];
 	file = FileOpen(name, O_RDONLY|PG_TESTSTACK);
-	PG_ASSERT_EQ(0, FileRead(file, buf, sizeof(buf), 0, WAIT_EVENT_NONE));
+	PG_ASSERT(0 == FileRead(file, buf, sizeof(buf), 0, WAIT_EVENT_NONE));
 	PG_ASSERT(FileEof(file));
 	PG_ASSERT(!FileError(file));
 	PG_ASSERT(FileClose(file) == 0);
@@ -263,8 +263,8 @@ static void regression(char *name, size_t blockSize)
 	/* Should write a block and then read EOF */
 	Byte *block = calloc(blockSize, 1);
 	file = FileOpen(name, O_RDWR|PG_TESTSTACK);
-	PG_ASSERT_EQ(blockSize, FileWriteSeq(file, block, blockSize, WAIT_EVENT_NONE));
-	PG_ASSERT_EQ(0, FileReadSeq(file, block, blockSize,  WAIT_EVENT_NONE));
+	PG_ASSERT(blockSize == FileWriteSeq(file, block, blockSize, WAIT_EVENT_NONE));
+	PG_ASSERT(0 == FileReadSeq(file, block, blockSize,  WAIT_EVENT_NONE));
 	PG_ASSERT(FileEof(file));
 	PG_ASSERT(!FileError(file));
 	PG_ASSERT(FileClose(file) == 0);

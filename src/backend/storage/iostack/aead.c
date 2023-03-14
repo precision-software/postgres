@@ -272,32 +272,6 @@ static ssize_t aeadClose(Aead *this)
 	return stackHasError(this)? -1: 0;
 }
 
-static int freeResources(Aead *this)
-{
-    /* Free memory resources allocated during Open */
-    if (this->cryptBuf != NULL)
-        free(this->cryptBuf);
-	this->cryptBuf = NULL;
-    if (this->plainBuf != NULL)
-        free(this->plainBuf);
-	this->plainBuf = NULL;
-    if (this->ctx != NULL)
-        EVP_CIPHER_CTX_free(this->ctx);
-	this->ctx = NULL;
-    if (this->cipher != NULL)
-        EVP_CIPHER_free(this->cipher);
-	this->cipher = NULL;
-
-	this->open = false;
-
-    /* Close the downstream file */
-	if (fileClose(nextStack(this)) != 0)
-		if (!fileError(this))
-			return copyNextError(this, false);
-
-	return 0;
-}
-
 
 /*
  * Do we need to write a final empty block?
@@ -391,7 +365,7 @@ static off_t aeadSize(Aead *this)
 	return this->fileSize;
 }
 
-static off_t aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
+static bool aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
 {
 	/* If truncating at a partial block, read in the block being truncated */
 	off_t blockOffset = ROUNDDOWN(offset, this->plainSize);
@@ -399,18 +373,18 @@ static off_t aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
 	{
 		int blockSize = aeadRead(this, this->plainBuf, this->plainSize, blockOffset, wait_info);
 		if (blockSize < 0)
-			return blockSize;
+			return false;
 
 		/* Make sure the block is big enough to be truncated */
 		if (blockSize < offset-blockOffset)
-			return setIoStackError(this, -1, "AeadTruncate - file is smaller than truncate offset");
+			return setIoStackError(this, false, "AeadTruncate - file is smaller than truncate offset");
 	}
 
 	/* Truncate the downstream file at the beginning of the block */
 	off_t cryptOff = cryptOffset(this, blockOffset);
 	int retval = fileTruncate(nextStack(this), cryptOff, wait_info);
 	if (retval < 0)
-		return copyNextError(this, retval);
+		return copyNextError(this, false);
 
 	/* Set the new file size to the beginning of the block */
 	this->fileSize = blockOffset;
@@ -419,9 +393,9 @@ static off_t aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
 	/* If we have a partial block, then write it out */
 	if (offset != blockOffset)
 	    if (aeadWrite(this, this->plainBuf, offset-blockOffset, blockOffset, wait_info) < 0)
-		    return -1;
+		    return false;
 
-	return 0;
+	return true;
 }
 
 

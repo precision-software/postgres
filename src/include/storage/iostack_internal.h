@@ -20,7 +20,7 @@ This is a "header only" file.
 
 #include "./iostack.h"
 
-#define DEBUG
+//#define DEBUG
 #ifndef DEBUG
 #define debug(...) ((void) 0)
 #else

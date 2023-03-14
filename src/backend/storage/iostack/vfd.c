@@ -158,7 +158,7 @@ int FileSync(File file, uint32 wait_event_info)
 off_t FileSize(File file)
 {
 	off_t size = fileSize(getStack(file));
-	debug("FileSize: name=%s, file=%d  size=%lld\n", getName(file), file, size);
+	debug("FileSize: name=%s file=%d  size=%lld\n", getName(file), file, size);
 	return size;
 }
 
@@ -264,10 +264,10 @@ static off_t vfdSize(VfdBottom *this)
 }
 
 
-static off_t vfdTruncate(VfdBottom *this, off_t offset, uint32 wait_event_info)
+static bool vfdTruncate(VfdBottom *this, off_t offset, uint32 wait_event_info)
 {
 	int retval = FileTruncate_Private(this->file, offset, wait_event_info);
-	return checkSystemError(this, retval, "Unable to truncate file");
+	return checkSystemError(this, retval, "Unable to truncate file") >= 0;
 }
 
 
@@ -325,6 +325,7 @@ IoStack *ioStackEncrypt;
 IoStack *ioStackPerm;
 IoStack *ioStackTest;
 IoStack *ioStackRaw;
+IoStack *ioStackCompress;
 
 /*
  * Initialize the I/O stack infrastructure.
@@ -333,15 +334,41 @@ void ioStackSetup()
 {
 	/* Set up the prototype stacks */
 	ioStackRaw = vfdStackNew();
-	ioStackEncrypt = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen, vfdStackNew()));
+	ioStackEncrypt = bufferedNew(1,
+						lz4CompressNew(1,
+							bufferedNew(16*1024,
+								aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
+									vfdStackNew())),
+							bufferedNew(1,
+								aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
+									vfdStackNew()))));
 	ioStackPerm = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, permKey, permKeyLen, vfdStackNew()));
 	ioStackPlain = bufferedNew(64*1024, vfdStackNew());
+	ioStackCompress = bufferedNew(1, lz4CompressNew(64 * 1024, vfdStackNew(), vfdStackNew()));
 
-	ioStackEncrypt = bufferedNew(1, lz4CompressNew(64 * 1024, vfdStackNew(), vfdStackNew()));
+	/* Compression fails regress/regress. For now, use uncompressed encryption */
+	ioStackEncrypt = ioStackPerm;
 
 	/* Note we are now initialized */
 	ioStacksInitialized = true;
 }
+
+
+bool endsWith(const char * str, const char * suffix)
+{
+	int strLen = strlen(str);
+	int suffixLen = strlen(suffix);
+
+	return
+		strLen >= suffixLen &&
+		strcmp(str + strLen - suffixLen, suffix) == 0;
+}
+
+bool startsWith(const char *str, const char *prefix)
+{
+	return strncmp(prefix, str, strlen(prefix)) == 0;
+}
+
 
 /*
  * Select the appropriate I/O Stack.
@@ -365,8 +392,8 @@ static IoStack *selectIoStack(const char *path, int oflags, int mode)
 		case PG_PLAIN:            return ioStackPlain;
 		case PG_ENCRYPT:          return ioStackEncrypt;
 		case PG_ENCRYPT_PERM:     return ioStackPerm;
-		case PG_TESTSTACK:        return ioStackEncrypt;
-		case 0:                   return ioStackRaw;
+		case PG_TESTSTACK:        return ioStackTest;
+		case 0:                   debug("Raw mode: path=%s oflags=0x%x\n", path, oflags); return ioStackRaw;
 
 		default: elog(FATAL, "Unrecognized I/O Stack oflag 0x%x", (oflags & PG_STACK_MASK));
 	}

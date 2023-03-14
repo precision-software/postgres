@@ -24,14 +24,14 @@
 struct Buffered
 {
     IoStack ioStack;        /* Common to all filters */
-    size_t suggestedSize;   /* The suggested buffer size. We may make it a bit bigger */
+    ssize_t suggestedSize;   /* The suggested buffer size. We may make it a bit bigger */
 
     Byte *buf;             /* Local buffer, precisely one block in size. */
-	size_t bufSize;        /* the size of the local buffer. TODO: rename to bufSize */
+	size_t bufSize;        /* the size of the local buffer. */
     bool dirty;            /* Does the buffer contain dirty data? */
 
     off_t bufPosition;     /* File position of the beginning of the buffer */
-    size_t bufActual;      /* Nr of actual bytes in the buffer */
+    ssize_t bufActual;      /* Nr of actual bytes in the buffer */
 
     off_t fileSize;        /* Highest byte position we've seen so far for the file. */
     bool sizeConfirmed;    /* fileSize is confirmed as actual file size. */
@@ -87,6 +87,10 @@ static Buffered *bufferedOpen(Buffered *proto, const char *path, int oflags, int
     this->fileSize = 0;
 	this->sizeConfirmed = (oflags & O_TRUNC) != 0;
 
+	/* TODO -- remove DEBUG */
+	//this->fileSize = fileSize(nextStack(this));
+	//this->sizeConfirmed = true;
+
 	/* Peek ahead and choose a buffer size which is a multiple of our successor's block size */
 	this->bufSize = ROUNDUP(this->suggestedSize, nextStack(this)->blockSize);
     this->buf = malloc(this->bufSize);
@@ -128,6 +132,13 @@ static size_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t 
 
     /* Copy data into the current buffer */
     size_t actual = copyIn(this, buf, size, offset);
+
+	/* Update file size */
+	if (actual > 0)
+	    this->fileSize = MAX(this->fileSize, offset + actual);
+
+	/* DEBUG ... REMOVE */
+	flushBuffer(this, wait_info);
 
     assert(actual > 0);
     return actual;
@@ -220,13 +231,14 @@ static bool positionToBuffer(Buffered *this, off_t position, uint32 wait_info)
  */
 static int bufferedClose(Buffered *this)
 {
+	debug("bufferedClose: file=%zd\n", this->ioStack.openVal);
     /* Flush our buffers. */
     flushBuffer(this, this->wait_info);
 
 	/* Clean things up */
     bufferedCleanup(this);
 
-	debug("bufferedClose(end): msg=%s\n", this->ioStack.errMsg);
+	debug("bufferedClose(done): msg=%s\n", this->ioStack.errMsg);
 	return stackHasError(this)? -1: 0;
 }
 
@@ -240,9 +252,9 @@ static int bufferedSync(Buffered *this, uint32 wait_info)
     bool success = flushBuffer(this, wait_info);
 
     /* Pass on the sync request, even if flushing fails. */
-    success &= fileSync(nextStack(this), wait_info); /* TODO: fileErrorNext */
+    success &= fileSync(nextStack(this), wait_info);
 
-	if (!fileError(this))
+	if (!success)
 		copyNextError(this, success);
 
 	return success;
@@ -251,15 +263,16 @@ static int bufferedSync(Buffered *this, uint32 wait_info)
 /*
  * Truncate the file at the given offset
  */
-static int bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
+static bool bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
 {
+	debug("bufferedTruncate: offset=%lld file=%zd\n", offset, this->ioStack.openVal);
 	/* Position our buffer with the given position */
 	if (!positionToBuffer(this, offset, this->wait_info))
 	    return false;
 
 	/* Truncate the underlying file */
-	if (fileTruncate(nextStack(this), offset, wait_event) != 0)
-		return copyNextError(this, -1);
+	if (!fileTruncate(nextStack(this), offset, wait_event))
+		return copyNextError(this, false);
 
 	/* Update our buffer so it ends at that position */
 	this->bufActual = offset - this->bufPosition;
@@ -274,6 +287,7 @@ static int bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
 
 static off_t bufferedSize(Buffered *this)
 {
+	debug("bufferedSize: confirmed=%d  size=%lld\n", this->sizeConfirmed, this->fileSize);
 	if (this->sizeConfirmed)
 		return this->fileSize;
 
@@ -281,6 +295,7 @@ static off_t bufferedSize(Buffered *this)
 		return -1;
 
 	off_t size = fileSize(nextStack(this));
+	debug("bufferedSize(done): size=%lld\n", size);
 	return copyNextError(this, size);
 }
 
@@ -384,6 +399,9 @@ static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t positi
 	debug("copyIn: position=%lld  size=%zu bufPosition=%lld bufActual=%zu\n", position, size, this->bufPosition, this->bufActual);
 	assert(this->bufPosition == ROUNDDOWN(position, this->bufSize));
 
+	if (this->bufActual == -1)
+		return -1;
+
     /* Check to see if we are creating holes. */
 	if (position > this->bufPosition + this->bufActual)
 	    return setIoStackError(this, -1, "Buffered I/O stack would create a hole");
@@ -406,6 +424,10 @@ static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t positi
 /* Copy data to the user, respecting boundaries */
 static ssize_t copyOut(Buffered *this, Byte *buf, size_t size, off_t position)
 {
+
+	if (this->bufActual == -1)
+		return -1;
+
 	/* Check to see if we are skipping over holes */
 	size_t offset = position - this->bufPosition;
 	if (offset > this->bufActual)
