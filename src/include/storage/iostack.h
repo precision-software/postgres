@@ -93,7 +93,7 @@ typedef ssize_t (*IoStackWrite)(void *this, const Byte *buf, size_t size, off_t 
 typedef ssize_t (*IoStackSync)(void *this, uint32 wait_event_info);
 typedef ssize_t (*IoStackClose)(void *this);
 typedef off_t (*IoStackSize)(void *this);
-typedef off_t (*IoStackTruncate) (void *this, off_t offset, uint32 wait_event_info);
+typedef bool (*IoStackTruncate) (void *this, off_t offset, uint32 wait_event_info);
 
 struct IoStackInterface {
 	IoStackOpen fnOpen;
