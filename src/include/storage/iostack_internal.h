@@ -131,7 +131,7 @@ inline static ssize_t copyError(void *thisVoid, ssize_t retval, void *thatVoid)
 	IoStack *that = thatVoid;
 	Assert(this != NULL && that != NULL);
 	fileErrorInfo(that, &this->errNo, this->errMsg);
-	this->eof = fileEof(that);
+	this->eof = stackEof(that);
 	return retval;
 }
 

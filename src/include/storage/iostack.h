@@ -18,27 +18,21 @@ typedef struct IoStack IoStack;
  * Universal helper functions - across all I/O stacks.
  * TODO: Should "this" be void* or IoStack* ?  Leaning towards IoStack ...
  */
-ssize_t fileWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset);
-ssize_t fileReadAll(IoStack *this, Byte *buf, size_t size, off_t offset);
-ssize_t fileReadSized(IoStack *this, Byte *buf, size_t size, off_t offset);
-ssize_t fileWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset);
-bool fileWriteInt32(IoStack *this, uint32_t data, off_t offset);
-bool fileReadInt32(IoStack *this, uint32_t *data, off_t offset);
-bool fileWriteInt64(IoStack *this, uint64_t data, off_t offset);
-bool fileReadInt64(IoStack *this, uint64_t *data, off_t offset);
+ssize_t stackWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset);
+ssize_t stackReadAll(IoStack *this, Byte *buf, size_t size, off_t offset);
+ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset);
+ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset);
+bool stackWriteInt32(IoStack *this, uint32_t data, off_t offset);
+bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset);
+bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset);
+bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset);
 
-
-bool filePrintf(IoStack *this, const char *format, ...);
-bool fileScanf(IoStack *this, const char *format, ...);
-bool fileError(void *thisVoid);
-bool fileEof(void *thisVoid);
+bool stackError(void *thisVoid);
+bool stackEof(void *thisVoid);
 void fileClearError(void *thisVoid);
 bool fileErrorInfo(void *thisVoid, int *errNo, char *errMsg);
-char *fileErrorMsg(void *thisVoid);
-int fileErrorNo(void *thisVoid);
-
-/* Release memory for I/O stack (after close) */
-void freeIoStack(IoStack *ioStack);
+char *stackErrorMsg(void *thisVoid);
+int stackErrorNo(void *thisVoid);
 
 /*
  * Specific layers provided by IoStack. Mix and match.
@@ -93,7 +87,7 @@ typedef ssize_t (*IoStackWrite)(void *this, const Byte *buf, size_t size, off_t 
 typedef ssize_t (*IoStackSync)(void *this);
 typedef ssize_t (*IoStackClose)(void *this);
 typedef off_t (*IoStackSize)(void *this);
-typedef bool (*IoStackTruncate) (void *this, off_t offset);
+typedef ssize_t (*IoStackTruncate) (void *this, off_t offset);
 
 struct IoStackInterface {
 	IoStackOpen fnOpen;
@@ -109,13 +103,13 @@ struct IoStackInterface {
  * Abstract functions required for each filter in an I/O Stack. TODO: declare as inline functions.
  * TODO: Rename, file-->stack, and Write-->WritePartial and WriteAll-->Write
  */
-#define fileOpen(this, path, oflags, mode)       				(IoStack *)(fileClearError(this), invoke(Open, this, path, oflags, mode))
-#define fileWrite(this, buf, size, offset)  					invoke(Write, this, buf, size, offset)
-#define fileRead(this, buf, size, offset)   					invoke(Read,  this, buf, size, offset)
-#define fileSync(this)                      					invokeNoParms(Sync, this)
-#define fileSize(this)                           				invokeNoParms(Size, this)
-#define fileTruncate(this, offset)       						invoke(Truncate, this, offset)
-#define fileClose(this)      									invokeNoParms(Close, this)
+#define stackOpen(this, path, oflags, mode)       				(IoStack *)(fileClearError(this), invoke(Open, this, path, oflags, mode))
+#define stackWrite(this, buf, size, offset)  					invoke(Write, this, buf, size, offset)
+#define stackRead(this, buf, size, offset)   					invoke(Read,  this, buf, size, offset)
+#define stackSync(this)                      					invokeNoParms(Sync, this)
+#define stackSize(this)                           				invokeNoParms(Size, this)
+#define stackTruncate(this, offset)       						invoke(Truncate, this, offset)
+#define stackClose(this)      									invokeNoParms(Close, this)
 
 typedef IoStack *(*IoStackCreateFunction)(void);
 

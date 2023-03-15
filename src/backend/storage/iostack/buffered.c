@@ -61,7 +61,7 @@ static Buffered *bufferedOpen(Buffered *proto, const char *path, int oflags, int
         oflags = (oflags & ~O_ACCMODE) | O_RDWR;
 
     /* Open the downstream file and clone our prototype */
-    IoStack *next = fileOpen(nextStack(proto), path, oflags, perm);
+    IoStack *next = stackOpen(nextStack(proto), path, oflags, perm);
 	Buffered *this = bufferedNew(proto->suggestedSize, next);
 
 	/* Extra return parameters */
@@ -145,7 +145,7 @@ static ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t o
 
     /* Write out multiple blocks, but no partials */
     ssize_t alignedSize = ROUNDDOWN(size, this->blockSize);
-    ssize_t actual = fileWrite(nextStack(this), buf, alignedSize, offset);
+    ssize_t actual = stackWrite(nextStack(this), buf, alignedSize, offset);
 	if (actual < 0)
 		return copyNextError(this, actual);
 
@@ -188,7 +188,7 @@ static ssize_t directRead(Buffered *this, Byte *buf, size_t size, off_t offset)
 	debug("directRead: size=%zu offset=%lld\n", size, offset);
 	/* Read multiple blocks, last one might be partial */
 	ssize_t alignedSize = ROUNDDOWN(size, this->blockSize);
-	ssize_t actual = fileRead(nextStack(this), buf, alignedSize, offset);
+	ssize_t actual = stackRead(nextStack(this), buf, alignedSize, offset);
 	if (actual < 0)
 		return copyNextError(this, -1);
 
@@ -225,7 +225,7 @@ static bool positionToBuffer(Buffered *this, off_t position)
 /**
  * Close the buffered file.
  */
-static int bufferedClose(Buffered *this)
+static ssize_t bufferedClose(Buffered *this)
 {
 	debug("bufferedClose: file=%zd\n", this->ioStack.openVal);
     /* Flush our buffers. */
@@ -242,13 +242,13 @@ static int bufferedClose(Buffered *this)
 /*
  * Synchronize any written data to persistent storage.
  */
-static int bufferedSync(Buffered *this)
+static ssize_t bufferedSync(Buffered *this)
 {
     /* Flush our buffers. */
     bool success = flushBuffer(this);
 
     /* Pass on the sync request, even if flushing fails. */
-    success &= fileSync(nextStack(this));
+    success &= stackSync(nextStack(this));
 
 	if (!success)
 		copyNextError(this, success);
@@ -259,7 +259,7 @@ static int bufferedSync(Buffered *this)
 /*
  * Truncate the file at the given offset
  */
-static bool bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
+static ssize_t bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
 {
 	debug("bufferedTruncate: offset=%lld file=%zd\n", offset, this->ioStack.openVal);
 	/* Position our buffer with the given position */
@@ -267,8 +267,8 @@ static bool bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
 	    return false;
 
 	/* Truncate the underlying file */
-	if (!fileTruncate(nextStack(this), offset))
-		return copyNextError(this, false);
+	if (stackTruncate(nextStack(this), offset) < 0)
+		return copyNextError(this, -1);
 
 	/* Update our buffer so it ends at that position */
 	if (this->currentSize > 0)
@@ -279,7 +279,7 @@ static bool bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
 	if (this->currentSize == 0)
 		this->dirty = false;
 
-	return true;
+	return 0;
 }
 
 static off_t bufferedSize(Buffered *this)
@@ -291,7 +291,7 @@ static off_t bufferedSize(Buffered *this)
 	if (!flushBuffer(this))
 		return -1;
 
-	off_t size = fileSize(nextStack(this));
+	off_t size = stackSize(nextStack(this));
 	if (size < 0)
 		return copyNextError(this, size);
 
@@ -345,7 +345,7 @@ static bool flushBuffer(Buffered *this)
     /* Clean the buffer if dirty */
 	if (this->dirty)
 	{
-		if (fileWriteAll(nextStack(this), this->buf, this->currentSize, this->currentBlock) < 0)
+		if (stackWriteAll(nextStack(this), this->buf, this->currentSize, this->currentBlock) < 0)
 			return copyNextError(this, false);
 
 		/* Update file size */
@@ -382,7 +382,7 @@ static bool fillBuffer (Buffered *this)
 		return setIoStackError(this, -1, "buffereedStack: creating holes (offset=%lld, fileSize=%lld", this->currentBlock, this->fileSize);
 
 	/* Read in the current buffer */
-	this->currentSize = fileReadAll(nextStack(this), this->buf, this->blockSize, this->currentBlock);
+	this->currentSize = stackReadAll(nextStack(this), this->buf, this->blockSize, this->currentBlock);
 	if (this->currentSize < 0)
 		return copyNextError(this, false);
 
@@ -451,7 +451,7 @@ static Buffered *bufferedCleanup(Buffered *this)
 
 	/* Close the next layer if opened */
 	if (next != NULL && next->openVal >= 0)
-		fileClose(next);
+		stackClose(next);
 	this->ioStack.openVal = -1;
 
 	/* If we have no errors, then use error info from successor */

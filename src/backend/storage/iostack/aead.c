@@ -98,7 +98,7 @@ struct Aead
 static Aead *aeadOpen(Aead *proto, const char *path, int oflags, int mode)
 {
 	/* Open our successor and clone ourself */
-	IoStack *next = fileOpen(nextStack(proto), path, oflags, mode);
+	IoStack *next = stackOpen(nextStack(proto), path, oflags, mode);
 	Aead *this = aeadNew(proto->cipherName, proto->suggestedSize, proto->key, proto->keySize, next);
 	this->ioStack.openVal = next->openVal;
 
@@ -171,7 +171,7 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
 	off_t cipherOffset = cryptOffset(this, offset);
 
     /* Read a block of downstream encrypted text into our buffer. */
-    ssize_t actual = fileReadAll(nextStack(this), this->cryptBuf, this->cryptSize, cipherOffset);
+    ssize_t actual = stackReadAll(nextStack(this), this->cryptBuf, this->cryptSize, cipherOffset);
     if (actual <= 0)
         return copyNextError(this, actual);
 
@@ -231,7 +231,7 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
 	off_t cipherOffset = cryptOffset(this, offset);
 
     /* Write the encrypted block out */
-    if (fileWriteAll(nextStack(this), this->cryptBuf, cipherSize, cipherOffset) != cipherSize)
+    if (stackWriteAll(nextStack(this), this->cryptBuf, cipherSize, cipherOffset) != cipherSize)
 	    return copyNextError(this, -1);
 
     /* Track our position for EOF handling */
@@ -257,7 +257,7 @@ static ssize_t aeadClose(Aead *this)
 	 */
 	if (this->open && needsFinalBlock(this))
 	{
-		off_t size = fileSize(this);
+		off_t size = stackSize(this);
 		if (size == -1)
 			return false;
 		aeadWrite(this, NULL, 0, size);  /* sets errno and msg */
@@ -295,7 +295,7 @@ static bool needsFinalBlock(Aead *this)
 	if (this->sizeConfirmed)  return true;
 
 	/* Downstream file has more blocks than we wrote. No need. */
-	off_t nextSize = fileSize(nextStack(this));
+	off_t nextSize = stackSize(nextStack(this));
 	if (cryptOffset(this, this->fileSize) < nextSize) return false;
 
 	 /* Get accurate file size info and retry */
@@ -325,7 +325,7 @@ static off_t aeadSize(Aead *this)
 		return this->fileSize;
 
 	/* Get the index of the last cipher block in the downstream encrypted file */
-	off_t cryptFileSize = fileSize(nextStack(this));
+	off_t cryptFileSize = stackSize(nextStack(this));
 	if (cryptFileSize < 0)
 		return copyNextError(this, -1);
 
@@ -362,26 +362,26 @@ static off_t aeadSize(Aead *this)
 	return this->fileSize;
 }
 
-static bool aeadTruncate(Aead *this, off_t offset)
+static ssize_t aeadTruncate(Aead *this, off_t offset)
 {
 	/* If truncating at a partial block, read in the block being truncated */
 	off_t blockOffset = ROUNDDOWN(offset, this->plainSize);
 	if (blockOffset != offset)
 	{
-		int blockSize = aeadRead(this, this->plainBuf, this->plainSize, blockOffset);
+		ssize_t blockSize = aeadRead(this, this->plainBuf, this->plainSize, blockOffset);
 		if (blockSize < 0)
-			return false;
+			return blockSize;
 
 		/* Make sure the block is big enough to be truncated */
 		if (blockSize < offset-blockOffset)
-			return setIoStackError(this, false, "AeadTruncate - file is smaller than truncate offset");
+			return setIoStackError(this, -1, "AeadTruncate - file is smaller than truncate offset");
 	}
 
 	/* Truncate the downstream file at the beginning of the block */
 	off_t cryptOff = cryptOffset(this, blockOffset);
-	int retval = fileTruncate(nextStack(this), cryptOff);
+	ssize_t retval = stackTruncate(nextStack(this), cryptOff);
 	if (retval < 0)
-		return copyNextError(this, false);
+		return copyNextError(this, retval);
 
 	/* Set the new file size to the beginning of the block */
 	this->fileSize = blockOffset;
@@ -390,17 +390,19 @@ static bool aeadTruncate(Aead *this, off_t offset)
 	/* If we have a partial block, then write it out */
 	if (offset != blockOffset)
 	    if (aeadWrite(this, this->plainBuf, offset-blockOffset, blockOffset) < 0)
-		    return false;
+		    return -1;
 
-	return true;
+	return 0;
 }
 
 
-static int aeadSync(Aead *this)
+static ssize_t aeadSync(Aead *this)
 {
 	/* Sync the downstream file */
-	int retval = fileSync(nextStack(this));
-	return copyNextError(this, retval);
+	int retval = stackSync(nextStack(this));
+	if (retval < 0)
+	    copyNextError(this, retval);
+	return retval;
 }
 
 /**
@@ -462,9 +464,9 @@ off_t cryptOffset(Aead *this, off_t plainOffset)
 bool aeadConfigure(Aead *this)
 {
     /* If able to read header (or error) then done */
-	fileClearError(this);
+	stackClearError(this);
     if (aeadHeaderRead(this))
-		return !fileError(this);
+		return !stackError(this);
 
     /* If no header and the file isn't writable, then we're done. */
 	if (!this->writable)
@@ -487,7 +489,7 @@ bool aeadHeaderRead(Aead *this)
 
     /* Read the header */
     Byte header[MAX_AEAD_HEADER_SIZE] = {0};
-    ssize_t headerSize = fileReadSized(nextStack(this), header, sizeof(header), 0);
+    ssize_t headerSize = stackReadSized(nextStack(this), header, sizeof(header), 0);
 	if (headerSize <= 0)
 		return copyNextError(this, false);
 
@@ -601,7 +603,7 @@ bool aeadHeaderWrite(Aead *this)
         return setIoStackError(this, -1, "Encryption file header was too large.");
 
     /* Write the header to the output file */
-    if (fileWriteSized(nextStack(this), header, bp - header, 0) <=  0)
+    if (stackWriteSized(nextStack(this), header, bp - header, 0) <= 0)
 		return copyNextError(this, false);
 
     /* Remember the header size. Since we did a "sized" write, add 4 bytes for the record size. */
@@ -839,7 +841,7 @@ static Aead *aeadCleanup(Aead *this)
 
 	/* Close the downstream layer if opened */
 	if (next != NULL && next->openVal >= 0)
-		fileClose(next);
+		stackClose(next);
 	this->ioStack.openVal = -1;
 
 	/* If we have no errors, then report error info from successor */
