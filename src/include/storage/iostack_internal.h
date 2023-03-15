@@ -29,7 +29,6 @@ This is a "header only" file.
 
 //#define debug(args...) elog(DEBUG2, args);
 
-
 /*
  * Quick and dirty debug function to display a buffer in hex.
  * Avoids memory allocation by reusing portions of static buffer.
@@ -135,7 +134,6 @@ inline static ssize_t copyError(void *thisVoid, ssize_t retval, void *thatVoid)
 	this->eof = fileEof(that);
 	return retval;
 }
-
 
 
 inline static ssize_t copyNextError(void *this, ssize_t retval)

@@ -1,7 +1,8 @@
 
-
 #ifndef VFD_H
 #define VFD_H
+
+
 #include "utils/resowner_private.h"
 #include "storage/iostack.h"
 #include "storage/fd.h"
@@ -90,5 +91,6 @@ static inline const char *getName(File file)
 
 /* Points to the I/O Stack create function for unit testing (PG_TESTSTACK) */
 extern IoStack *ioStackTest;
+
 
 #endif //VFD_H
