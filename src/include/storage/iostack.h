@@ -27,12 +27,14 @@ bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset);
 bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset);
 bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset);
 
+
 bool stackError(void *thisVoid);
 bool stackEof(void *thisVoid);
-void fileClearError(void *thisVoid);
-bool fileErrorInfo(void *thisVoid, int *errNo, char *errMsg);
+//bool stackClearError(void *thisVoid);
+bool stackErrorInfo(void *thisVoid, int *errNo, char *errMsg);
 char *stackErrorMsg(void *thisVoid);
 int stackErrorNo(void *thisVoid);
+
 
 /*
  * Specific layers provided by IoStack. Mix and match.
@@ -103,7 +105,7 @@ struct IoStackInterface {
  * Abstract functions required for each filter in an I/O Stack. TODO: declare as inline functions.
  * TODO: Rename, file-->stack, and Write-->WritePartial and WriteAll-->Write
  */
-#define stackOpen(this, path, oflags, mode)       				(IoStack *)(fileClearError(this), invoke(Open, this, path, oflags, mode))
+#define stackOpen(this, path, oflags, mode)       				(IoStack *)(stackClearError(this), invoke(Open, this, path, oflags, mode))
 #define stackWrite(this, buf, size, offset)  					invoke(Write, this, buf, size, offset)
 #define stackRead(this, buf, size, offset)   					invoke(Read,  this, buf, size, offset)
 #define stackSync(this)                      					invokeNoParms(Sync, this)

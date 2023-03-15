@@ -44,6 +44,7 @@ extern int	FileTruncate_Private(File file, off_t offset);
 /* Forward References. */
 static IoStack *selectIoStack(const char *path, int oflags, int mode);
 IoStack *vfdNew();
+void ioStackSetup(void);
 
 /* Wrapper for backwards compatibility */
 File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)

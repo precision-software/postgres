@@ -39,7 +39,6 @@ size_t cryptSize(Aead *this, size_t plainSize);
 bool aeadHeaderRead(Aead *this);
 bool aeadHeaderWrite(Aead *this);
 static ssize_t setOpenSSLError(Aead *this, ssize_t ret);
-static int freeResources(Aead *this);
 static Aead *aeadCleanup(Aead *this);
 
 
