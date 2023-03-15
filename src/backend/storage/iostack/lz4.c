@@ -65,7 +65,7 @@ off_t getCompressedOffset(Lz4Compress *this, off_t offset)
 	/* Case: offset is within current index, read it from the index. */
 	else if (offset <= this->lastBlock)
 	{
-		if (!fileReadInt64(this->indexFile, &compressedOffset, this->indexStarts + blockNr * 8))
+		if (!stackReadInt64(this->indexFile, &compressedOffset, this->indexStarts + blockNr * 8))
 			compressedOffset = setIoStackError(this, -1, "Lz4: offset (%lld) beyond last block (%lld)\n", offset, this->lastBlock);
 	}
 
@@ -108,12 +108,12 @@ bool fileCopySlice(IoStack *src, off_t srcOffset, size_t size, IoStack *dest, of
 		ssize_t desired = MIN(bufSize, size - total);
 
 		/* Read some data. Exit if error or EOF */
-		actual = fileReadAll(src, buf+total, desired, srcOffset+total);
+		actual = stackReadAll(src, buf + total, desired, srcOffset + total);
 		if (actual <= 0)
 			break;
 
 		/* Write the data. Exit if error */
-		actual = fileWriteAll(dest, buf, actual, destOffset+total);
+		actual = stackWriteAll(dest, buf, actual, destOffset + total);
 		if (actual < 0)
 			break;
 	}
@@ -137,7 +137,7 @@ Lz4Compress *lz4CompressOpen(Lz4Compress *proto, const char *path, int oflags, i
     debug("lz4Open: path=%s  oflags=0x%x\n", path, oflags);
 
     /* Open the compressed file and clone ourself */
-	IoStack *next = fileOpen(nextStack(proto), path, oflags, mode);
+	IoStack *next = stackOpen(nextStack(proto), path, oflags, mode);
 	Lz4Compress *this = lz4CompressNew(proto->defaultBlockSize, NULL, next);
 	this->ioStack.openVal = next->openVal;
 
@@ -146,7 +146,7 @@ Lz4Compress *lz4CompressOpen(Lz4Compress *proto, const char *path, int oflags, i
 		return lz4Cleanup(this);
 
 	/* Get the total compressed file size, including index */
-	off_t rawSize = fileSize(next);
+	off_t rawSize = stackSize(next);
 	if (rawSize < 0)
 		return lz4Cleanup(this);
 
@@ -158,9 +158,9 @@ Lz4Compress *lz4CompressOpen(Lz4Compress *proto, const char *path, int oflags, i
 	/* If the file has data, then read the compressed and uncompressed file sizes */
 	if (rawSize > 0)
 	{
-		if (!fileReadInt64(next, &compressedSize, rawSize-16))
+		if (!stackReadInt64(next, &compressedSize, rawSize - 16))
 			return lz4Cleanup(this);
-		if (!fileReadInt64(next, &fileSize, rawSize-8))
+		if (!stackReadInt64(next, &fileSize, rawSize - 8))
 			return lz4Cleanup(this);
 		indexSize = rawSize - 16 - compressedSize;
 	}
@@ -178,7 +178,7 @@ Lz4Compress *lz4CompressOpen(Lz4Compress *proto, const char *path, int oflags, i
 		oflags = (oflags & ~O_EXCL) | O_TRUNC | O_CREAT;
 
 		/* Create a separate index file */
-		this->indexFile = fileOpen(proto->indexFile, this->indexPath, oflags, mode);
+		this->indexFile = stackOpen(proto->indexFile, this->indexPath, oflags, mode);
 		if (this->indexFile->openVal < 0)
 			return lz4Cleanup(this);
 		this->indexStarts = 0;
@@ -188,7 +188,7 @@ Lz4Compress *lz4CompressOpen(Lz4Compress *proto, const char *path, int oflags, i
 			return lz4Cleanup(this);
 
 		/* Remove index data from the compressed data file */
-		if (!fileTruncate(next, compressedSize))
+		if (stackTruncate(next, compressedSize) < 0)
 			return lz4Cleanup(this);
 
 		this->indexStarts = 0;
@@ -198,7 +198,7 @@ Lz4Compress *lz4CompressOpen(Lz4Compress *proto, const char *path, int oflags, i
 	else
 	{
 		/* Open the data file a second time (gives separate buffer) */
-		this->indexFile = fileOpen(proto->indexFile, path, oflags, mode);
+		this->indexFile = stackOpen(proto->indexFile, path, oflags, mode);
 		if (this->indexFile->openVal < 0)
 			return lz4Cleanup(this);
 
@@ -293,7 +293,7 @@ ssize_t lz4CompressWrite(Lz4Compress *this, const Byte *buf, size_t size, off_t 
 		off_t compressedOffset = this->compressedLastBlock + this->compressedLastSize;
 
 		/* Write the new index entry */
-		if (!fileWriteInt64(this->indexFile, compressedOffset, indexOffset))
+		if (!stackWriteInt64(this->indexFile, compressedOffset, indexOffset))
 			return checkSystemError(this, -1, "Unable to write to lz4 index file");
 
 		/* Update file positions to point to the new block we are about to write */
@@ -307,7 +307,7 @@ ssize_t lz4CompressWrite(Lz4Compress *this, const Byte *buf, size_t size, off_t 
 
     /* Compress the block and write it out as a variable sized record */
     size_t compressed = lz4CompressBuffer(this, this->compressedBuf, this->maxCompressed, buf, size);
-    ssize_t actual = fileWriteSized(nextStack(this), this->compressedBuf, compressed, this->compressedLastBlock);
+    ssize_t actual = stackWriteSized(nextStack(this), this->compressedBuf, compressed, this->compressedLastBlock);
     if (actual < 0)
 		return copyError(this, actual, nextStack(this));
 
@@ -340,7 +340,7 @@ ssize_t lz4CompressRead(Lz4Compress *this, Byte *buf, size_t size, off_t offset,
 	Assert(compressedOffset & this->blockSize == 0);
 
     /* Read the compressed record, */
-    size_t compressedActual = fileReadSized(nextStack(this), this->compressedBuf, this->maxCompressed, compressedOffset);
+    size_t compressedActual = stackReadSized(nextStack(this), this->compressedBuf, this->maxCompressed, compressedOffset);
 
     /* Decompress the record we just read. */
     size_t actual = lz4DecompressBuffer(this, buf, size, this->compressedBuf, compressedActual);
@@ -371,8 +371,8 @@ ssize_t lz4CompressClose(Lz4Compress *this)
 
 		/* Append the index, compressed size and uncompressed size to the compressed file */
 		fileCopySlice(this->indexFile, this->indexStarts, indexSize, nextStack(this), compressedSize) &&
-		fileWriteInt64(nextStack(this), compressedSize, rawSize - 16) &&
-		fileWriteInt64(nextStack(this), fileSize, rawSize - 8);
+			stackWriteInt64(nextStack(this), compressedSize, rawSize - 16) &&
+		stackWriteInt64(nextStack(this), fileSize, rawSize - 8);
 	}
 
 	/* Free up resources */
@@ -386,8 +386,8 @@ ssize_t lz4CompressClose(Lz4Compress *this)
 static
 ssize_t lz4CompressSync(Lz4Compress *this, uint32 wait_info)
 {
-	int ret1 = fileSync(nextStack(this));
-	int ret2 = fileSync(this->indexFile);
+	int ret1 = stackSync(nextStack(this));
+	int ret2 = stackSync(this->indexFile);
 	if (ret1 < 0)
 		return (int)copyError(this, ret1, nextStack(this));
 	if (ret2 < 0)
@@ -398,10 +398,10 @@ ssize_t lz4CompressSync(Lz4Compress *this, uint32 wait_info)
 }
 
 static
-bool lz4CompressTruncate(Lz4Compress *this, off_t offse, uint32 wait_info)
+ssize_t lz4CompressTruncate(Lz4Compress *this, off_t offse, uint32 wait_info)
 {
 	Assert(offset % this->blockSize == 0);
-	return setIoStackError(this, false, "lz4CompressTruncate Not yet implemented");
+	return setIoStackError(this, -1, "lz4CompressTruncate Not yet implemented");
 }
 
 
@@ -504,15 +504,15 @@ static Lz4Compress *lz4Cleanup(Lz4Compress *this)
 
 	/* Close the next layer if opened */
 	if (next != NULL && next->openVal >= 0)
-		fileClose(next);
+		stackClose(next);
 
 	/* Delete the index file if it was created. TODO: error handling */
 	if (index != NULL && index->openVal != -1)
 	{
 		if (this->writable)
-		    fileTruncate(index, 0); /* Don't flush to disc when closing */
+		    stackTruncate(index, 0); /* Don't flush to disc when closing */
 
-		fileClose(this->indexFile);
+		stackClose(this->indexFile);
 
 		if (this->writable && unlink(this->indexPath) < 0)
 		    checkSystemError(this, -1, "lz4 Unable to delete index file %s\n", this->indexPath);

@@ -391,7 +391,7 @@ void readSeekTest(CreateTestStackFn testStack, char *nameFmt)
 {
     for (int fileIdx = 0; fileIdx<countof(fileSize); fileIdx++)
         for (int bufIdx = 0; bufIdx<countof(blockSize); bufIdx++)
-			if  (fileSize[fileIdx] / blockSize[bufIdx] < 4 * 1024 * 1024)  // Keep nr blocks under 4M to complete in reasonable time.
+			if  (blockSize[fileIdx] / blockSize[bufIdx] < 4 * 1024 * 1024)  // Keep nr blocks under 4M to complete in reasonable time.
                 singleReadSeekTest(testStack, nameFmt, fileSize[fileIdx], blockSize[bufIdx]);
 }
 

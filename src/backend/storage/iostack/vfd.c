@@ -71,8 +71,8 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 	fileFlags &= ~O_APPEND;
 
 	/* Open the  prototype I/O stack */
-	IoStack *ioStack = fileOpen(proto, fileName, fileFlags, fileMode);
-	File file = ioStack->openVal;
+	IoStack *ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
+	File file = (File)ioStack->openVal;
 	if (file < 0)
 	{
 		free(ioStack);
@@ -108,10 +108,10 @@ int FileClose(File file)
 
 	/* Close the file.  The low level routine will invalidate the "file" index */
 	IoStack *stack = getStack(file);
-	int retval = fileClose(stack);
+	ssize_t retval = stackClose(stack);
 	free(stack); // TODO: ensure errno is preserved.
     debug("FileClose(done): file=%d retval=%d\n", file, retval);
-	return retval;
+	return (int)retval;
 }
 
 
@@ -123,7 +123,7 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 
 	/* Read the data as requested */
 	pgstat_report_wait_start(wait_event_info);
-	ssize_t actual = fileReadAll(getStack(file), buffer, amount, offset);
+	ssize_t actual = stackReadAll(getStack(file), buffer, amount, offset);
 	pgstat_report_wait_end();
 
 	/* If successful, update the file offset */
@@ -142,7 +142,7 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 
 	/* Write the data as requested */
 	pgstat_report_wait_start(wait_event_info);
-	ssize_t actual = fileWriteAll(getStack(file), buffer, amount, offset);
+	ssize_t actual = stackWriteAll(getStack(file), buffer, amount, offset);
 	pgstat_report_wait_end();
 
 	/* If successful, update the file offset */
@@ -156,15 +156,15 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 int FileSync(File file, uint32 wait_event_info)
 {
 	pgstat_report_wait_start(wait_event_info);
-	int retval = fileSync(getStack(file));
+	ssize_t retval = stackSync(getStack(file));
 	pgstat_report_wait_end();
-	return retval;
+	return (int)retval;
 }
 
 
 off_t FileSize(File file)
 {
-	off_t size = fileSize(getStack(file));
+	off_t size = stackSize(getStack(file));
 	debug("FileSize: name=%s file=%d  size=%lld\n", getName(file), file, size);
 	return size;
 }
@@ -172,9 +172,9 @@ off_t FileSize(File file)
 int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
 {
 	pgstat_report_wait_start(wait_event_info);
-	int retval = fileTruncate(getStack(file), offset);
+	ssize_t retval = stackTruncate(getStack(file), offset);
 	pgstat_report_wait_end();
-	return retval;
+	return (int)retval;
 }
 
 
