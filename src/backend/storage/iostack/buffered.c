@@ -155,9 +155,12 @@ static ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t o
     /* Write out multiple blocks, but no partials */
     ssize_t alignedSize = ROUNDDOWN(size, this->blockSize);
     ssize_t actual = fileWrite(nextStack(this), buf, alignedSize, offset, wait_event);
+	if (actual < 0)
+		return copyNextError(this, actual);
 
 	this->fileSize = MAX(this->fileSize, offset + actual);
-    return copyNextError(this, actual);
+
+    return actual;
 }
 
 /**
@@ -195,12 +198,14 @@ static ssize_t directRead(Buffered *this, Byte *buf, size_t size, off_t offset, 
 	/* Read multiple blocks, last one might be partial */
 	ssize_t alignedSize = ROUNDDOWN(size, this->blockSize);
 	ssize_t actual = fileRead(nextStack(this), buf, alignedSize, offset, wait_event);
+	if (actual < 0)
+		return copyNextError(this, -1);
 
 	/* update fileSize */
-	if (actual > 0)
-        this->fileSize = MAX(this->fileSize, offset + actual);
+	this->fileSize = MAX(this->fileSize, offset + actual);
+	this->ioStack.eof = (actual == 0);
 
-	return copyNextError(this, actual);
+	return actual;
 }
 
 
@@ -296,8 +301,11 @@ static off_t bufferedSize(Buffered *this)
 		return -1;
 
 	off_t size = fileSize(nextStack(this));
+	if (size < 0)
+		return copyNextError(this, size);
+
 	debug("bufferedSize(done): size=%lld\n", size);
-	return copyNextError(this, size);
+	return size;
 }
 
 

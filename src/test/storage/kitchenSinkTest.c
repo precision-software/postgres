@@ -15,7 +15,7 @@ static IoStack *createStack(size_t blockSize)
 					bufferedNew(16*1024,
 						aeadNew("AES-256-GCM", blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32,
 							vfdStackNew())),
-					 bufferedNew(16*1025,
+					 bufferedNew(16*1024,
 						aeadNew("AES-256-GCM", blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32,
 							vfdStackNew()))));
 
@@ -23,9 +23,9 @@ static IoStack *createStack(size_t blockSize)
 
 void testMain()
 {
-	system("rm -rf " TEST_DIR "raw; mkdir -p " TEST_DIR "raw");
+	system("rm -rf " TEST_DIR "kitchensink; mkdir -p " TEST_DIR "kitchensink");
 
 	beginTestGroup("Raw Files");
-	singleReadSeekTest(createStack, TEST_DIR "buffered/testfile_%u_%u.dat", 1027, 1024);
-	readSeekTest(createStack, TEST_DIR "buffered/testfile_%u_%u.dat");
+	singleReadSeekTest(createStack, TEST_DIR "kitchensink/testfile_%u_%u.dat", 1027, 1024);
+	readSeekTest(createStack, TEST_DIR "kitchensink/testfile_%u_%u.dat");
 }
