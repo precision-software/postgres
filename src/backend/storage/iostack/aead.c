@@ -1,5 +1,8 @@
 /*
  *
+ * TODO: integrate with postgres encryption
+ * TODO: consider allocating blockSize header to keep things aligned.
+ * TODO: option to skip MAC so block sizes don't change. (aids alignment)
  */
 //#define DEBUG
 #include <stdlib.h>
@@ -82,8 +85,6 @@ struct Aead
 	bool sizeConfirmed;           /* true if we know the actual plain text file size */
     off_t fileSize;               /* actual plaintext size if confirmed, biggest seen so far if not confirmed */
     off_t maxWritePosition;       /* Biggest plaintext position after writing */
-
-	uint32 wait_info;
 };
 
 
@@ -110,7 +111,6 @@ static Aead *aeadOpen(Aead *proto, const char *path, int oflags, int mode)
 	/* Is the file readable/writable? */
 	this->writable = (oflags & O_ACCMODE) != O_RDONLY;
 	this->readable = (oflags & O_ACCMODE) != O_WRONLY;
-	this->wait_info = WAIT_EVENT_NONE;
 
 	/* Even if we are write only, we need to read the file to verify header (unless O_TRUNC?) */
 	if ((oflags & O_ACCMODE) == O_WRONLY)
@@ -152,7 +152,7 @@ static Aead *aeadOpen(Aead *proto, const char *path, int oflags, int mode)
 /**
  * Read a block of encrypted data into our internal buffer, placing plaintext into the caller's buffer.
  */
-static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset, uint32 wait_event)
+static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
 {
     debug("aeadRead: size=%zu  offset=%lld maxWrite=%lld fileSize=%lld\n",
           size, offset, this->maxWritePosition, this->fileSize);
@@ -171,7 +171,7 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset, uint32
 	off_t cipherOffset = cryptOffset(this, offset);
 
     /* Read a block of downstream encrypted text into our buffer. */
-    ssize_t actual = fileReadAll(nextStack(this), this->cryptBuf, this->cryptSize, cipherOffset, wait_event);
+    ssize_t actual = fileReadAll(nextStack(this), this->cryptBuf, this->cryptSize, cipherOffset);
     if (actual <= 0)
         return copyNextError(this, actual);
 
@@ -201,14 +201,11 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset, uint32
  *   @param error - error status, both input and output.
  *   @returns - number of bytes actually used.
  */
-static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset, uint32 wait_info)
+static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
 {
     debug("aeadWrite: size=%zu  offset=%llu maxWrite=%llu fileSize=%lld\n",
           size, offset, this->maxWritePosition, (off_t)this->fileSize);
 	Assert(offset >= 0);
-
-	/* Remember the "write" wait event and use it when writing partial block during close */
-	this->wait_info = wait_info;
 
 	/* Give special error message if we are trying to do unaligned append to the file */
 	if (offset % this->plainSize != 0 && this->sizeConfirmed && offset == this->fileSize)
@@ -234,7 +231,7 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset, 
 	off_t cipherOffset = cryptOffset(this, offset);
 
     /* Write the encrypted block out */
-    if (fileWriteAll(nextStack(this), this->cryptBuf, cipherSize, cipherOffset, wait_info) != cipherSize)
+    if (fileWriteAll(nextStack(this), this->cryptBuf, cipherSize, cipherOffset) != cipherSize)
 	    return copyNextError(this, -1);
 
     /* Track our position for EOF handling */
@@ -263,12 +260,12 @@ static ssize_t aeadClose(Aead *this)
 		off_t size = fileSize(this);
 		if (size == -1)
 			return false;
-		aeadWrite(this, NULL, 0, size, this->wait_info);  /* sets errno and msg */
+		aeadWrite(this, NULL, 0, size);  /* sets errno and msg */
 	}
 
 	/* Release resources, including closing the downstream file */
 	aeadCleanup(this);
-	debug("aeadClose(done): retval=%d\n", this->ioStack.openVal);
+	debug("aeadClose(done): retval=%zd\n", this->ioStack.openVal);
 	return stackHasError(this)? -1: 0;
 }
 
@@ -352,7 +349,7 @@ static off_t aeadSize(Aead *this)
 
 	/* Read and decrypt the last block. Because of possible padding, we need to decrypt to determine size. */
 	/* TODO: Don't need to read last block if there is no fill */
-	ssize_t lastBlockSize = aeadRead(this, this->plainBuf, this->plainSize, lastBlock * this->plainSize, this->wait_info);
+	ssize_t lastBlockSize = aeadRead(this, this->plainBuf, this->plainSize, lastBlock * this->plainSize);
 	if (lastBlockSize < 0)
 		return -1;
 
@@ -365,13 +362,13 @@ static off_t aeadSize(Aead *this)
 	return this->fileSize;
 }
 
-static bool aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
+static bool aeadTruncate(Aead *this, off_t offset)
 {
 	/* If truncating at a partial block, read in the block being truncated */
 	off_t blockOffset = ROUNDDOWN(offset, this->plainSize);
 	if (blockOffset != offset)
 	{
-		int blockSize = aeadRead(this, this->plainBuf, this->plainSize, blockOffset, wait_info);
+		int blockSize = aeadRead(this, this->plainBuf, this->plainSize, blockOffset);
 		if (blockSize < 0)
 			return false;
 
@@ -382,7 +379,7 @@ static bool aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
 
 	/* Truncate the downstream file at the beginning of the block */
 	off_t cryptOff = cryptOffset(this, blockOffset);
-	int retval = fileTruncate(nextStack(this), cryptOff, wait_info);
+	int retval = fileTruncate(nextStack(this), cryptOff);
 	if (retval < 0)
 		return copyNextError(this, false);
 
@@ -392,17 +389,17 @@ static bool aeadTruncate(Aead *this, off_t offset, uint32 wait_info)
 
 	/* If we have a partial block, then write it out */
 	if (offset != blockOffset)
-	    if (aeadWrite(this, this->plainBuf, offset-blockOffset, blockOffset, wait_info) < 0)
+	    if (aeadWrite(this, this->plainBuf, offset-blockOffset, blockOffset) < 0)
 		    return false;
 
 	return true;
 }
 
 
-static int aeadSync(Aead *this, uint32 wait_info)
+static int aeadSync(Aead *this)
 {
 	/* Sync the downstream file */
-	int retval = fileSync(nextStack(this), wait_info);
+	int retval = fileSync(nextStack(this));
 	return copyNextError(this, retval);
 }
 
@@ -490,7 +487,7 @@ bool aeadHeaderRead(Aead *this)
 
     /* Read the header */
     Byte header[MAX_AEAD_HEADER_SIZE] = {0};
-    ssize_t headerSize = fileReadSized(nextStack(this), header, sizeof(header), 0, this->wait_info );
+    ssize_t headerSize = fileReadSized(nextStack(this), header, sizeof(header), 0);
 	if (headerSize <= 0)
 		return copyNextError(this, false);
 
@@ -604,7 +601,7 @@ bool aeadHeaderWrite(Aead *this)
         return setIoStackError(this, -1, "Encryption file header was too large.");
 
     /* Write the header to the output file */
-    if (fileWriteSized(nextStack(this), header, bp - header, 0, this->wait_info) <=  0)
+    if (fileWriteSized(nextStack(this), header, bp - header, 0) <=  0)
 		return copyNextError(this, false);
 
     /* Remember the header size. Since we did a "sized" write, add 4 bytes for the record size. */
@@ -787,13 +784,12 @@ aead_decrypt(Aead *this,
     }
 
     /* Finalise the decryption. This can, but probably won't, generate plaintext. */
-    int plainFinalSize = (int)plainSize - plainUpdateSize;
+    int plainFinalSize = (int)plainSize - plainUpdateSize; /* CipherFinal expects "int" */
     if (!EVP_CipherFinal_ex(this->ctx, plainText + plainUpdateSize, &plainFinalSize) && ERR_get_error() != 0)
         return setOpenSSLError(this, -1);
 
     /* Output plaintext size combines the update part of the encryption and the finalization. */
-    size_t plainActual = plainUpdateSize + plainFinalSize;
-    //debug("Decrypt: plainText='%.*s' plainActual=%d\n", (int)sizeMin(plainActual,64), plainText, plainActual);
+    ssize_t plainActual = plainUpdateSize + plainFinalSize;
     debug("Decrypt:  plainActual=%zu plainText='%.*s'\n", plainActual, (int)plainActual, plainText);
     return plainActual;
 }

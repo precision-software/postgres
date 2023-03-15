@@ -35,11 +35,11 @@
  */
 extern File PathNameOpenFilePerm_Private(const char *fileName, int fileFlags, mode_t fileMode);
 extern int FileClose_Private(File file);
-extern int FileRead_Private(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
-extern int FileWrite_Private(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
-extern int FileSync_Private(File file, uint32 wait_event_info);
+extern ssize_t FileRead_Private(File file, void *buffer, size_t amount, off_t offset);
+extern ssize_t FileWrite_Private(File file, const void *buffer, size_t amount);
+extern int FileSync_Private(File file);
 extern off_t FileSize_Private(File file);
-extern int	FileTruncate_Private(File file, off_t offset, uint32 wait_event_info);
+extern int	FileTruncate_Private(File file, off_t offset);
 
 /* Forward References. */
 static IoStack *selectIoStack(const char *path, int oflags, int mode);
@@ -115,14 +115,16 @@ int FileClose(File file)
 }
 
 
-int FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
+ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
 	debug("FileRead: name=%s file=%d  amount=%zu offset=%lld\n", getName(file), file, amount, offset);
 	Assert(offset >= 0);
 	Assert((ssize_t)amount > 0);
 
 	/* Read the data as requested */
-	ssize_t actual = fileReadAll(getStack(file), buffer, amount, offset, wait_event_info);
+	pgstat_report_wait_start(wait_event_info);
+	ssize_t actual = fileReadAll(getStack(file), buffer, amount, offset);
+	pgstat_report_wait_end();
 
 	/* If successful, update the file offset */
 	if (actual >= 0)
@@ -133,13 +135,15 @@ int FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_e
 }
 
 
-int FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
+ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
 	debug("FileWrite: name=%s file=%d  amount=%zu offset=%lld\n", getName(file), file, amount, offset);
 	Assert(offset >= 0 && (ssize_t)amount > 0);
 
 	/* Write the data as requested */
-	ssize_t actual = fileWriteAll(getStack(file), buffer, amount, offset, wait_event_info);
+	pgstat_report_wait_start(wait_event_info);
+	ssize_t actual = fileWriteAll(getStack(file), buffer, amount, offset);
+	pgstat_report_wait_end();
 
 	/* If successful, update the file offset */
 	if (actual >= 0)
@@ -151,7 +155,10 @@ int FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32
 
 int FileSync(File file, uint32 wait_event_info)
 {
-	return fileSync(getStack(file), wait_event_info);
+	pgstat_report_wait_start(wait_event_info);
+	int retval = fileSync(getStack(file));
+	pgstat_report_wait_end();
+	return retval;
 }
 
 
@@ -164,8 +171,14 @@ off_t FileSize(File file)
 
 int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
 {
-	return fileTruncate(getStack(file), offset, wait_event_info);
+	pgstat_report_wait_start(wait_event_info);
+	int retval = fileTruncate(getStack(file), offset);
+	pgstat_report_wait_end();
+	return retval;
 }
+
+
+
 
 
 /*
@@ -205,9 +218,9 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, int mo
 /*
  * Write a random block of data to a virtual file descriptor.
  */
-static ssize_t vfdWrite(VfdBottom *this, const Byte *buf, size_t bufSize, off_t offset, uint32 wait_event_info)
+static ssize_t vfdWrite(VfdBottom *this, const Byte *buf, size_t bufSize, off_t offset)
 {
-	ssize_t actual = FileWrite_Private(this->file, buf, bufSize, offset, wait_event_info);
+	ssize_t actual = FileWrite_Private(this->file, buf, bufSize);
 	debug("vfdWrite: file=%d  name=%s  size=%zu  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
 	return checkSystemError(this, actual, "Unable to write to file");
 }
@@ -219,7 +232,7 @@ static ssize_t vfdRead(VfdBottom *this, Byte *buf, size_t bufSize, off_t offset,
 {
 	Assert(bufSize > 0 && offset >= 0);
 
-	ssize_t actual = FileRead_Private(this->file, buf, bufSize, offset, wait_event_info);
+	ssize_t actual = FileRead_Private(this->file, buf, bufSize, offset);
 	debug("vfdRead: file=%d  name=%s  size=%zu  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
 	return checkSystemError(this, actual, "Unable to read from file %s", getName(this->file));
 }
@@ -251,9 +264,9 @@ static ssize_t vfdClose(VfdBottom *this)
 }
 
 
-static ssize_t vfdSync(VfdBottom *this, uint32 wait_event_info)
+static ssize_t vfdSync(VfdBottom *this)
 {
-	int retval = FileSync_Private(this->file, wait_event_info);
+	int retval = FileSync_Private(this->file);
 	return checkSystemError(this, retval, "Unable to sync file");
 }
 
@@ -264,9 +277,9 @@ static off_t vfdSize(VfdBottom *this)
 }
 
 
-static bool vfdTruncate(VfdBottom *this, off_t offset, uint32 wait_event_info)
+static bool vfdTruncate(VfdBottom *this, off_t offset)
 {
-	int retval = FileTruncate_Private(this->file, offset, wait_event_info);
+	int retval = FileTruncate_Private(this->file, offset);
 	return checkSystemError(this, retval, "Unable to truncate file") >= 0;
 }
 
@@ -320,34 +333,33 @@ IoStack *(*testStackNew)() = NULL;
 
 /* Prototype stacks */
 static bool ioStacksInitialized = false;
-IoStack *ioStackPlain;
-IoStack *ioStackEncrypt;
-IoStack *ioStackPerm;
-IoStack *ioStackTest;
-IoStack *ioStackRaw;
-IoStack *ioStackCompress;
+IoStack *ioStackPlain;				/* Buffered, unmodified text */
+IoStack *ioStackEncrypt;			/* Buffered and encrypted with a session key */
+IoStack *ioStackEncryptPerm;        /* Buffered and encrypted with a session key */
+IoStack *ioStackTest;				/* Stack used for unit testing */
+IoStack *ioStackRaw;				/* Unbuffered "raw" file access */
+IoStack *ioStackCompress;			/* Buffered and compressed */
+IoStack *ioStackCompressEncrypt;	/* Compressed and encrypted with session key */
 
 /*
- * Initialize the I/O stack infrastructure.
+ * Initialize the I/O stack infrastructure. Creates prototype stacks.
  */
 void ioStackSetup()
 {
 	/* Set up the prototype stacks */
 	ioStackRaw = vfdStackNew();
-	ioStackEncrypt = bufferedNew(1,
-						lz4CompressNew(1,
-							bufferedNew(16*1024,
-								aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
-									vfdStackNew())),
-							bufferedNew(1,
-								aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
-									vfdStackNew()))));
-	ioStackPerm = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, permKey, permKeyLen, vfdStackNew()));
+	ioStackEncrypt = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen, vfdStackNew()));
+	ioStackEncryptPerm = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, permKey, permKeyLen, vfdStackNew()));
 	ioStackPlain = bufferedNew(64*1024, vfdStackNew());
 	ioStackCompress = bufferedNew(1, lz4CompressNew(64 * 1024, vfdStackNew(), vfdStackNew()));
-
-	/* Compression fails regress/regress. For now, use uncompressed encryption */
-	ioStackEncrypt = ioStackCompress;
+	ioStackCompressEncrypt = bufferedNew(1,
+								 lz4CompressNew(1,
+												bufferedNew(16*1024,
+															aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
+																	vfdStackNew())),
+												bufferedNew(1,
+															aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
+																	vfdStackNew()))));
 
 	/* Note we are now initialized */
 	ioStacksInitialized = true;
@@ -356,8 +368,8 @@ void ioStackSetup()
 
 bool endsWith(const char * str, const char * suffix)
 {
-	int strLen = strlen(str);
-	int suffixLen = strlen(suffix);
+	size_t strLen = strlen(str);
+	size_t suffixLen = strlen(suffix);
 
 	return
 		strLen >= suffixLen &&
@@ -391,7 +403,7 @@ static IoStack *selectIoStack(const char *path, int oflags, int mode)
 	{
 		case PG_PLAIN:            return ioStackPlain;
 		case PG_ENCRYPT:          return ioStackEncrypt;
-		case PG_ENCRYPT_PERM:     return ioStackPerm;
+		case PG_ENCRYPT_PERM:     return ioStackEncryptPerm;
 		case PG_TESTSTACK:        return ioStackTest;
 		case 0:                   debug("Raw mode: path=%s oflags=0x%x\n", path, oflags); return ioStackRaw;
 

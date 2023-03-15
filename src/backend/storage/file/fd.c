@@ -102,14 +102,22 @@
 #include "utils/resowner_private.h"
 #include "utils/wait_event.h"
 
-/* Private versions being shared with vfd.c */
+/*
+ * Private versions of File* routines. These routines are shared with vfd.c
+ * and are not called by anybody else. vfd.c contains public versions.
+ *
+ * The APIs have changed as follows:
+ *  - read/write return ssize_t instead of int.
+ *  - wait_events are handled in the public versions, not these private ones.
+ *  - TODO error handling in write_private returns error code instead of throwing error.
+ */
 File PathNameOpenFilePerm_Private(const char *fileName, int fileFlags, mode_t fileMode);
 int FileClose_Private(File file);
-int	FileRead_Private(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
-int	FileWrite_Private(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
-int	FileSync_Private(File file, uint32 wait_event_info);
+ssize_t	FileRead_Private(File file, void *buffer, size_t amount, off_t offset);
+ssize_t	FileWrite_Private(File file, const void *buffer, size_t amount, off_t offset);
+int	FileSync_Private(File file);
 off_t FileSize_Private(File file);
-int	FileTruncate_Private(File file, off_t offset, uint32 wait_event_info);
+int	FileTruncate_Private(File file, off_t offset);
 
 /* Define PG_FLUSH_DATA_WORKS if we have an implementation for pg_flush_data */
 #if defined(HAVE_SYNC_FILE_RANGE)
@@ -2030,11 +2038,10 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 	pgstat_report_wait_end();
 }
 
-int
-FileRead_Private(File file, void *buffer, size_t amount, off_t offset,
-		 uint32 wait_event_info)
+ssize_t
+FileRead_Private(File file, void *buffer, size_t amount, off_t offset)
 {
-	int			returnCode;
+	ssize_t			returnCode;
 	Vfd		   *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %zu %p",
@@ -2047,10 +2054,7 @@ FileRead_Private(File file, void *buffer, size_t amount, off_t offset,
 		return returnCode;
 
 retry:
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_pread(vfdP->fd, buffer, amount, offset);
-	pgstat_report_wait_end();
-
 	if (returnCode < 0)
 	{
 		/*
@@ -2082,11 +2086,10 @@ retry:
 	return returnCode;
 }
 
-int
-FileWrite_Private(File file, const void *buffer, size_t amount, off_t offset,
-		  uint32 wait_event_info)
+ssize_t
+FileWrite_Private(File file, const void *buffer, size_t amount, off_t offset)
 {
-	int			returnCode;
+	ssize_t			returnCode;
 	Vfd		   *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %zu %p",
@@ -2116,7 +2119,7 @@ FileWrite_Private(File file, const void *buffer, size_t amount, off_t offset,
 
 			newTotal += past_write - vfdP->fileSize;
 			if (newTotal > (uint64) temp_file_limit * (uint64) 1024)
-				ereport(ERROR,
+				ereport(ERROR,  /* TODO: return error code which is interpreted by caller */
 						(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
 						 errmsg("temporary file size exceeds temp_file_limit (%dkB)",
 								temp_file_limit)));
@@ -2125,9 +2128,7 @@ FileWrite_Private(File file, const void *buffer, size_t amount, off_t offset,
 
 retry:
 	errno = 0;
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_pwrite(VfdCache[file].fd, buffer, amount, offset);
-	pgstat_report_wait_end();
 
 	/* if write didn't set errno, assume problem is no disk space */
 	if (returnCode != amount && errno == 0)
@@ -2174,7 +2175,7 @@ retry:
 
 
 int
-FileSync_Private(File file, uint32 wait_event_info)
+FileSync_Private(File file)
 {
 	int			returnCode;
     Vfd *vfdP = getVfd(file);
@@ -2186,9 +2187,7 @@ FileSync_Private(File file, uint32 wait_event_info)
 	if (returnCode < 0)
 		return returnCode;
 
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_fsync(vfdP->fd);
-	pgstat_report_wait_end();
 
 	return returnCode;
 }
@@ -2213,7 +2212,7 @@ FileSize_Private(File file)
 }
 
 int
-FileTruncate_Private(File file, off_t offset, uint32 wait_event_info)
+FileTruncate_Private(File file, off_t offset)
 {
 	int			returnCode;
 	Vfd *vfdP = getVfd(file);
@@ -2225,9 +2224,7 @@ FileTruncate_Private(File file, off_t offset, uint32 wait_event_info)
 	if (returnCode < 0)
 		return returnCode;
 
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = ftruncate(VfdCache[file].fd, offset);
-	pgstat_report_wait_end();
 
 	if (returnCode == 0 && vfdP->fileSize > offset)
 	{
