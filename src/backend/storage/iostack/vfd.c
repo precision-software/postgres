@@ -347,7 +347,7 @@ void ioStackSetup()
 	ioStackCompress = bufferedNew(1, lz4CompressNew(64 * 1024, vfdStackNew(), vfdStackNew()));
 
 	/* Compression fails regress/regress. For now, use uncompressed encryption */
-	ioStackEncrypt = ioStackPerm;
+	ioStackEncrypt = ioStackCompress;
 
 	/* Note we are now initialized */
 	ioStacksInitialized = true;
