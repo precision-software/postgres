@@ -19,7 +19,7 @@ void testMain()
     beginTestGroup("LZ4 Compression");
 	beginTest("LZ4 Compression");
 
-    singleReadSeekTest(createStack, TEST_DIR "compressed/testfile_%u_%u.lz4", 0, 1);
+    singleReadSeekTest(createStack, TEST_DIR "compressed/testfile_%u_%u.lz4", 1024, 1024);
     readSeekTest(createStack, TEST_DIR "compressed/testfile_%u_%u.lz4");
 
 }
