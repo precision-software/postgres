@@ -15,12 +15,24 @@
 
 static const char *expectFmt = "Expected '%s' but got '%s'";
 
+/* Is an integer expression signed? Note this is a C11 feature.  Define as "false" if c99. */
+#define isSigned(x) _Generic(x,  \
+     char: true,                 \
+	 int: true,                     \
+	 long: true,                    \
+	 long long: true,               \
+	 float: (void)0,                   \
+	 double: (void)0,                  \
+	 default: false)
+
+
 /* Verify two scaler values are equal */
 #define PG_ASSERT_EQ(a,b)                                                                                              \
    BEGIN                                                                                                               \
+       uint64_t _a=a; uint64_t _b = b;                                                                                 \
        char _bufa[16], _bufb[16];                                                                                      \
-       if ( (a > 0) != (b > 0) || (unsigned long long)a != (unsigned long long)b)                                      \
-           PG_ASSERT_FMT(expectFmt, PG_INT_TO_STR(a, _bufa), PG_INT_TO_STR(b, _bufb));                                 \
+       if ( _a != _b || (isSigned(a) && (int64_t)_a < 0) != (isSigned(b) && (int64_t)_b < 0))                          \
+           PG_ASSERT_FMT(expectFmt, PG_INT_TO_STR(a, _a, _bufa), PG_INT_TO_STR(b, _b, _bufb));                         \
    END
 
 
@@ -31,10 +43,14 @@ static const char *expectFmt = "Expected '%s' but got '%s'";
             PG_ASSERT_FMT(expectFmt, stra, strb);                                                                      \
     END
 
-/* Format any integer as a string. */
-#define PG_INT_TO_STR(a, bufa)                                                                                         \
-    (a > 0)? (snprintf(bufa, sizeof(bufa), "%llu", (unsigned long long)a), bufa)                                       \
-           : (snprintf(bufa, sizeof(bufa), "%lld",   (signed long long)a), bufa)
+
+/*
+ * Format a signed/unsigned integer as a string.
+ * Since we only want to evalate an expression once, accepts both expression (for type) and value.
+ */
+#define PG_INT_TO_STR(expr, val, buf)                                                                                      \
+    isSigned(expr)? (snprintf(buf, sizeof(buf), "%lld", (int64_t)(val)), buf)                                     \
+           : (snprintf(buf, sizeof(buf), "%llu",   (uint64_t)(val)), buf)
 
 
 #define PG_ASSERT_ERRNO(_expectedErrno) \
