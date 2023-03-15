@@ -98,8 +98,8 @@ bool fileCopySlice(IoStack *src, off_t srcOffset, size_t size, IoStack *dest, of
 	bufSize = MAX(size, bufSize);                           /* No point in being bigger than the total copy */
 	Byte *buf = malloc(bufSize);
 
-	fileClearError(src);
-	fileClearError(dest);
+	stackClearError(src);
+	stackClearError(dest);
 
 	/* Repeat until the slice is copied or end of file */
 	ssize_t total, actual;

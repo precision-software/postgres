@@ -98,7 +98,7 @@ inline static ssize_t setIoStackError(void *this, size_t retval, const char *fmt
 
 
 /* Test retval for system error, returning the retval */
-static ssize_t checkSystemError(void *thisVoid, ssize_t retval, const char *fmt, ...)
+inline static ssize_t checkSystemError(void *thisVoid, ssize_t retval, const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
@@ -130,7 +130,7 @@ inline static ssize_t copyError(void *thisVoid, ssize_t retval, void *thatVoid)
 	IoStack *this = thisVoid;
 	IoStack *that = thatVoid;
 	Assert(this != NULL && that != NULL);
-	fileErrorInfo(that, &this->errNo, this->errMsg);
+	stackErrorInfo(that, &this->errNo, this->errMsg);
 	this->eof = stackEof(that);
 	return retval;
 }

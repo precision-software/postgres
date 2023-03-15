@@ -171,7 +171,7 @@ void fileClearError(void *thisVoid)
 	strcpy(this->errMsg, "");
 }
 
-bool fileErrorInfo(void *thisVoid, int *errNo, char *errMsg)
+bool stackErrorInfo(void *thisVoid, int *errNo, char *errMsg)
 {
 	IoStack *this = thisVoid;
 	*errNo = errno = this->errNo;
