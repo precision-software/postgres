@@ -1,3 +1,9 @@
+/*
+ * vfd.h
+ * Virtual File Descriptor (VFD) header file (extracted from fd.c.)
+ * With the addition of new interfaces and I/O stacks, there are now several
+ * files which need to access VFD structures.
+ */
 
 #ifndef VFD_H
 #define VFD_H
@@ -61,7 +67,7 @@ static inline IoStack *getStack(File file)
 	return getVfd(file)->ioStack;
 }
 
-/* Get the file's name, mainly for debugging */
+/* Get the file's name, mainly for error messages and debugging */
 static inline const char *getName(File file)
 {
 	if (file < 0)

@@ -21,7 +21,7 @@ typedef struct Lz4Compress Lz4Compress;
 
 
 /* Forward references */
-static ssize_t setLz4Error(ssize_t retval, const char *fmt, ...);
+static ssize_t setLz4Error(Lz4Compress *this, ssize_t retval);
 ssize_t lz4DecompressBuffer(Lz4Compress *this, Byte *toBuf, size_t toSize, const Byte *fromBuf, size_t fromSize);
 ssize_t lz4CompressBuffer(Lz4Compress *this, Byte *toBuf, size_t toSize, const Byte *fromBuf, size_t fromSize);
 size_t maxCompressedSize(size_t size);
@@ -52,6 +52,7 @@ struct Lz4Compress
 
 };
 
+static
 off_t getCompressedOffset(Lz4Compress *this, off_t offset)
 {
 	uint64_t compressedOffset;
@@ -87,6 +88,7 @@ off_t getCompressedOffset(Lz4Compress *this, off_t offset)
  *   @param destOffset - the starting offset in the destination file.
  *   @returns - true if all the bytes were copied
  */
+static
 bool fileCopySlice(IoStack *src, off_t srcOffset, size_t size, IoStack *dest, off_t destOffset)
 {
 	debug("fileCopySlice: srcOffset=%lld  destOffsset=%lld size=%zd\n", srcOffset, destOffset, size);
@@ -269,7 +271,7 @@ off_t lz4CompressSize(Lz4Compress *this)
  * Allows rewriting of the last block, but not other blocks.
  */
 static
-ssize_t lz4CompressWrite(Lz4Compress *this, const Byte *buf, size_t size, off_t offset, uint32 wait_info)
+ssize_t lz4CompressWrite(Lz4Compress *this, const Byte *buf, size_t size, off_t offset)
 {
 	/* if NOT writing (or about to overwrite) the last block, then we have an error */
 	if (offset + size < this->lastBlock + this->lastSize)
@@ -322,7 +324,7 @@ ssize_t lz4CompressWrite(Lz4Compress *this, const Byte *buf, size_t size, off_t 
  * Read a block from the compressed file.
  */
 static
-ssize_t lz4CompressRead(Lz4Compress *this, Byte *buf, size_t size, off_t offset, uint32 wait_info)
+ssize_t lz4CompressRead(Lz4Compress *this, Byte *buf, size_t size, off_t offset)
 {
     /* We do one record at a time */
     size = MIN(size, this->blockSize);
@@ -343,7 +345,7 @@ ssize_t lz4CompressRead(Lz4Compress *this, Byte *buf, size_t size, off_t offset,
     size_t compressedActual = stackReadSized(nextStack(this), this->compressedBuf, this->maxCompressed, compressedOffset);
 
     /* Decompress the record we just read. */
-    size_t actual = lz4DecompressBuffer(this, buf, size, this->compressedBuf, compressedActual);
+    ssize_t actual = lz4DecompressBuffer(this, buf, size, this->compressedBuf, compressedActual);
 
 	debug("lz4Read(done): actual=%zd lastBlock=%zd  lastSize=%zd\n", actual, this->lastBlock, this->lastSize);
     return actual;
@@ -378,13 +380,13 @@ ssize_t lz4CompressClose(Lz4Compress *this)
 	/* Free up resources */
 	lz4Cleanup(this);
 
-	return (stackHasError(this)? -1: 0);
+	return (stackError(this)? -1: 0);
 }
 
 
 /* Ensure all data written so far is persistent. */
 static
-ssize_t lz4CompressSync(Lz4Compress *this, uint32 wait_info)
+ssize_t lz4CompressSync(Lz4Compress *this)
 {
 	int ret1 = stackSync(nextStack(this));
 	int ret2 = stackSync(this->indexFile);
@@ -398,7 +400,7 @@ ssize_t lz4CompressSync(Lz4Compress *this, uint32 wait_info)
 }
 
 static
-ssize_t lz4CompressTruncate(Lz4Compress *this, off_t offse, uint32 wait_info)
+ssize_t lz4CompressTruncate(Lz4Compress *this, off_t offset)
 {
 	Assert(offset % this->blockSize == 0);
 	return setIoStackError(this, -1, "lz4CompressTruncate Not yet implemented");
@@ -451,7 +453,7 @@ ssize_t lz4CompressBuffer(Lz4Compress *this, Byte *toBuf, size_t toSize, const B
 	debug("lz4CompressBuffer: toSize=%zu fromSize=%zu data=%.*s\n", toSize, fromSize, (int)fromSize, (char*)fromBuf);
 	ssize_t actual = LZ4_compress_default((char*)fromBuf, (char*)toBuf, (int)fromSize, (int)toSize);
 	if (actual < 0)
-		setIoStackError(this, actual, "lz4: unable to compress");
+		actual = setLz4Error(this, actual);
 
 	debug("lz4CompressBuffer: actual=%zd   compressed=%s\n", actual, asHex(this->compressedBuf, actual));
 	return actual;
@@ -479,7 +481,7 @@ ssize_t lz4DecompressBuffer(Lz4Compress *this, Byte *toBuf, size_t toSize, const
 	/* Decompress the buffer */
 	ssize_t actual = LZ4_decompress_safe((char*)fromBuf, (char*)toBuf, (int)fromSize, (int)toSize);
 	if (actual < 0)
-		setIoStackError(this, actual, "lz4 unable to decompress a buffer");
+		actual = setLz4Error(this, actual);
 
 	debug("lz4DecompressBuffer: actual=%zd data=%.*s\n", actual, (int)actual, toBuf);
 	return actual;
@@ -519,9 +521,9 @@ static Lz4Compress *lz4Cleanup(Lz4Compress *this)
 	}
 
 	/* If we have no errors, then use error info from successor or index file. */
-	if (!stackHasError(this) && next != NULL && stackHasError(next))
+	if (!stackError(this) && next != NULL && stackError(next))
 		copyNextError(this, -1);
-	else if (!stackHasError(this) && index != NULL && stackHasError(index))
+	else if (!stackError(this) && index != NULL && stackError(index))
 		copyError(this, -1, index);
 
 	/* Free the compressed and index layers if allocated */
@@ -545,4 +547,10 @@ static Lz4Compress *lz4Cleanup(Lz4Compress *this)
 	this->ioStack.openVal = -1;
 
 	return this;
+}
+
+ssize_t setLz4Error(Lz4Compress *this, ssize_t retval)
+{
+	return setIoStackError(this, -1, "Lz4 compression error: code=%d", -retval);
+
 }

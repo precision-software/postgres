@@ -130,8 +130,9 @@ inline static ssize_t copyError(void *thisVoid, ssize_t retval, void *thatVoid)
 	IoStack *this = thisVoid;
 	IoStack *that = thatVoid;
 	Assert(this != NULL && that != NULL);
-	stackErrorInfo(that, &this->errNo, this->errMsg);
+	this->errNo = that->errNo;
 	this->eof = stackEof(that);
+	strcpy(this->errMsg, that->errMsg);
 	return retval;
 }
 
@@ -140,27 +141,6 @@ inline static ssize_t copyNextError(void *this, ssize_t retval)
 {
 	return copyError(this, retval, nextStack(this));
 }
-
-/*
- * Does the stack have an error condition?
- */
-inline static bool stackHasError(void *this)
-{
-	return thisStack(this)->errNo != 0;
-}
-
-/*
- * Clear the error condition. True if there was one.
- */
-inline static bool stackClearError(void *thisVoid)
-{
-	IoStack *this = thisVoid;
-	bool retVal = stackHasError(this);
-	this->errNo = 0;
-	this->errMsg[0] = 0;
-	return retVal;
-}
-
 
 
 /* Some convenient macros */

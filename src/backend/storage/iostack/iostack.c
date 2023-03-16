@@ -149,20 +149,6 @@ bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset)
 	return true;
 }
 
-
-bool stackEof(void *thisVoid)
-{
-	IoStack *this = thisVoid;
-	return this->eof;
-}
-
-bool stackError(void *thisVoid)
-{
-	IoStack *this = thisVoid;
-	errno = this->errNo;
-	return (errno != 0);
-}
-
 void fileClearError(void *thisVoid)
 {
 	IoStack *this = thisVoid;
@@ -179,11 +165,6 @@ bool stackErrorInfo(void *thisVoid, int *errNo, char *errMsg)
 	return stackError(this);
 }
 
-char *stackErrorMsg(void *thisVoid)
-{
-	IoStack *this = thisVoid;
-	return this->errMsg;
-}
 
 int stackErrorNo(void *thisVoid)
 {

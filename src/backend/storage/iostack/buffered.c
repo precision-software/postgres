@@ -104,7 +104,7 @@ static Buffered *bufferedOpen(Buffered *proto, const char *path, int oflags, int
 /**
  * Write data to the buffered file.
  */
-static size_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t offset, uint32 wait_info)
+static ssize_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t offset)
 {
     debug("bufferedWrite: size=%zu  offset=%lld \n", size, offset);
     assert(size > 0);
@@ -122,7 +122,7 @@ static size_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t 
 		return -1;
 
     /* Copy data into the current buffer */
-    size_t actual = copyIn(this, buf, size, offset);
+    ssize_t actual = copyIn(this, buf, size, offset);
 
 	/* Update file size */
 	if (actual > 0)
@@ -235,7 +235,7 @@ static ssize_t bufferedClose(Buffered *this)
     bufferedCleanup(this);
 
 	debug("bufferedClose(done): msg=%s\n", this->ioStack.errMsg);
-	return stackHasError(this)? -1: 0;
+	return stackError(this)? -1: 0;
 }
 
 
@@ -455,7 +455,7 @@ static Buffered *bufferedCleanup(Buffered *this)
 	this->ioStack.openVal = -1;
 
 	/* If we have no errors, then use error info from successor */
-	if (!stackHasError(this) && next != NULL && stackHasError(next))
+	if (!stackError(this) && next != NULL && stackError(next))
 		copyNextError(this, -1);
 
 	/* Free the next layer if allocated */

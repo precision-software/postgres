@@ -28,14 +28,6 @@ bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset);
 bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset);
 
 
-bool stackError(void *thisVoid);
-bool stackEof(void *thisVoid);
-//bool stackClearError(void *thisVoid);
-bool stackErrorInfo(void *thisVoid, int *errNo, char *errMsg);
-char *stackErrorMsg(void *thisVoid);
-int stackErrorNo(void *thisVoid);
-
-
 /*
  * Specific layers provided by IoStack. Mix and match.
  */
@@ -47,8 +39,13 @@ void *vfdStackNew(void);
 /* Filter for talking to Posix files. Not used by Postgres, but handy for unit tests. */
 IoStack *fileSystemBottomNew();
 
-/* We need some error code to signal an I/O Stack error. Pick an unlikely one as a filler */
-#define EIOSTACK EBADF
+/*
+ *
+ * We need an error value for existing code which only looks at errno.
+ * In the long term, we may want to create special error codes for postgres.
+ * For now, pick a single distinctive and nonsensical errno.
+ */
+#define EIOSTACK ENOTSUP
 
 /*
  * Internals moved here so fileRead, fileWrite, etc can be inlined.
@@ -118,5 +115,63 @@ typedef IoStack *(*IoStackCreateFunction)(void);
 /* Helper macros used above */
 #define invoke(call, stack, args...)   (((IoStack *)(stack))->iface->fn##call((void*)(stack), args))
 #define invokeNoParms(call, stack)     (((IoStack *)(stack))->iface->fn##call((void*)(stack)))
+
+/*
+ * Error handling functions for I/O stacks.
+ * Could be called frequently, so inline them.
+ */
+
+/*
+ * Get the error code, setting errno as a side effect.
+ */
+inline static
+int stackErrorCode(void *this)
+{
+	errno = ((IoStack *)this)->errNo;
+	return errno;
+}
+
+/*
+ * Does the stack have an error condition? Sets errno as a side effect.
+ */
+inline static
+bool stackError(void *this)
+{
+	return stackErrorCode(this) != 0;
+}
+
+/* Did the last read encounter EOF? */
+inline static
+bool stackEof(void *this)
+{
+	return ((IoStack *)this)->eof;
+}
+
+/*
+ * Clear the error condition. True if there was one.
+ */
+inline static
+bool stackClearError(void *thisVoid)
+{
+	IoStack *this = thisVoid;
+	bool retVal = stackError(this);
+	this->errNo = 0;
+	this->errMsg[0] = 0;
+	this->eof = false;
+	errno = 0;
+	return retVal;
+}
+
+/*
+ * Get the error message, setting errno as a side effect.
+ */
+inline static
+const char * stackErrorMsg(void *this)
+{
+	stackErrorCode(this);
+	return ((IoStack *)this)->errMsg;
+}
+
+
 
 #endif /*FILTER_IoStack_H */

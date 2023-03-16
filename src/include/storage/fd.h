@@ -116,8 +116,8 @@ extern mode_t FileGetRawMode(File file);
 extern int PathNameFileSync(const char *path, uint32 wait_event_info);
 
 /* Operations on virtual files -- Sequential I/O */
-extern int FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info);
-extern int FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info);
+extern size_t FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info);
+extern size_t FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info);
 extern off_t FileTell(File file);
 extern off_t FileSeek(File file, off_t offset);
 
@@ -127,10 +127,13 @@ extern int FileScanf(File file, const char *format, ...);
 extern int FilePuts(File, const char *string);
 extern int FileGetc(File file);
 extern int FilePutc(int c, File file);
+
+/* Error handling on virtual files -- similar to feof/ferror */
 extern int FileEof(File file);
-extern void FileClearError(File file);
-extern int FileError(File file);
-extern char *FileErrorMsg(File file);
+extern bool FileClearError(File file);
+extern bool FileError(File file);
+extern const char *FileErrorMsg(File file);
+extern int FileErrorCode(File file);
 
 /* Deprecated methods to open a virtual file - use FileOpen and FileOpenPerm instead */
 extern File PathNameOpenFile(const char *fileName, int fileFlags);

@@ -29,6 +29,8 @@ The file access calls can be summarized as:
  - FileClose() - close a file and release all internal resources.
  - FileEof() - true if the last read was EOF.
  - FileError() - true if the last operation generated an error.
+ - FileErrorMsg() - text describing the error. 
+ - FileErrorCode() - the errno of the corresponding message.
 
 The error handling saves and restores *errno*, so existing code in PostGres may continue
 to test for -1 and access errno directly.
@@ -108,3 +110,7 @@ the bare structure after the stack is closed.
 ### Compression
 
 ### Vfd
+
+# TODO
+ - extend oflags to be uint64.
+ - 
