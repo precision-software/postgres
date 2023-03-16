@@ -104,10 +104,10 @@
 
 /*
  * Private versions of File* routines. These routines are shared with vfd.c
- * and are not called by anybody else. vfd.c contains public versions.
+ * and are not called by anybody else. fileaccess.c contains public versions.
  *
  * The APIs have changed as follows:
- *  - read/write return ssize_t instead of int.
+ *  - FileRead and FileWrite return ssize_t instead of int.
  *  - wait_events are handled in the public versions, not these private ones.
  *  - TODO error handling in write_private returns error code instead of throwing error.
  */
@@ -3742,126 +3742,4 @@ int
 data_sync_elevel(int elevel)
 {
 	return data_sync_retry ? elevel : PANIC;
-}
-
-/*========================================================================================
- * Routines to emuulate C library FILE routines (fgetc, fprintf, ...)
- */
-
-/* Similar to fgetc */
-int
-FileGetc(File file)
-{
-	char c;
-	int ret = FileReadSeq(file, &c, 1, WAIT_EVENT_NONE);
-	if (ret <= 0)
-		ret = EOF;
-	return ret;
-}
-
-/* Similar to fputc */
-int FilePutc(int c, File file)
-{
-	char cbuf;
-	cbuf = c;
-	if (FileWriteSeq(file, &cbuf, 1, WAIT_EVENT_NONE) <= 0)
-		c = EOF;
-	return c;
-}
-
-int FileError(File file)
-{
-	errno = getStack(file)->errNo;
-	return (errno != 0)? EOF: 0;
-}
-
-int FileEof(File file)
-{
-	return getStack(file)->eof;
-}
-
-void FileClearError(File file)
-{
-	getStack(file)->eof = false;
-	getStack(file)->errNo = 0;
-}
-
-char *FileErrorMsg(File file)
-{
-	return getStack(file)->errMsg;
-}
-
-/*
- * A temporary equivalent of fprintf.
- * This version limits text to what fits in a local buffer.
- * Ultimately, we need to update the internal snprintf.c (dopr) to spill
- * to temporary files as well as to FILE*.
- */
-int FilePrintf(File file, const char *format, ...)
-{
-	va_list args;
-	char buffer[4*1024]; /* arbitrary size, big enough? */
-	int size;
-
-	va_start(args, format);
-	size = vsnprintf(buffer, sizeof(buffer), format, args);
-	va_end(args);
-
-	if (size < 0 || size >= sizeof(buffer))
-		ereport(ERROR,
-			errmsg("FilePrintf buffer overflow - %d characters exceeded %lu buffer", size, sizeof(buffer)));
-
-	return FileWriteSeq(file, buffer, Min(size, sizeof(buffer)-1), WAIT_EVENT_NONE);
-}
-
- int FileScanf(File file, const char *format, ...)
- {
-	Assert(false); /* Not implemented */
-	return -1;
- }
-
- int FilePuts(File file, const char *string)
- {
-	return FileWriteSeq(file, string, strlen(string), WAIT_EVENT_NONE);
- }
-
-
-/*
- * Read sequentially from the file.
- */
-int
-FileReadSeq(File file, void *buffer, size_t amount,
-			uint32 wait_event_info)
-{
-	return FileRead(file, buffer, amount, getVfd(file)->offset, wait_event_info);
-}
-
-/*
- * Write sequentially to the file.
- */
-int
-FileWriteSeq(File file, const void *buffer, size_t amount,
-			 uint32 wait_event_info)
-{
-	return FileWrite(file, buffer, amount, getVfd(file)->offset, wait_event_info);
-}
-
-/*
- * Seek to an absolute position within the file.
- * Relative positions can be calculated using FileTell or FileSize.
- */
-off_t
-FileSeek(File file, off_t offset)
-{
-	getVfd(file)->offset = offset;
-	return offset;
-}
-
-/*
- * Tell us the current file position
- */
-off_t
-FileTell(File file)
-{
-	return getVfd(file)->offset;
 }

@@ -265,7 +265,7 @@ static ssize_t aeadClose(Aead *this)
 	/* Release resources, including closing the downstream file */
 	aeadCleanup(this);
 	debug("aeadClose(done): retval=%zd\n", this->ioStack.openVal);
-	return stackHasError(this)? -1: 0;
+	return stackError(this)? -1: 0;
 }
 
 
@@ -844,7 +844,7 @@ static Aead *aeadCleanup(Aead *this)
 	this->ioStack.openVal = -1;
 
 	/* If we have no errors, then report error info from successor */
-	if (!stackHasError(this) && next != NULL && stackHasError(next))
+	if (!stackError(this) && next != NULL && stackError(next))
 		copyNextError(this, -1);
 
 	/* Free the next layer if allocated */
