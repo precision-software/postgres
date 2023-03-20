@@ -83,7 +83,7 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, int mo
 static ssize_t vfdWrite(VfdBottom *this, const Byte *buf, size_t bufSize, off_t offset)
 {
 	ssize_t actual = FileWrite_Private(this->file, buf, bufSize);
-	debug("vfdWrite: file=%d  name=%s  size=%zu  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
+	debug("vfdWrite: file=%d  name=%s  size=%zd  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
 	return checkSystemError(this, actual, "Unable to write to file");
 }
 
@@ -95,7 +95,7 @@ static ssize_t vfdRead(VfdBottom *this, Byte *buf, size_t bufSize, off_t offset,
 	Assert(bufSize > 0 && offset >= 0);
 
 	ssize_t actual = FileRead_Private(this->file, buf, bufSize, offset);
-	debug("vfdRead: file=%d  name=%s  size=%zu  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
+	debug("vfdRead: file=%d  name=%s  size=%zd  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
 	return checkSystemError(this, actual, "Unable to read from file %s", getName(this->file));
 }
 

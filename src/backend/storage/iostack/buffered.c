@@ -106,7 +106,7 @@ static Buffered *bufferedOpen(Buffered *proto, const char *path, int oflags, int
  */
 static ssize_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t offset)
 {
-    debug("bufferedWrite: size=%zu  offset=%lld \n", size, offset);
+    debug("bufferedWrite: size=%zd  offset=%lld \n", size, offset);
     assert(size > 0);
 
 	/* Position to the new block if it changed. */
@@ -141,7 +141,7 @@ static ssize_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t
  */
 static ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t offset)
 {
-	debug("directWrite: size=%zu offset=%lld\n", size, offset);
+	debug("directWrite: size=%zd offset=%lld\n", size, offset);
 
     /* Write out multiple blocks, but no partials */
     ssize_t alignedSize = ROUNDDOWN(size, this->blockSize);
@@ -160,7 +160,7 @@ static ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t o
  */
 static ssize_t bufferedRead(Buffered *this, Byte *buf, size_t size, off_t offset)
 {
-	debug("bufferedRead: size=%zu  offset=%lld \n", size, offset);
+	debug("bufferedRead: size=%zd  offset=%lld \n", size, offset);
 	assert(size > 0);
 
 	/* Position to the new block if it changed. */
@@ -185,7 +185,7 @@ static ssize_t bufferedRead(Buffered *this, Byte *buf, size_t size, off_t offset
 
 static ssize_t directRead(Buffered *this, Byte *buf, size_t size, off_t offset)
 {
-	debug("directRead: size=%zu offset=%lld\n", size, offset);
+	debug("directRead: size=%zd offset=%lld\n", size, offset);
 	/* Read multiple blocks, last one might be partial */
 	ssize_t alignedSize = ROUNDDOWN(size, this->blockSize);
 	ssize_t actual = stackRead(nextStack(this), buf, alignedSize, offset);
@@ -339,7 +339,7 @@ void *bufferedNew(ssize_t suggestedSize, void *next)
  */
 static bool flushBuffer(Buffered *this)
 {
-    debug("flushBuffer: bufPosition=%lld  bufActual=%zu  dirty=%d\n", this->currentBlock, this->currentSize, this->dirty);
+    debug("flushBuffer: bufPosition=%lld  bufActual=%zd  dirty=%d\n", this->currentBlock, this->currentSize, this->dirty);
 	Assert(this->currentBlock % this->blockSize == 0);
 
     /* Clean the buffer if dirty */
@@ -361,7 +361,7 @@ static bool flushBuffer(Buffered *this)
  */
 static bool fillBuffer (Buffered *this)
 {
-	debug("fillBuffer: bufActual=%zu  bufPosition=%lld sizeConfirmed=%d  fileSize=%lld\n",
+	debug("fillBuffer: bufActual=%zd  bufPosition=%lld sizeConfirmed=%d  fileSize=%lld\n",
 		  this->currentSize, this->currentBlock, this->sizeConfirmed, this->fileSize);
 	assert(this->currentBlock % this->blockSize == 0);
 
@@ -396,7 +396,7 @@ static bool fillBuffer (Buffered *this)
 /* Copy user data from the user, respecting boundaries */
 static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t position)
 {
-	debug("copyIn: position=%lld  size=%zu bufPosition=%lld bufActual=%zu\n", position, size, this->currentBlock, this->currentSize);
+	debug("copyIn: position=%lld  size=%zd bufPosition=%lld bufActual=%zd\n", position, size, this->currentBlock, this->currentSize);
 	assert(this->currentBlock == ROUNDDOWN(position, this->blockSize));
 
 	if (this->currentSize == -1)
@@ -414,7 +414,7 @@ static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t positi
 
     /* We may have extended the total data held in the buffer */
     this->currentSize = MAX(this->currentSize, actual + offset);
-	debug("copyin(end): actual=%zu  bufActual=%zu\n", actual, this->currentSize);
+	debug("copyin(end): actual=%zd  bufActual=%zd\n", actual, this->currentSize);
 
     assert(this->currentSize <= this->blockSize);
     return actual;
@@ -436,7 +436,7 @@ static ssize_t copyOut(Buffered *this, Byte *buf, size_t size, off_t position)
 	/* Copy bytes out of the buffer, up to end of data or end of buffer */
     ssize_t actual = MIN(this->currentSize - offset, size);
     memcpy(buf, this->buf + offset, actual);
-    debug("copyOut: size=%zu bufPosition=%lld bufActual=%zu offset=%zu  actual=%zu\n",
+    debug("copyOut: size=%zd bufPosition=%lld bufActual=%zd offset=%zd  actual=%zd\n",
 		  size, this->currentBlock, this->currentSize, offset, actual);
     return actual;
 }

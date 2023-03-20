@@ -25,9 +25,9 @@ This is a "header only" file.
 #define debug(...) ((void) 0)
 #else
 #define USE_ASSERT_CHECKING 1
-#define debug(args...) fprintf(stderr, args)
 
-//#define debug(args...) elog(DEBUG2, args);
+//#define debug(args...) fprintf(stderr, args)
+#define debug(args...) elog(DEBUG2, args);
 
 /*
  * Quick and dirty debug function to display a buffer in hex.

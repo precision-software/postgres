@@ -93,7 +93,12 @@ ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offse
 }
 
 
-
+/*
+ * Read data from a sized record (size folllowed by data).
+ * A zero return can mean either a zero length record or EOF,
+ * so it may be necessary to invoke stackEof() or FileEof()
+ * to fully detect an EOF condition.
+ */
 ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset)
 {
 	Assert(size <= MAX_BLOCK_SIZE);
