@@ -118,7 +118,7 @@ int FileClose(File file)
 
 ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
-	debug("FileRead: name=%s file=%d  amount=%zu offset=%lld\n", getName(file), file, amount, offset);
+	debug("FileRead: name=%s file=%d  amount=%zd offset=%lld\n", getName(file), file, amount, offset);
 	Assert(offset >= 0);
 	Assert((ssize_t)amount > 0);
 
@@ -140,7 +140,7 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 
 ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
-	debug("FileWrite: name=%s file=%d  amount=%zu offset=%lld\n", getName(file), file, amount, offset);
+	debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld\n", getName(file), file, amount, offset);
 	Assert(offset >= 0 && (ssize_t)amount > 0);
 
 	/* Write the data as requested */
@@ -246,7 +246,7 @@ int FilePuts(File file, const char *string)
 static inline size_t checkIoStackError(File file, ssize_t retval)
 {
 	if (retval < 0 && FileErrorCode(file) == EIOSTACK)
-		ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", FileErrorMsg(file)));
+		ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR), errmsg("I/O Error for %s: %s", FilePathName(file), FileErrorMsg(file)));
 
 	return retval;
 }
@@ -427,14 +427,13 @@ void ioStackSetup(void)
 	ioStackPlain = bufferedNew(64*1024, vfdStackNew());
 	ioStackCompress = bufferedNew(1, lz4CompressNew(64 * 1024, vfdStackNew(), vfdStackNew()));
 	ioStackCompressEncrypt = bufferedNew(1,
-										 lz4CompressNew(1,
-														bufferedNew(16*1024,
+										 lz4CompressNew(16*1024,
+														bufferedNew(1,
 																	aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
 																			vfdStackNew())),
 														bufferedNew(1,
 																	aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
 																			vfdStackNew()))));
-
 	/* Note we are now initialized */
 	ioStacksInitialized = true;
 }

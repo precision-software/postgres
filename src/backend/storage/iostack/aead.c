@@ -153,7 +153,7 @@ static Aead *aeadOpen(Aead *proto, const char *path, int oflags, int mode)
  */
 static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
 {
-    debug("aeadRead: size=%zu  offset=%lld maxWrite=%lld fileSize=%lld\n",
+    debug("aeadRead: size=%zd  offset=%lld maxWrite=%lld fileSize=%lld\n",
           size, offset, this->maxWritePosition, this->fileSize);
 	Assert(offset >= 0);
 
@@ -202,7 +202,7 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
  */
 static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
 {
-    debug("aeadWrite: size=%zu  offset=%llu maxWrite=%llu fileSize=%lld\n",
+    debug("aeadWrite: size=%zd  offset=%lld maxWrite=%lld fileSize=%lld\n",
           size, offset, this->maxWritePosition, (off_t)this->fileSize);
 	Assert(offset >= 0);
 
@@ -247,14 +247,14 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
  */
 static ssize_t aeadClose(Aead *this)
 {
-	debug("aeadClose: maxWrite=%llu fileSize=%lld\n", this->maxWritePosition, this->fileSize);
+	debug("aeadClose: openVal=%zd maxWrite=%lld fileSize=%lld\n", this->ioStack.openVal, this->maxWritePosition, this->fileSize);
 
 	/*
-	 * If not already done, add an partial (empty) block to mark the end of encrypted data.
+	 * If not already done, add a partial (empty) block to mark the end of encrypted data.
 	 * If writing a block, we need to absolutely know our file size. needsFinalBlock()
 	 * will update file size if necessary.
 	 */
-	if (this->open && needsFinalBlock(this))
+	if (needsFinalBlock(this))
 	{
 		off_t size = stackSize(this);
 		if (size == -1)
@@ -264,7 +264,7 @@ static ssize_t aeadClose(Aead *this)
 
 	/* Release resources, including closing the downstream file */
 	aeadCleanup(this);
-	debug("aeadClose(done): retval=%zd\n", this->ioStack.openVal);
+	debug("aeadClose(done): code=%d msg=%s\n", stackErrorCode(this), stackErrorMsg(this));
 	return stackError(this)? -1: 0;
 }
 
@@ -294,7 +294,7 @@ static bool needsFinalBlock(Aead *this)
 	if (this->sizeConfirmed)  return true;
 
 	/* Downstream file has more blocks than we wrote. No need. */
-	off_t nextSize = stackSize(nextStack(this));
+	off_t nextSize = stackSize(nextStack(this)); // TODO: error check
 	if (cryptOffset(this, this->fileSize) < nextSize) return false;
 
 	 /* Get accurate file size info and retry */
@@ -502,7 +502,7 @@ bool aeadHeaderRead(Aead *this)
     /* Get the plain text record size for this encrypted file. */
     this->plainSize = unpack4(&bp, end);
     if (this->plainSize > MAX_BLOCK_SIZE)
-        return setIoStackError(this, -1, "AEAD header size (%zu) exceeds %zu", this->plainSize, MAX_BLOCK_SIZE);
+        return setIoStackError(this, -1, "AEAD header size (%zd) exceeds %zd", this->plainSize, MAX_BLOCK_SIZE);
 
     /* Get the cipher name */
     size_t nameSize = unpack1(&bp, end);
@@ -514,7 +514,7 @@ bool aeadHeaderRead(Aead *this)
     /* Get the initialization vector */
     this->ivSize = unpack1(&bp, end);
     if (this->ivSize > sizeof(this->iv))
-        return setIoStackError(this, -1, "Initialization vector size (%zu) exceeeds %zu", this->ivSize, sizeof(this->iv));
+        return setIoStackError(this, -1, "Initialization vector size (%zd) exceeeds %zd", this->ivSize, sizeof(this->iv));
     unpackBytes(&bp, end, this->iv, this->ivSize);
 
     /* Get the empty cipher text block */
@@ -680,17 +680,17 @@ aead_encrypt(Aead *this,
              Byte *tag, ssize_t blockNr)
 {
 
-    //debug("Encrypt: plainText='%.*s' plainSize=%zu  cipher=%s\n", (int)sizeMin(plainSize,64), plainText, plainSize, this->cipherName);
-    debug("Encrypt: plainSize=%zu  cipher=%s plainText='%.*s'\n",
+    //debug("Encrypt: plainText='%.*s' plainSize=%zd  cipher=%s\n", (int)sizeMin(plainSize,64), plainText, plainSize, this->cipherName);
+    debug("Encrypt: plainSize=%zd  cipher=%s plainText='%.*s'\n",
           plainSize, this->cipherName, (int)plainSize, plainText);
-	debug("    headerSize=%zu  header=%s\n", headerSize, asHex(header, headerSize));
+	debug("    headerSize=%zd  header=%s\n", headerSize, asHex(header, headerSize));
     /* Reinitialize the encryption context to start a new record */
     EVP_CIPHER_CTX_reset(this->ctx);
 
     /* Generate nonce by XOR'ing the initialization vector with the sequence number */
     Byte nonce[EVP_MAX_IV_LENGTH];
     generateNonce(nonce, this->iv, this->ivSize, blockNr);
-    debug("Encrypt: iv=%s  blockNr=%zu  nonce=%s  key=%s\n",
+    debug("Encrypt: iv=%s  blockNr=%zd  nonce=%s  key=%s\n",
           asHex(this->iv, this->ivSize), blockNr, asHex(nonce, this->ivSize), asHex(this->key, this->keySize));
 
     /* Configure the cipher with the key and nonce */
@@ -748,15 +748,15 @@ aead_decrypt(Aead *this,
              Byte *cipherText, size_t cipherSize,
              Byte *tag, ssize_t blockNr)
 {
-    debug("Decrypt:  cryptSize=%zu  cipher=%s  cipherText=%.128s \n", cipherSize, this->cipherName,  asHex(cipherText, cipherSize));
-	debug("    headerSize=%zu  header=%s\n", headerSize, asHex(header, headerSize));
+    debug("Decrypt:  cryptSize=%zd  cipher=%s  cipherText=%.128s \n", cipherSize, this->cipherName,  asHex(cipherText, cipherSize));
+	debug("    headerSize=%zd  header=%s\n", headerSize, asHex(header, headerSize));
     /* Reinitialize the encryption context to start a new record */
     EVP_CIPHER_CTX_reset(this->ctx);
 
     /* Generate nonce by XOR'ing the initialization vector with the sequence number */
     Byte nonce[EVP_MAX_IV_LENGTH];
     generateNonce(nonce, this->iv, this->ivSize, blockNr);
-    debug("Decrypt: iv=%s  blockNr=%zu  nonce=%s  key=%s  tag=%s\n",
+    debug("Decrypt: iv=%s  blockNr=%zd  nonce=%s  key=%s  tag=%s\n",
           asHex(this->iv, this->ivSize), blockNr, asHex(nonce, this->ivSize), asHex(this->key, this->keySize), asHex(tag, this->tagSize));
 
     /* Configure the cipher with key and initialization vector */
@@ -791,7 +791,7 @@ aead_decrypt(Aead *this,
 
     /* Output plaintext size combines the update part of the encryption and the finalization. */
     ssize_t plainActual = plainUpdateSize + plainFinalSize;
-    debug("Decrypt:  plainActual=%zu plainText='%.*s'\n", plainActual, (int)plainActual, plainText);
+    debug("Decrypt:  plainActual=%zd plainText='%.*s'\n", plainActual, (int)plainActual, plainText);
     return plainActual;
 }
 
