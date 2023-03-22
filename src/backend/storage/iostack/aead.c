@@ -157,6 +157,11 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
           size, offset, this->maxWritePosition, this->fileSize);
 	Assert(offset >= 0);
 
+
+	/* All reads must be aligned */
+	if (offset % this->plainSize != 0)
+		return (setIoStackError(this, -1, "Encryptkon: read from offset (%lld) not aligned (%lld)", offset, this->plainSize), -1);
+
 	/* If we are positioned at EOF, then return EOF */
 	if (this->sizeConfirmed && offset == this->fileSize)
 	{
@@ -188,6 +193,7 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
 	/* Track our position for EOF handling */
     this->sizeConfirmed |= (plainSize < this->plainSize);
 	this->fileSize = MAX(this->fileSize, offset + plainSize);
+	this->ioStack.eof = (plainSize == 0);
 
     /* Return the number of plaintext bytes read. */
     return plainSize;
@@ -206,15 +212,13 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
           size, offset, this->maxWritePosition, (off_t)this->fileSize);
 	Assert(offset >= 0);
 
-	/* Give special error message if we are trying to do unaligned append to the file */
-	if (offset % this->plainSize != 0 && this->sizeConfirmed && offset == this->fileSize)
-		return (setIoStackError(this, -1, "Attempting to append to encrypted file - must use buffering"), -1);
+	/* All writes must be aligned */
+	if (offset % this->plainSize != 0)
+		return (setIoStackError(this, -1, "Encryptkon: write to offset (%lld) not aligned (%lld)", offset, this->plainSize), -1);
 
 	/* Writing a partial block before end of file would cause corruption in the file */
 	if (size < this->plainSize && offset + size < this->fileSize)
 		return (setIoStackError(this, -1, "Encryption: partial block before end of file causes corruption"), -1);
-
-	Assert(offset % thisStack(this)->blockSize == 0);
 
     /* Encrypt one record of data into our buffer */
     Byte tag[EVP_MAX_MD_SIZE];

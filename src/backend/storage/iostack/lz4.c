@@ -278,22 +278,25 @@ static ssize_t lz4CompressTruncate(Lz4Compress *this, off_t offset);
 static
 ssize_t lz4CompressWrite(Lz4Compress *this, const Byte *buf, size_t size, off_t offset)
 {
-	/* if NOT writing (or about to overwrite) the last block, then we have an error */
-	if (offset + size < this->lastBlock + this->lastSize)
-        return setIoStackError(this, -1, "Can only write at end of compressed file. endWrite=%lld  fileSize=%lld", offset+size, this->lastBlock+this->lastSize);
-
-    /* We do one block at a time */
 	debug("lz4Write: size=%zd offset=%lld lastBlock=%lld\n", size, offset, this->lastBlock);
-    size = MIN(size, this->blockSize);
-	Assert(offset % this->blockSize == 0);  /* offset must be aligned on block boundary */
-	Assert(this->lastBlock % this->blockSize == 0);
+
+	/* All writes must be aligned */
+	if (offset % this->blockSize != 0)
+		return setIoStackError(this, -1, "Compression: all writes must be aligned. offset=%lld  alignment=%lld", offset, this->blockSize);
+
+	/* Adjust size to be a single block */
+	size = MIN(size, this->blockSize);
+
+	/* With compression, we can only add a new block or overwrite the last block */
+	if (offset != this->lastBlock && offset != this->lastBlock + this->lastSize)
+        return setIoStackError(this, -1, "Can only write at end of compressed file. offset=%lld  fileSize=%lld", offset, this->lastBlock+this->lastSize);
 
 	/* if appending a new block, */
 	if (offset == this->lastBlock + this->lastSize)
 	{
 		/* Verify the previous block was not a partial block */
-		if (offset % this->blockSize != 0)
-			return setIoStackError(this, -1, "lz4 - writing new block but previous block not full");
+		if (this->lastSize != 0 && this->lastSize != this->blockSize)
+			return setIoStackError(this, -1, "lz4 - appending new block but previous block not full");
 
 		/* Calculate offsets in the compressed file and the index file for the new block. TODO: call getCompressedIndex?? */
 		off_t indexOffset = offset / this->blockSize * 8;
@@ -313,7 +316,7 @@ ssize_t lz4CompressWrite(Lz4Compress *this, const Byte *buf, size_t size, off_t 
 	}
 
     /* Compress the block and write it out as a variable sized record */
-    size_t compressed = lz4CompressBuffer(this, this->compressedBuf, this->maxCompressed, buf, size);
+    ssize_t compressed = lz4CompressBuffer(this, this->compressedBuf, this->maxCompressed, buf, size);
     ssize_t actual = stackWriteSized(nextStack(this), this->compressedBuf, compressed, this->compressedLastBlock);
     if (actual < 0)
 		return copyError(this, actual, nextStack(this));
@@ -331,13 +334,14 @@ ssize_t lz4CompressWrite(Lz4Compress *this, const Byte *buf, size_t size, off_t 
 static
 ssize_t lz4CompressRead(Lz4Compress *this, Byte *buf, size_t size, off_t offset)
 {
-    /* We do one record at a time */
-    size = MIN(size, this->blockSize);
-
     debug("lz4Read: size=%zd  offset=%lld\n", size, offset);
 
+	/* All reads must be aligned */
 	if (offset % this->blockSize != 0)
-		return setIoStackError(this, -1, "lz4 writing an unaligned offset (%lld) (%lld)", offset, this->blockSize);
+		return setIoStackError(this, -1, "Compression: all reads must be aligned. offset=%lld  alignment=%lld", offset, this->blockSize);
+
+	/* Adjust size to be a single block */
+	size = MIN(size, this->blockSize);
 
 	/* Read the index to get the offset of the compressed block, checking for error */
 	off_t compressedOffset = getCompressedOffset(this, offset);
@@ -349,8 +353,9 @@ ssize_t lz4CompressRead(Lz4Compress *this, Byte *buf, size_t size, off_t offset)
 	if (compressedActual < 0)
 		return -1;
 
-    /* Decompress the record we just read. Note we could have a zero length record. */
+    /* Decompress the record we just read. Note we could have a valid zero length record. */
     ssize_t actual = lz4DecompressBuffer(this, buf, size, this->compressedBuf, compressedActual);
+	this->ioStack.eof = (compressedActual == 0);
 
 	debug("lz4Read(done): actual=%zd lastBlock=%lld  lastSize=%zd\n", actual, this->lastBlock, this->lastSize);
     return actual;
@@ -363,7 +368,6 @@ static
 ssize_t lz4CompressClose(Lz4Compress *this)
 {
 	debug("lz4CompressClose: blockSize=%zd\n", this->blockSize);
-	/* TODO: this is debug */
 
 	/* if writable ... */
 	if (this->writable)
@@ -415,10 +419,10 @@ ssize_t lz4CompressTruncate(Lz4Compress *this, off_t offset)
 	    return checkSystemError(this, -1, "Truncating a readonly compressed file");
 	}
 
-	/* Read in the last block if not on a block boundary ... */
+	/* If the offset is not aligned, then read the last bvlock.  (TODO: onlh truncate on block boundary) */
 	ssize_t actual = 0;
 	if (offset % this->blockSize != 0)
-		actual = stackReadAll(this, this->tempBuf, this->blockSize, offset);
+		actual = stackReadAll(this, this->tempBuf, this->blockSize, ROUNDDOWN(offset, this->blockSize));
 
 	/* Update our internal pointers so it looks like we are truncated at the beginning of the block */
 	this->lastBlock = ROUNDDOWN(offset, this->blockSize);
