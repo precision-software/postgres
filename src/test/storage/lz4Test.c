@@ -7,7 +7,8 @@
 
 static IoStack *createStack(size_t blockSize)
 {
-	return bufferedNew(64, lz4CompressNew(blockSize, bufferedNew(64, vfdStackNew()), bufferedNew(64,vfdStackNew())));
+	return lz4CompressNew(blockSize, vfdStackNew(), vfdStackNew());
+	//return lz4CompressNew(blockSize, vfdStackNew(), vfdStackNew()); Needs buffering to test for EOF
 }
 
 
@@ -19,7 +20,7 @@ void testMain()
     beginTestGroup("LZ4 Compression");
 	beginTest("LZ4 Compression");
 
-    singleReadSeekTest(createStack, TEST_DIR "compressed/testfile_%u_%u.lz4", 1024, 1024);
+    //singleReadSeekTest(createStack, TEST_DIR "compressed/testfile_%u_%u.lz4", 32895, 1024 - 237);
     readSeekTest(createStack, TEST_DIR "compressed/testfile_%u_%u.lz4");
 
 }

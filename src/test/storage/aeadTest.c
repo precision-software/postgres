@@ -9,9 +9,7 @@
 
 static IoStack *createStack(size_t blockSize)
 {
-	return bufferedNew(64,
-			 aeadNew("AES-256-GCM", blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32,
-				   vfdStackNew()));
+	return aeadNew("AES-256-GCM", blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32, vfdStackNew());
 }
 
 void testMain()
@@ -21,6 +19,6 @@ void testMain()
     beginTestGroup("AES Encrypted Files");
 	beginTest("AES Encrypted Files");
 
-    //singleSeekTest(createStack, TEST_DIR "encryption/testfile_%u_%u.dat", 1027, 1);
+    singleSeekTest(createStack, TEST_DIR "encryption/testfile_%u_%u.dat", 1024, 4096);
     seekTest(createStack, TEST_DIR "encryption/testfile_%u_%u.dat");
 }

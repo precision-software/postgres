@@ -26,6 +26,6 @@ void testMain()
 	system("rm -rf " TEST_DIR "kitchensink; mkdir -p " TEST_DIR "kitchensink");
 
 	beginTestGroup("Raw Files");
-	singleReadSeekTest(createStack, TEST_DIR "kitchensink/testfile_%u_%u.dat", 1027, 1024);
+	singleReadSeekTest(createStack, TEST_DIR "kitchensink/testfile_%u_%u.dat", 32895, 3429);
 	readSeekTest(createStack, TEST_DIR "kitchensink/testfile_%u_%u.dat");
 }

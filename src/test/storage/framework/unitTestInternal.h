@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+extern void MemoryContextInit(void);
 
 #define TEST_DIR "/tmp/pgtest/"
 

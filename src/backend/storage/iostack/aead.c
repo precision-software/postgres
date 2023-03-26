@@ -96,29 +96,33 @@ struct Aead
  */
 static Aead *aeadOpen(Aead *proto, const char *path, int oflags, int mode)
 {
+
+	/* Is the file readable/writable? */
+	bool writable = (oflags & O_ACCMODE) != O_RDONLY;
+	bool readable = (oflags & O_ACCMODE) != O_WRONLY;
+
+	/* Even if we are write only, we need to read the file to verify header (unless O_TRUNC?) */
+	if (!readable)
+		oflags = (oflags & ~O_ACCMODE) | O_RDWR;
+
 	/* Open our successor and clone ourself */
 	IoStack *next = stackOpen(nextStack(proto), path, oflags, mode);
 	Aead *this = aeadNew(proto->cipherName, proto->suggestedSize, proto->key, proto->keySize, next);
 	this->ioStack.openVal = next->openVal;
-
 	if (next->openVal < 0)
 		return aeadCleanup(this);
 
-	/* Our successor must by byte oriented to support header */
+	/* Our successor must be byte oriented to support header */
 	Assert(next->blockSize == 1);
-
-	/* Is the file readable/writable? */
-	this->writable = (oflags & O_ACCMODE) != O_RDONLY;
-	this->readable = (oflags & O_ACCMODE) != O_WRONLY;
-
-	/* Even if we are write only, we need to read the file to verify header (unless O_TRUNC?) */
-	if ((oflags & O_ACCMODE) == O_WRONLY)
-		oflags = (oflags & ~O_ACCMODE) | O_RDWR;
 
 	/* Track the file size as we know it so far, so we avoid having to query fileSize to get it */
 	this->maxWritePosition = 0;
 	this->fileSize = 0;
 	this->sizeConfirmed = (oflags & O_TRUNC) != 0;
+
+	/* Keep track of whether we are readable/writable */
+	this->readable = readable;
+	this->writable = writable;
 
 	/* Read the downstream file to get header information and configure encryption */
 	if (!aeadConfigure(this))
@@ -157,17 +161,16 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
           size, offset, this->maxWritePosition, this->fileSize);
 	Assert(offset >= 0);
 
-
-	/* All reads must be aligned */
-	if (offset % this->plainSize != 0)
-		return (setIoStackError(this, -1, "Encryptkon: read from offset (%lld) not aligned (%lld)", offset, this->plainSize), -1);
-
 	/* If we are positioned at EOF, then return EOF */
-	if (this->sizeConfirmed && offset == this->fileSize)
+	if (this->sizeConfirmed && offset >= this->fileSize)
 	{
 		thisStack(this)->eof = true;
 		return 0;
 	}
+
+	/* All reads must be aligned (unless EOF) */
+	if (offset % this->plainSize != 0)
+		return (setIoStackError(this, -1, "Encryption: read from offset (%lld) not aligned (%lld)", offset, this->plainSize), -1);
 
 	assert(offset % thisStack(this)->blockSize == 0);
 
@@ -214,7 +217,7 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
 
 	/* All writes must be aligned */
 	if (offset % this->plainSize != 0)
-		return (setIoStackError(this, -1, "Encryptkon: write to offset (%lld) not aligned (%lld)", offset, this->plainSize), -1);
+		return (setIoStackError(this, -1, "Encryption: write to offset (%lld) not aligned (%lld)", offset, this->plainSize), -1);
 
 	/* Writing a partial block before end of file would cause corruption in the file */
 	if (size < this->plainSize && offset + size < this->fileSize)

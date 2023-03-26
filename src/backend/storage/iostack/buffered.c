@@ -128,9 +128,6 @@ static ssize_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t
 	if (actual > 0)
 	    this->fileSize = MAX(this->fileSize, offset + actual);
 
-	/* DEBUG ... REMOVE */
-	flushBuffer(this);
-
     assert(actual > 0);
     return actual;
 }

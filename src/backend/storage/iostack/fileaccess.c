@@ -33,7 +33,7 @@ static IoStack *selectIoStack(const char *path, int oflags, int mode);
 IoStack *vfdNew();
 void ioStackSetup(void);
 bool saveFileError(File file, IoStack *ioStack);
-static inline size_t checkIoStackError(File file, ssize_t retval);
+static inline ssize_t checkIoStackError(File file, ssize_t retval);
 
 /* Wrapper for backwards compatibility */
 File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
@@ -41,7 +41,7 @@ File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	return FileOpenPerm(fileName, fileFlags, fileMode);
 }
 
-/* Preferred procedure name for opening a file */
+/* Preferred procedure for opening a file */
 File FileOpen(const char *fileName, int fileFlags)
 {
 	return FileOpenPerm(fileName, fileFlags, pg_file_create_mode);
@@ -172,6 +172,11 @@ off_t FileSize(File file)
 	return size;
 }
 
+ssize_t FileBlockSize(File file)
+{
+	return getStack(file)->blockSize;
+}
+
 int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
 {
 	pgstat_report_wait_start(wait_event_info);
@@ -243,7 +248,7 @@ int FilePuts(File file, const char *string)
 
 
 /* If there was an I/O stack error, throw the error exception.  Regular file I/O errors will return normally */
-static inline size_t checkIoStackError(File file, ssize_t retval)
+static inline ssize_t checkIoStackError(File file, ssize_t retval)
 {
 	if (retval < 0 && FileErrorCode(file) == EIOSTACK)
 		ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR), errmsg("I/O Error for %s: %s", FilePathName(file), FileErrorMsg(file)));
@@ -254,7 +259,7 @@ static inline size_t checkIoStackError(File file, ssize_t retval)
 /*
  * Read sequentially from the file.
  */
-size_t
+ssize_t
 FileReadSeq(File file, void *buffer, size_t amount,
 			uint32 wait_event_info)
 {
@@ -265,7 +270,7 @@ FileReadSeq(File file, void *buffer, size_t amount,
 /*
  * Write sequentially to the file.
  */
-size_t
+ssize_t
 FileWriteSeq(File file, const void *buffer, size_t amount,
 			 uint32 wait_event_info)
 {

@@ -81,7 +81,7 @@ static void generateFile(char *path, off_t size, size_t bufferSize)
 }
 
 /* Verify a iostack has the correct data */
-static void verifyFile(char *path, off_t size, ssize_t bufferSize)
+static void verifyFile(char *path, off_t fileSize, ssize_t bufferSize)
 {
     debug("verifyFile: path=%s\n", path);
     File file = FileOpen(path, O_RDONLY|PG_TESTSTACK);
@@ -90,9 +90,9 @@ static void verifyFile(char *path, off_t size, ssize_t bufferSize)
 	PG_ASSERT(!FileError(file));
     Byte *buf = malloc(bufferSize);
 
-    for (off_t actual, position = 0; position < size; position += actual)
+    for (off_t actual, position = 0; position < fileSize; position += actual)
     {
-        size_t expected = MIN(bufferSize, size - position);
+        size_t expected = MIN(bufferSize, fileSize - position);
         actual = FileReadSeq(file, buf, bufferSize, 0);
         PG_ASSERT_EQ(expected, actual);
         PG_ASSERT(verifyBuffer(position, buf, actual));
@@ -167,32 +167,47 @@ static void generateRandomFile(char *path, off_t size, size_t blockSize)
     PG_ASSERT(FileClose(file) == 0);
 }
 
-static void appendFile(char *path, off_t size, size_t blockSize)
+static void appendFile(char *path, off_t fileSize, size_t bufferSize)
 {
     debug("appendFile: path=%s\n", path);
     File file = FileOpen(path, O_RDWR|O_APPEND|PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
-    Byte *buf = malloc(blockSize);
+    Byte *buf = malloc(bufferSize);
 
-    /* Seek to the end of the file - should match file size */
-    off_t endPosition = FileTell(file);
+    /* Since we are appending, we are at the end of file - should match file size */
+	PG_ASSERT_EQ(fileSize, FileTell(file));
 
-    /* Write a new block at the end of file */
-    generateBuffer(endPosition, buf, blockSize);
+	/* The requested buffer size should be a multiple of the underlying block size. (Property of unit test) */
+	ssize_t blockSize = FileBlockSize(file);
+	PG_ASSERT_EQ(0, bufferSize % blockSize);
 
-    /* Write the block */
-    ssize_t actual = FileWriteSeq(file, buf, blockSize, 0);
-    PG_ASSERT_EQ(actual, blockSize);
+	/* If the last block is a partial block, ... */
+	off_t lastBlock = ROUNDDOWN(fileSize, blockSize);
+	ssize_t lastSize = fileSize - lastBlock;
+	if (lastSize > 0)
+	{
+		/* Rewrite the last block, which is now full */
+		generateBuffer(lastBlock, buf, blockSize);
+		PG_ASSERT_EQ(blockSize, FileWrite(file, buf, blockSize, lastBlock, 0));
+
+		/* Adjust the write parameters to write whatever is left. It is now block aligned. */
+		lastBlock += blockSize;
+	}
+
+    /* Write whatever remains to the end of file */
+	ssize_t remaining = (fileSize + bufferSize) - lastBlock;
+    generateBuffer(lastBlock, buf, remaining);
+    ssize_t actual = FileWriteSeq(file, buf, remaining, 0);
+    PG_ASSERT_EQ(remaining, actual);
 
     /* Close the file and verify it is correct. */
     PG_ASSERT_EQ(0, FileClose(file));
-
-    verifyFile(path, size+blockSize, blockSize);
+    verifyFile(path, fileSize+bufferSize, bufferSize);
 }
 
 /*
- * Verify a ioStack has the correct data through randomlike seeks.
- * This should do a complete verification - examining every byte of the ioStack.
+ * Verify an ioStack has the correct data through random seeks.
+ * This should do a complete verification - examining every byte of the file.
  */
 static void verifyRandomFile(char *path, off_t size, size_t blockSize)
 {
@@ -300,7 +315,7 @@ void singleSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t size, size
 
     /* append to the file */
     appendFile(fileName, size, bufferSize);
-    verifyFile(fileName, size+bufferSize, 16*1024);
+    verifyFile(fileName, size+bufferSize, ROUNDDOWN(16*1024, bufferSize));  /* larger buffer */
 
     /* Read back as random reads */
     verifyRandomFile(fileName, size+bufferSize, bufferSize);
@@ -358,29 +373,28 @@ void streamTest(CreateTestStackFn testStack, char *nameFmt)
 
 
 /* Run a test on a single configuration determined by file size and buffer size */
-void singleReadSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t size, size_t bufferSize)
+void singleReadSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t fileSize, size_t bufferSize)
 {
     char fileName[PATH_MAX];
-    snprintf(fileName, sizeof(fileName), nameFmt, size, bufferSize);
+    snprintf(fileName, sizeof(fileName), nameFmt, fileSize, bufferSize);
 
     beginTest(fileName);
 
-	/* Inject the procedure to create an I/O Stack */
+	/* Set up the I/O stack we want to test */
 	setTestStack(testStack, bufferSize);
 
-	generateFile(fileName, size, bufferSize);
-    verifyFile(fileName, size, bufferSize);
+	generateFile(fileName, fileSize, bufferSize);
+    verifyFile(fileName, fileSize, bufferSize);
 
-    verifyRandomFile(fileName, size, bufferSize);
+    verifyRandomFile(fileName, fileSize, bufferSize);
 
-    appendFile(fileName, size, bufferSize);
-    verifyRandomFile(fileName, size + bufferSize, bufferSize);
+    appendFile(fileName, fileSize, bufferSize);
+    verifyRandomFile(fileName, fileSize + bufferSize, bufferSize);
 
 	regression(fileName, bufferSize);
 
     /* Clean things up */
     deleteFile(fileName);
-
 }
 
 /* Create a test stack with a certain blockSize */
@@ -391,13 +405,13 @@ void readSeekTest(CreateTestStackFn testStack, char *nameFmt)
 {
     for (int fileIdx = 0; fileIdx<countof(fileSize); fileIdx++)
         for (int bufIdx = 0; bufIdx<countof(blockSize); bufIdx++)
-			if  (blockSize[fileIdx] / blockSize[bufIdx] < 4 * 1024 * 1024)  // Keep nr blocks under 4M to complete in reasonable time.
+			if  (fileSize[fileIdx] / blockSize[bufIdx] < 4 * 1024 * 1024)  // Keep nr blocks under 4M to complete in reasonable time.
                 singleReadSeekTest(testStack, nameFmt, fileSize[fileIdx], blockSize[bufIdx]);
 }
 
 /*
  * Here is a nuisance problem for testing I/O Stacks.
- * PG_TESTSTACK requires a "createStack()" function which takes no parameters,
+ * PG_TESTSTACK requires a fully built IoStack as a prototype,
  * but the test framework wants a "createTestStack(blockSize) function which accepts a blockSize parameter.
  * In functional programing the solution would be easy - simply create a new function
  * by binding blockSize in a lambda expression.

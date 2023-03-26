@@ -15,7 +15,7 @@ void streamTest(CreateStackFn createStack, char *nameFmt);
 void singleStreamTest(CreateStackFn createStack, char *nameFmt, off_t fileSize, size_t bufSize);
 
 void readSeekTest(CreateStackFn createStack, char *nameFmt);
-void singleReadSeekTest(CreateStackFn createStack, char *nameFmt, off_t fileSiae, size_t bufSize);
+void singleReadSeekTest(CreateStackFn createStack, char *nameFmt, off_t fileSize, size_t bufSize);
 
 #include "unitTestInternal.h"
 

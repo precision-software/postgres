@@ -114,10 +114,11 @@ extern int	FileGetRawDesc(File file);
 extern int	FileGetRawFlags(File file);
 extern mode_t FileGetRawMode(File file);
 extern int PathNameFileSync(const char *path, uint32 wait_event_info);
+extern ssize_t FileBlockSize(File file);
 
 /* Operations on virtual files -- Sequential I/O */
-extern size_t FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info);
-extern size_t FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info);
+extern ssize_t FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info);
+extern ssize_t FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info);
 extern off_t FileTell(File file);
 extern off_t FileSeek(File file, off_t offset);
 
@@ -150,7 +151,7 @@ extern void PathNameCreateTemporaryDir(const char *basedir, const char *director
 extern void PathNameDeleteTemporaryDir(const char *dirname);
 extern void TempTablespacePath(char *path, Oid tablespace);
 
-/* Operations that allow use of regular stdio --- USE WITH CAUTION */
+/* Operations that allow use of regular stdio --- Deprecated, USE WITH CAUTION */
 extern FILE *AllocateFile(const char *name, const char *mode);
 extern int	FreeFile(FILE *file);
 
@@ -165,12 +166,16 @@ extern struct dirent *ReadDirExtended(DIR *dir, const char *dirname,
 									  int elevel);
 extern int	FreeDir(DIR *dir);
 
-/* Operations to allow use of a plain kernel FD, with automatic cleanup */
+/*
+ * Operations to allow use of a plain kernel FD, with automatic cleanup.
+ * Deprecated, use PathNameOpenTempFile() instead.
+ */
 extern int	OpenTransientFile(const char *fileName, int fileFlags);
 extern int	OpenTransientFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
 extern int	CloseTransientFile(int fd);
 
-/* If you've really really gotta have a plain kernel FD, use this */
+/*
+ * If you've really really gotta have a plain kernel FD, use this. */
 extern int	BasicOpenFile(const char *fileName, int fileFlags);
 extern int	BasicOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
 

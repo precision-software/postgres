@@ -181,8 +181,11 @@ Lz4Compress *lz4CompressOpen(Lz4Compress *proto, const char *path, int oflags, i
 		strlcpy(this->indexPath, path, sizeof(this->indexPath));
 		strlcat(this->indexPath, ".idx", sizeof(this->indexPath));
 
-		/* When creating the .idx file, truncate it instead of raising error if it exists */
-		oflags = (oflags & ~O_EXCL) | O_TRUNC | O_CREAT;
+		/*
+		 * Be a bit liberal creating the index file.
+		 * Truncate it if exists, and we need to read it as well as write it.
+		 */
+		oflags = O_RDWR | O_TRUNC | O_CREAT;
 
 		/* Create a separate index file */
 		this->indexFile = stackOpen(proto->indexFile, this->indexPath, oflags, mode);
@@ -284,20 +287,24 @@ ssize_t lz4CompressWrite(Lz4Compress *this, const Byte *buf, size_t size, off_t 
 	if (offset % this->blockSize != 0)
 		return setIoStackError(this, -1, "Compression: all writes must be aligned. offset=%lld  alignment=%lld", offset, this->blockSize);
 
-	/* Adjust size to be a single block */
+	/* Gaps not allowed */
+	if (offset > this->lastBlock + this->blockSize)
+		return setIoStackError(this, -1, "Compression: holes not allowed.  offset=%lld  fileSize=%lld", offset, this->lastBlock + this->lastSize);
+
+	/* With compression, we can only write (or overwrite) at the end of the file. */
+	if (offset + size < this->lastBlock + this->lastSize)
+        return setIoStackError(this, -1, "Can only write at end of compressed file. offset=%lld  fileSize=%lld", offset, this->lastBlock+this->lastSize);
+
+	/* Adjust write size to be a single block */
 	size = MIN(size, this->blockSize);
 
-	/* With compression, we can only add a new block or overwrite the last block */
-	if (offset != this->lastBlock && offset != this->lastBlock + this->lastSize)
-        return setIoStackError(this, -1, "Can only write at end of compressed file. offset=%lld  fileSize=%lld", offset, this->lastBlock+this->lastSize);
+	/* If overwriting more than a single block, then truncate the file first. */
+	if (offset + size < this->lastBlock + this->lastSize && lz4CompressTruncate(this, offset) < 0)
+		return -1;
 
 	/* if appending a new block, */
 	if (offset == this->lastBlock + this->lastSize)
 	{
-		/* Verify the previous block was not a partial block */
-		if (this->lastSize != 0 && this->lastSize != this->blockSize)
-			return setIoStackError(this, -1, "lz4 - appending new block but previous block not full");
-
 		/* Calculate offsets in the compressed file and the index file for the new block. TODO: call getCompressedIndex?? */
 		off_t indexOffset = offset / this->blockSize * 8;
 		off_t compressedOffset = this->compressedLastBlock + this->compressedLastSize;
@@ -310,7 +317,7 @@ ssize_t lz4CompressWrite(Lz4Compress *this, const Byte *buf, size_t size, off_t 
 		this->lastBlock = offset;
 		this->compressedLastBlock = compressedOffset;
 
-		/* Just in case the write fails. This way we don't update file size until after the write completes. */
+		/* Just in case the write fails, don't update file size until after the write completes. */
 		this->lastSize = 0;
 		this->compressedLastSize = 0;
 	}
@@ -335,6 +342,13 @@ static
 ssize_t lz4CompressRead(Lz4Compress *this, Byte *buf, size_t size, off_t offset)
 {
     debug("lz4Read: size=%zd  offset=%lld\n", size, offset);
+
+	/* If we are positioned at EOF, then return EOF */
+	if (offset >= this->lastBlock + this->lastSize)
+	{
+		thisStack(this)->eof = true;
+		return 0;
+	}
 
 	/* All reads must be aligned */
 	if (offset % this->blockSize != 0)
@@ -389,7 +403,7 @@ ssize_t lz4CompressClose(Lz4Compress *this)
 	/* Free up resources */
 	lz4Cleanup(this);
 
-	return (stackError(this)? -1: 0);
+	return stackError(this)?-1: 0;
 }
 
 
@@ -419,7 +433,7 @@ ssize_t lz4CompressTruncate(Lz4Compress *this, off_t offset)
 	    return checkSystemError(this, -1, "Truncating a readonly compressed file");
 	}
 
-	/* If the offset is not aligned, then read the last bvlock.  (TODO: onlh truncate on block boundary) */
+	/* If the offset is not aligned, then read the last block.  (TODO: only truncate on block boundary?) */
 	ssize_t actual = 0;
 	if (offset % this->blockSize != 0)
 		actual = stackReadAll(this, this->tempBuf, this->blockSize, ROUNDDOWN(offset, this->blockSize));
