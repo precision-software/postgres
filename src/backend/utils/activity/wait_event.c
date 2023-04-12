@@ -756,6 +756,9 @@ pgstat_get_wait_io(WaitEventIO w)
 		case WAIT_EVENT_WAL_WRITE:
 			event_name = "WALWrite";
 			break;
+		case WAIT_EVENT_NONE:
+			event_name = "None";
+			break;
 
 			/* no default case, so that compiler will warn */
 	}

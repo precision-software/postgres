@@ -168,7 +168,6 @@ int			recovery_init_sync_method = RECOVERY_INIT_SYNC_METHOD_FSYNC;
 int			io_direct_flags;
 
 /* Debugging.... */
-
 #ifdef FDDEBUG
 #define DO_DB(A) \
 	do { \
@@ -185,6 +184,10 @@ int			io_direct_flags;
 
 #define FileIsValid(file) \
 	((file) > 0 && (file) < (int) SizeVfdCache && VfdCache[file].fileName != NULL)
+
+/* Point to the corresponding VfdCache entry if the file index is valid */
+#define getVfd(file) \
+	(Assert(FileIsValid(file)), &VfdCache[file])
 
 #define FileIsNotOpen(file) (VfdCache[file].fd == VFD_CLOSED)
 
@@ -206,6 +209,9 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
+	off_t 		offset;			/* current position for sequential reads/writes */
+	int 		errNo;			/* error from last operation. (Note "errno" is a macro on some platforms) */
+	bool		eof;			/* whether an EOF occurred */
 } Vfd;
 
 /*
@@ -1269,6 +1275,7 @@ LruInsert(File file)
 		if (vfdP->fd < 0)
 		{
 			DO_DB(elog(LOG, "re-open failed: %m"));
+			vfdP->errNo = errno;
 			return -1;
 		}
 		else
@@ -1550,6 +1557,9 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	vfdP->fileSize = 0;
 	vfdP->fdstate = 0x0;
 	vfdP->resowner = NULL;
+	vfdP->offset = (fileFlags & O_APPEND) == 0? 0: FileSize(file);
+	vfdP->errNo = 0;
+	vfdP->eof = false;
 
 	Insert(file);
 
@@ -1888,20 +1898,23 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 void
 FileClose(File file)
 {
-	Vfd		   *vfdP;
-
-	Assert(FileIsValid(file));
+    Vfd		   *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileClose: %d (%s)",
 			   file, VfdCache[file].fileName));
-
-	vfdP = &VfdCache[file];
 
 	if (!FileIsNotOpen(file))
 	{
 		/* close the file */
 		if (close(vfdP->fd) != 0)
 		{
+			/*
+			 * Save the error code, but don't override an existing one.
+			 * We want to close on error without losing the original error code.
+			 */
+			if (vfdP->errNo == 0)
+				vfdP->errNo = errno;
+
 			/*
 			 * We may need to panic on failure to close non-temporary files;
 			 * see LruDelete.
@@ -1970,10 +1983,15 @@ FileClose(File file)
 	if (vfdP->resowner)
 		ResourceOwnerForgetFile(vfdP->resowner, file);
 
+	/* Return the original errno if there was one */
+	if (vfdP->errNo != 0)
+		errno = vfdP->errNo;
+
 	/*
 	 * Return the Vfd slot to the free list
 	 */
 	FreeVfd(file);
+
 }
 
 /*
@@ -2039,14 +2057,12 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 	pgstat_report_wait_end();
 }
 
-int
+ssize_t
 FileRead(File file, void *buffer, size_t amount, off_t offset,
 		 uint32 wait_event_info)
 {
 	int			returnCode;
-	Vfd		   *vfdP;
-
-	Assert(FileIsValid(file));
+	Vfd		   *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
@@ -2056,8 +2072,6 @@ FileRead(File file, void *buffer, size_t amount, off_t offset,
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
-
-	vfdP = &VfdCache[file];
 
 retry:
 	pgstat_report_wait_start(wait_event_info);
@@ -2092,17 +2106,24 @@ retry:
 			goto retry;
 	}
 
+	/* Update the file position and error status */
+	if (returnCode < 0)
+		vfdP->errNo = errno;
+	else
+    {
+		vfdP->offset = offset + returnCode;
+        vfdP->eof = (returnCode == 0);
+    }
+
 	return returnCode;
 }
 
-int
+ssize_t
 FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 		  uint32 wait_event_info)
 {
 	int			returnCode;
-	Vfd		   *vfdP;
-
-	Assert(FileIsValid(file));
+	Vfd		   *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
@@ -2112,8 +2133,6 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
-
-	vfdP = &VfdCache[file];
 
 	/*
 	 * If enforcing temp_file_limit and it's a temp file, check to see if the
@@ -2152,18 +2171,16 @@ retry:
 
 	if (returnCode >= 0)
 	{
+		/* Update the new file position */
+		vfdP->offset = offset + amount;
+
 		/*
 		 * Maintain fileSize and temporary_files_size if it's a temp file.
 		 */
-		if (vfdP->fdstate & FD_TEMP_FILE_LIMIT)
+		if (vfdP->fdstate & FD_TEMP_FILE_LIMIT && vfdP->offset > vfdP->fileSize)
 		{
-			off_t		past_write = offset + amount;
-
-			if (past_write > vfdP->fileSize)
-			{
-				temporary_files_size += past_write - vfdP->fileSize;
-				vfdP->fileSize = past_write;
-			}
+			temporary_files_size += vfdP->offset - vfdP->fileSize;
+			vfdP->fileSize = vfdP->offset;
 		}
 	}
 	else
@@ -2188,27 +2205,71 @@ retry:
 		/* OK to retry if interrupted */
 		if (errno == EINTR)
 			goto retry;
+
+		/* Save the error information */
+		vfdP->errNo = errno;
 	}
 
 	return returnCode;
+}
+
+/*
+ * Read sequentially from the file.
+ */
+ssize_t
+FileReadSeq(File file, void *buffer, size_t amount,
+			uint32 wait_event_info)
+{
+	return FileRead(file, buffer, amount, getVfd(file)->offset, wait_event_info);
+}
+
+/*
+ * Write sequentially to the file.
+ */
+ssize_t
+FileWriteSeq(File file, const void *buffer, size_t amount,
+			uint32 wait_event_info)
+{
+	return FileWrite(file, buffer, amount, getVfd(file)->offset, wait_event_info);
+}
+
+/*
+ * Seek to an absolute position within the file.
+ * Relative positions can be calculated using FileTell or FileSize.
+ */
+off_t
+FileSeek(File file, off_t offset)
+{
+	getVfd(file)->offset = offset;
+	return offset;
+}
+
+/*
+ * Tell us the current file position
+ */
+off_t
+FileTell(File file)
+{
+	return getVfd(file)->offset;
 }
 
 int
 FileSync(File file, uint32 wait_event_info)
 {
 	int			returnCode;
-
-	Assert(FileIsValid(file));
+    Vfd *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileSync: %d (%s)",
-			   file, VfdCache[file].fileName));
+			   file, vfdP->fileName));
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
 
 	pgstat_report_wait_start(wait_event_info);
-	returnCode = pg_fsync(VfdCache[file].fd);
+	returnCode = pg_fsync(vfdP->fd);
+	if (returnCode < 0)
+		vfdP->errNo = errno;
 	pgstat_report_wait_end();
 
 	return returnCode;
@@ -2305,10 +2366,10 @@ FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info)
 off_t
 FileSize(File file)
 {
-	Assert(FileIsValid(file));
+	Vfd *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileSize %d (%s)",
-			   file, VfdCache[file].fileName));
+			   file, vfdP->fileName));
 
 	if (FileIsNotOpen(file))
 	{
@@ -2316,18 +2377,21 @@ FileSize(File file)
 			return (off_t) -1;
 	}
 
-	return lseek(VfdCache[file].fd, 0, SEEK_END);
+	int ret = lseek(vfdP->fd, 0, SEEK_END);
+	if (ret < 0)
+		vfdP->errNo = errno;
+
+	return ret;
 }
 
 int
 FileTruncate(File file, off_t offset, uint32 wait_event_info)
 {
 	int			returnCode;
-
-	Assert(FileIsValid(file));
+	Vfd *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileTruncate %d (%s)",
-			   file, VfdCache[file].fileName));
+			   file, vfdP->fileName));
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
@@ -2335,17 +2399,39 @@ FileTruncate(File file, off_t offset, uint32 wait_event_info)
 
 	pgstat_report_wait_start(wait_event_info);
 	returnCode = ftruncate(VfdCache[file].fd, offset);
+	if (returnCode < 0)
+		vfdP->errNo = errno;
 	pgstat_report_wait_end();
 
-	if (returnCode == 0 && VfdCache[file].fileSize > offset)
+	if (returnCode == 0 && vfdP->fileSize > offset)
 	{
 		/* adjust our state for truncation of a temp file */
-		Assert(VfdCache[file].fdstate & FD_TEMP_FILE_LIMIT);
-		temporary_files_size -= VfdCache[file].fileSize - offset;
-		VfdCache[file].fileSize = offset;
+		Assert(vfdP->fdstate & FD_TEMP_FILE_LIMIT);
+		temporary_files_size -= vfdP->fileSize - offset;
+		vfdP->fileSize = offset;
 	}
 
 	return returnCode;
+}
+
+int
+PathNameFileSync(const char *pathName, uint32 wait_event_info)
+{
+	/* Open the file, returning immediately if unable */
+	File file = PathNameOpenFile(pathName, O_RDWR | PG_BINARY);
+	if (file < 0)
+		return file;
+
+	/* Sync the now opened file, remembering if error occurred. */
+	int ret = FileSync(file, wait_event_info);
+	int save_errno = errno;
+
+	/* Close the file. */
+	FileClose(file);
+
+	/* Done, remembering the sync error */
+	errno = save_errno;
+	return ret;
 }
 
 /*
@@ -3835,92 +3921,57 @@ data_sync_elevel(int elevel)
 	return data_sync_retry ? elevel : PANIC;
 }
 
-bool
-check_io_direct(char **newval, void **extra, GucSource source)
+/*
+ * Routines to emualate C library FILE routines (fgetc, fprintf, ...)
+ */
+
+/* Similar to fgetc */
+int
+FileGetc(File file)
 {
-	bool		result = true;
-	int			flags;
-
-#if PG_O_DIRECT == 0
-	if (strcmp(*newval, "") != 0)
-	{
-		GUC_check_errdetail("io_direct is not supported on this platform.");
-		result = false;
-	}
-	flags = 0;
-#else
-	List	   *elemlist;
-	ListCell   *l;
-	char	   *rawstring;
-
-	/* Need a modifiable copy of string */
-	rawstring = pstrdup(*newval);
-
-	if (!SplitGUCList(rawstring, ',', &elemlist))
-	{
-		GUC_check_errdetail("invalid list syntax in parameter \"%s\"",
-							"io_direct");
-		pfree(rawstring);
-		list_free(elemlist);
-		return false;
-	}
-
-	flags = 0;
-	foreach(l, elemlist)
-	{
-		char	   *item = (char *) lfirst(l);
-
-		if (pg_strcasecmp(item, "data") == 0)
-			flags |= IO_DIRECT_DATA;
-		else if (pg_strcasecmp(item, "wal") == 0)
-			flags |= IO_DIRECT_WAL;
-		else if (pg_strcasecmp(item, "wal_init") == 0)
-			flags |= IO_DIRECT_WAL_INIT;
-		else
-		{
-			GUC_check_errdetail("invalid option \"%s\"", item);
-			result = false;
-			break;
-		}
-	}
-
-	/*
-	 * It's possible to configure block sizes smaller than our assumed I/O
-	 * alignment size, which could result in invalid I/O requests.
-	 */
-#if XLOG_BLCKSZ < PG_IO_ALIGN_SIZE
-	if (result && (flags & (IO_DIRECT_WAL | IO_DIRECT_WAL_INIT)))
-	{
-		GUC_check_errdetail("io_direct is not supported for WAL because XLOG_BLCKSZ is too small");
-		result = false;
-	}
-#endif
-#if BLCKSZ < PG_IO_ALIGN_SIZE
-	if (result && (flags & IO_DIRECT_DATA))
-	{
-		GUC_check_errdetail("io_direct is not supported for data because BLCKSZ is too small");
-		result = false;
-	}
-#endif
-
-	pfree(rawstring);
-	list_free(elemlist);
-#endif
-
-	if (!result)
-		return result;
-
-	/* Save the flags in *extra, for use by assign_io_direct */
-	*extra = guc_malloc(ERROR, sizeof(int));
-	*((int *) *extra) = flags;
-
-	return result;
+	char c;
+	int ret = FileReadSeq(file, &c, 1, WAIT_EVENT_NONE);
+	if (ret <= 0)
+		ret = EOF;
+	return ret;
 }
 
-extern void
-assign_io_direct(const char *newval, void *extra)
+/* Similar to fputc */
+int FilePutc(int c, File file)
 {
-	int		   *flags = (int *) extra;
-
-	io_direct_flags = *flags;
+	char cbuf;
+	cbuf = c;
+	if (FileWriteSeq(file, &cbuf, 1, WAIT_EVENT_NONE) <= 0)
+		c = EOF;
+	return c;
 }
+
+int FileError(File file)
+{
+	errno = getVfd(file)->errNo;
+	return errno != 0;
+}
+
+int FileEof(File file)
+{
+	return getVfd(file)->eof;
+}
+
+void FileClearError(File file)
+{
+	Vfd *vfdP = getVfd(file);
+	vfdP->eof = false;
+	vfdP->errNo = 0;
+}
+
+int FilePrintf(File file, const char *format, ...)
+{
+	Assert(false); /* Not implemented */
+	return -1;
+}
+
+ int FileScanf(File file, const char *format, ...)
+ {
+	Assert(false); /* Not implemented */
+	return -1;
+ }

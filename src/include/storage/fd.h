@@ -44,7 +44,7 @@
 #define FD_H
 
 #include <dirent.h>
-#include <fcntl.h>
+#include "c.h"
 
 typedef enum RecoveryInitSyncMethod
 {
@@ -111,8 +111,8 @@ extern File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fil
 extern File OpenTemporaryFile(bool interXact);
 extern void FileClose(File file);
 extern int	FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info);
-extern int	FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
-extern int	FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
+extern ssize_t	FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
+extern ssie_t	FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
 extern int	FileSync(File file, uint32 wait_event_info);
 extern int	FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info);
 extern int	FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info);
@@ -124,6 +124,22 @@ extern char *FilePathName(File file);
 extern int	FileGetRawDesc(File file);
 extern int	FileGetRawFlags(File file);
 extern mode_t FileGetRawMode(File file);
+extern int PathNameFileSync(const char *path, uint32 wait_event_info);
+
+/* Operations on virtual files -- Sequential I/O */
+extern ssize_t FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info);
+extern ssize_t FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info);
+extern off_t FileTell(File file);
+extern off_t FileSeek(File file, off_t offset);
+
+/* Operations on virtual files --- equivalent to fread/fwrite */
+extern int FileGetc(File file);
+extern int FilePutc(int c, File file);
+extern void FileClearError(File file);
+extern int FileError(File file);
+extern int FileEof(File file);
+extern int FilePrintf(File file, const char *format, ...);
+extern int FileScanf(File file, const char *format, ...);
 
 /* Operations used for sharing named temporary files */
 extern File PathNameCreateTemporaryFile(const char *path, bool error_on_failure);
