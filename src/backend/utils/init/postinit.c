@@ -282,15 +282,17 @@ PerformAuthentication(Port *port)
 
 			if (princ)
 				appendStringInfo(&logmsg,
-								 _(" GSS (authenticated=%s, encrypted=%s, principal=%s)"),
+								 _(" GSS (authenticated=%s, encrypted=%s, deleg_credentials=%s, principal=%s)"),
 								 be_gssapi_get_auth(port) ? _("yes") : _("no"),
 								 be_gssapi_get_enc(port) ? _("yes") : _("no"),
+								 be_gssapi_get_deleg(port) ? _("yes") : _("no"),
 								 princ);
 			else
 				appendStringInfo(&logmsg,
-								 _(" GSS (authenticated=%s, encrypted=%s)"),
+								 _(" GSS (authenticated=%s, encrypted=%s, deleg_credentials=%s)"),
 								 be_gssapi_get_auth(port) ? _("yes") : _("no"),
-								 be_gssapi_get_enc(port) ? _("yes") : _("no"));
+								 be_gssapi_get_enc(port) ? _("yes") : _("no"),
+								 be_gssapi_get_deleg(port) ? _("yes") : _("no"));
 		}
 #endif
 
@@ -398,11 +400,9 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 					PGC_BACKEND, PGC_S_DYNAMIC_DEFAULT);
 
 	/* assign locale variables */
-	datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_datcollate, &isnull);
-	Assert(!isnull);
+	datum = SysCacheGetAttrNotNull(DATABASEOID, tup, Anum_pg_database_datcollate);
 	collate = TextDatumGetCString(datum);
-	datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_datctype, &isnull);
-	Assert(!isnull);
+	datum = SysCacheGetAttrNotNull(DATABASEOID, tup, Anum_pg_database_datctype);
 	ctype = TextDatumGetCString(datum);
 
 	if (pg_perm_setlocale(LC_COLLATE, collate) == NULL)
@@ -427,8 +427,7 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 	{
 		char	   *icurules;
 
-		datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_daticulocale, &isnull);
-		Assert(!isnull);
+		datum = SysCacheGetAttrNotNull(DATABASEOID, tup, Anum_pg_database_daticulocale);
 		iculocale = TextDatumGetCString(datum);
 
 		datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_daticurules, &isnull);

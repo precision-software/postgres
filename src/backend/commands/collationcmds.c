@@ -165,6 +165,11 @@ DefineCollation(ParseState *pstate, List *names, List *parameters, bool if_not_e
 		else
 			colliculocale = NULL;
 
+		/*
+		 * When the ICU locale comes from an existing collation, do not
+		 * canonicalize to a language tag.
+		 */
+
 		datum = SysCacheGetAttr(COLLOID, tp, Anum_pg_collation_collicurules, &isnull);
 		if (!isnull)
 			collicurules = TextDatumGetCString(datum);
@@ -258,6 +263,27 @@ DefineCollation(ParseState *pstate, List *names, List *parameters, bool if_not_e
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("parameter \"locale\" must be specified")));
+
+			/*
+			 * During binary upgrade, preserve the locale string. Otherwise,
+			 * canonicalize to a language tag.
+			 */
+			if (!IsBinaryUpgrade)
+			{
+				char *langtag = icu_language_tag(colliculocale,
+												 icu_validation_level);
+
+				if (langtag && strcmp(colliculocale, langtag) != 0)
+				{
+					ereport(NOTICE,
+							(errmsg("using standard form \"%s\" for locale \"%s\"",
+									langtag, colliculocale)));
+
+					colliculocale = langtag;
+				}
+			}
+
+			icu_validate_locale(colliculocale);
 		}
 
 		/*
@@ -404,9 +430,7 @@ AlterCollation(AlterCollationStmt *stmt)
 	datum = SysCacheGetAttr(COLLOID, tup, Anum_pg_collation_collversion, &isnull);
 	oldversion = isnull ? NULL : TextDatumGetCString(datum);
 
-	datum = SysCacheGetAttr(COLLOID, tup, collForm->collprovider == COLLPROVIDER_ICU ? Anum_pg_collation_colliculocale : Anum_pg_collation_collcollate, &isnull);
-	if (isnull)
-		elog(ERROR, "unexpected null in pg_collation");
+	datum = SysCacheGetAttrNotNull(COLLOID, tup, collForm->collprovider == COLLPROVIDER_ICU ? Anum_pg_collation_colliculocale : Anum_pg_collation_collcollate);
 	newversion = get_collation_actual_version(collForm->collprovider, TextDatumGetCString(datum));
 
 	/* cannot change from NULL to non-NULL or vice versa */
@@ -457,7 +481,6 @@ pg_collation_actual_version(PG_FUNCTION_ARGS)
 	char	*locale;
 	char	*version;
 	Datum	 datum;
-	bool	 isnull;
 
 	if (collid == DEFAULT_COLLATION_OID)
 	{
@@ -471,12 +494,9 @@ pg_collation_actual_version(PG_FUNCTION_ARGS)
 
 		provider = ((Form_pg_database) GETSTRUCT(dbtup))->datlocprovider;
 
-		datum = SysCacheGetAttr(DATABASEOID, dbtup,
-								provider == COLLPROVIDER_ICU ?
-								Anum_pg_database_daticulocale : Anum_pg_database_datcollate,
-								&isnull);
-		if (isnull)
-			elog(ERROR, "unexpected null in pg_database");
+		datum = SysCacheGetAttrNotNull(DATABASEOID, dbtup,
+									   provider == COLLPROVIDER_ICU ?
+									   Anum_pg_database_daticulocale : Anum_pg_database_datcollate);
 
 		locale = TextDatumGetCString(datum);
 
@@ -494,12 +514,9 @@ pg_collation_actual_version(PG_FUNCTION_ARGS)
 
 		provider = ((Form_pg_collation) GETSTRUCT(colltp))->collprovider;
 		Assert(provider != COLLPROVIDER_DEFAULT);
-		datum = SysCacheGetAttr(COLLOID, colltp,
-								provider == COLLPROVIDER_ICU ?
-								Anum_pg_collation_colliculocale : Anum_pg_collation_collcollate,
-								&isnull);
-		if (isnull)
-			elog(ERROR, "unexpected null in pg_collation");
+		datum = SysCacheGetAttrNotNull(COLLOID, colltp,
+									   provider == COLLPROVIDER_ICU ?
+									   Anum_pg_collation_colliculocale : Anum_pg_collation_collcollate);
 
 		locale = TextDatumGetCString(datum);
 
@@ -576,26 +593,6 @@ cmpaliases(const void *a, const void *b)
 
 
 #ifdef USE_ICU
-/*
- * Get the ICU language tag for a locale name.
- * The result is a palloc'd string.
- */
-static char *
-get_icu_language_tag(const char *localename)
-{
-	char		buf[ULOC_FULLNAME_CAPACITY];
-	UErrorCode	status;
-
-	status = U_ZERO_ERROR;
-	uloc_toLanguageTag(localename, buf, sizeof(buf), true, &status);
-	if (U_FAILURE(status))
-		ereport(ERROR,
-				(errmsg("could not convert locale name \"%s\" to language tag: %s",
-						localename, u_errorName(status))));
-
-	return pstrdup(buf);
-}
-
 /*
  * Get a comment (specifically, the display name) for an ICU locale.
  * The result is a palloc'd string, or NULL if we can't get a comment
@@ -957,7 +954,7 @@ pg_import_system_collations(PG_FUNCTION_ARGS)
 			else
 				name = uloc_getAvailable(i);
 
-			langtag = get_icu_language_tag(name);
+			langtag = icu_language_tag(name, ERROR);
 
 			/*
 			 * Be paranoid about not allowing any non-ASCII strings into

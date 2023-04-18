@@ -134,8 +134,8 @@ gistbuildempty(Relation index)
 	Buffer		buffer;
 
 	/* Initialize the root page */
-	buffer = ReadBufferExtended(index, INIT_FORKNUM, P_NEW, RBM_NORMAL, NULL);
-	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+	buffer = ExtendBufferedRel(EB_REL(index), INIT_FORKNUM, NULL,
+							   EB_SKIP_EXTENSION_LOCK | EB_LOCK_FIRST);
 
 	/* Initialize and xlog buffer */
 	START_CRIT_SECTION();
@@ -349,7 +349,7 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 		for (; ptr; ptr = ptr->next)
 		{
 			/* Allocate new page */
-			ptr->buffer = gistNewBuffer(rel);
+			ptr->buffer = gistNewBuffer(rel, heapRel);
 			GISTInitBuffer(ptr->buffer, (is_leaf) ? F_LEAF : 0);
 			ptr->page = BufferGetPage(ptr->buffer);
 			ptr->block.blkno = BufferGetBlockNumber(ptr->buffer);
@@ -1695,7 +1695,8 @@ gistprunepage(Relation rel, Page page, Buffer buffer, Relation heapRel)
 
 			recptr = gistXLogDelete(buffer,
 									deletable, ndeletable,
-									snapshotConflictHorizon);
+									snapshotConflictHorizon,
+									heapRel);
 
 			PageSetLSN(page, recptr);
 		}

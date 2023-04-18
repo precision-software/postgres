@@ -2329,6 +2329,7 @@ varstr_abbrev_convert(Datum original, SortSupport ssup)
 
 			bsize = pg_strxfrm_prefix(sss->buf2, sss->buf1,
 									  max_prefix_bytes, sss->locale);
+			sss->last_len2 = bsize;
 		}
 		else
 		{
@@ -4264,7 +4265,6 @@ replace_text_regexp(text *src_text, text *pattern_text,
 		{
 			char		errMsg[100];
 
-			CHECK_FOR_INTERRUPTS();
 			pg_regerror(regexec_result, re, errMsg, sizeof(errMsg));
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_REGULAR_EXPRESSION),

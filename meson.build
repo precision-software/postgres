@@ -18,7 +18,7 @@ project('postgresql',
   default_options: [
     'warning_level=1', #-Wall equivalent
     'b_pch=false',
-    'buildtype=release',
+    'buildtype=debugoptimized', # -O2 + debug
     # For compatibility with the autoconf build, set a default prefix. This
     # works even on windows, where it's a drive-relative path (i.e. when on
     # d:/somepath it'll install to d:/usr/local/pgsql)
@@ -233,8 +233,10 @@ elif host_system == 'darwin'
   sysroot_args = [files('src/tools/darwin_sysroot'), get_option('darwin_sysroot')]
   pg_sysroot = run_command(sysroot_args, check:true).stdout().strip()
   message('darwin sysroot: @0@'.format(pg_sysroot))
-  cflags += ['-isysroot', pg_sysroot]
-  ldflags += ['-isysroot', pg_sysroot]
+  if pg_sysroot != ''
+    cflags += ['-isysroot', pg_sysroot]
+    ldflags += ['-isysroot', pg_sysroot]
+  endif
   # meson defaults to -Wl,-undefined,dynamic_lookup for modules, which we
   # don't want because a) it's different from what we do for autoconf, b) it
   # causes warnings starting in macOS Ventura
@@ -339,6 +341,8 @@ program_zstd = find_program(get_option('ZSTD'), native: true, required: false)
 dtrace = find_program(get_option('DTRACE'), native: true, required: get_option('dtrace'))
 missing = find_program('config/missing', native: true)
 cp = find_program('cp', required: false, native: true)
+xmllint_bin = find_program(get_option('XMLLINT'), native: true, required: false)
+xsltproc_bin = find_program(get_option('XSLTPROC'), native: true, required: false)
 
 bison_flags = []
 if bison.found()
@@ -566,6 +570,39 @@ endif
 
 
 ###############################################################
+# Option: docs in HTML and man page format
+###############################################################
+
+docs_opt = get_option('docs')
+docs_dep = not_found_dep
+if not docs_opt.disabled()
+  if xmllint_bin.found() and xsltproc_bin.found()
+    docs_dep = declare_dependency()
+  elif docs_opt.enabled()
+    error('missing required tools for docs in HTML / man page format')
+  endif
+endif
+
+
+
+###############################################################
+# Option: docs in PDF format
+###############################################################
+
+docs_pdf_opt = get_option('docs_pdf')
+docs_pdf_dep = not_found_dep
+if not docs_pdf_opt.disabled()
+  fop = find_program(get_option('FOP'), native: true, required: docs_pdf_opt)
+  if xmllint_bin.found() and xsltproc_bin.found() and fop.found()
+    docs_pdf_dep = declare_dependency()
+  elif docs_pdf_opt.enabled()
+    error('missing required tools for docs in PDF format')
+  endif
+endif
+
+
+
+###############################################################
 # Library: GSSAPI
 ###############################################################
 
@@ -587,14 +624,24 @@ if not gssapiopt.disabled()
   endif
 
   if not have_gssapi
-  elif cc.has_function('gss_init_sec_context', dependencies: gssapi,
+  elif cc.check_header('gssapi/gssapi_ext.h', dependencies: gssapi, required: false,
+      args: test_c_args, include_directories: postgres_inc)
+    cdata.set('HAVE_GSSAPI_GSSAPI_EXT_H', 1)
+  elif cc.check_header('gssapi_ext.h', args: test_c_args, dependencies: gssapi, required: gssapiopt)
+    cdata.set('HAVE_GSSAPI_EXT_H', 1)
+  else
+    have_gssapi = false
+  endif
+
+  if not have_gssapi
+  elif cc.has_function('gss_store_cred_into', dependencies: gssapi,
       args: test_c_args, include_directories: postgres_inc)
     cdata.set('ENABLE_GSS', 1)
 
     krb_srvtab = 'FILE:/@0@/krb5.keytab)'.format(get_option('sysconfdir'))
     cdata.set_quoted('PG_KRB_SRVTAB', krb_srvtab)
   elif gssapiopt.enabled()
-    error('''could not find function 'gss_init_sec_context' required for GSSAPI''')
+    error('''could not find function 'gss_store_cred_into' required for GSSAPI''')
   else
     have_gssapi = false
   endif
@@ -2924,7 +2971,7 @@ endif
 # generation happens during install, so that's not a real issue.
 nls_mo_targets = []
 if libintl.found() and meson.version().version_compare('>=0.60')
-  # use range() to avoid the flattening of the list that forech() would do
+  # use range() to avoid the flattening of the list that foreach() would do
   foreach off : range(0, nls_targets.length())
     # i18n.gettext() list containing 1) list of built .mo files 2) maintainer
     # -pot target 3) maintainer -pot target
@@ -2950,7 +2997,7 @@ install_quiet = custom_target('install-quiet',
   output: 'install-quiet',
   build_always_stale: true,
   build_by_default: false,
-  command: meson_args + ['install', '--quiet', '--no-rebuild'],
+  command: [meson_bin, meson_args, 'install', '--quiet', '--no-rebuild'],
   depends: all_built,
 )
 
@@ -3124,6 +3171,7 @@ foreach test_dir : tests
       env.prepend('PATH', temp_install_bindir, test_dir['bd'])
 
       test_kwargs = {
+        'protocol': 'tap',
         'priority': 10,
         'timeout': 1000,
         'depends': test_deps + t.get('deps', []),
@@ -3328,6 +3376,8 @@ if meson.version().version_compare('>=0.57')
     {
       'bonjour': bonjour,
       'bsd_auth': bsd_auth,
+      'docs': docs_dep,
+      'docs_pdf': docs_pdf_dep,
       'gss': gssapi,
       'icu': icu,
       'ldap': ldap,

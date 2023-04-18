@@ -289,7 +289,8 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
  *		There is no return value, but output tuples (if any) are sent to
  *		the destination receiver specified in the QueryDesc; and the number
  *		of tuples processed at the top level can be found in
- *		estate->es_processed.
+ *		estate->es_processed.  The total number of tuples processed in all
+ *		the ExecutorRun calls can be found in estate->es_total_processed.
  *
  *		We provide a function hook variable that lets loadable plugins
  *		get control when ExecutorRun is called.  Such a plugin would
@@ -371,6 +372,12 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 					dest,
 					execute_once);
 	}
+
+	/*
+	 * Update es_total_processed to keep track of the number of tuples
+	 * processed across multiple ExecutorRun() calls.
+	 */
+	estate->es_total_processed += estate->es_processed;
 
 	/*
 	 * shutdown tuple receiver, if we started it
@@ -911,7 +918,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 		 * prepared to handle REWIND efficiently; otherwise there is no need.
 		 */
 		sp_eflags = eflags
-			& (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA);
+			& ~(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK);
 		if (bms_is_member(i, plannedstmt->rewindPlanIDs))
 			sp_eflags |= EXEC_FLAG_REWIND;
 

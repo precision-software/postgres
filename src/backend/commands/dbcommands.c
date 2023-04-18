@@ -1050,7 +1050,27 @@ createdb(ParseState *pstate, const CreatedbStmt *stmt)
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("ICU locale must be specified")));
 
-		check_icu_locale(dbiculocale);
+		/*
+		 * During binary upgrade, or when the locale came from the template
+		 * database, preserve locale string. Otherwise, canonicalize to a
+		 * language tag.
+		 */
+		if (!IsBinaryUpgrade && dbiculocale != src_iculocale)
+		{
+			char *langtag = icu_language_tag(dbiculocale,
+											 icu_validation_level);
+
+			if (langtag && strcmp(dbiculocale, langtag) != 0)
+			{
+				ereport(NOTICE,
+						(errmsg("using standard form \"%s\" for locale \"%s\"",
+								langtag, dbiculocale)));
+
+				dbiculocale = langtag;
+			}
+		}
+
+		icu_validate_locale(dbiculocale);
 	}
 	else
 	{
@@ -2589,7 +2609,6 @@ pg_database_collation_actual_version(PG_FUNCTION_ARGS)
 	HeapTuple	tp;
 	char		datlocprovider;
 	Datum		datum;
-	bool		isnull;
 	char	   *version;
 
 	tp = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(dbid));
@@ -2600,9 +2619,7 @@ pg_database_collation_actual_version(PG_FUNCTION_ARGS)
 
 	datlocprovider = ((Form_pg_database) GETSTRUCT(tp))->datlocprovider;
 
-	datum = SysCacheGetAttr(DATABASEOID, tp, datlocprovider == COLLPROVIDER_ICU ? Anum_pg_database_daticulocale : Anum_pg_database_datcollate, &isnull);
-	if (isnull)
-		elog(ERROR, "unexpected null in pg_database");
+	datum = SysCacheGetAttrNotNull(DATABASEOID, tp, datlocprovider == COLLPROVIDER_ICU ? Anum_pg_database_daticulocale : Anum_pg_database_datcollate);
 	version = get_collation_actual_version(datlocprovider, TextDatumGetCString(datum));
 
 	ReleaseSysCache(tp);
@@ -2729,14 +2746,12 @@ get_db_info(const char *name, LOCKMODE lockmode,
 					*dbLocProvider = dbform->datlocprovider;
 				if (dbCollate)
 				{
-					datum = SysCacheGetAttr(DATABASEOID, tuple, Anum_pg_database_datcollate, &isnull);
-					Assert(!isnull);
+					datum = SysCacheGetAttrNotNull(DATABASEOID, tuple, Anum_pg_database_datcollate);
 					*dbCollate = TextDatumGetCString(datum);
 				}
 				if (dbCtype)
 				{
-					datum = SysCacheGetAttr(DATABASEOID, tuple, Anum_pg_database_datctype, &isnull);
-					Assert(!isnull);
+					datum = SysCacheGetAttrNotNull(DATABASEOID, tuple, Anum_pg_database_datctype);
 					*dbCtype = TextDatumGetCString(datum);
 				}
 				if (dbIculocale)

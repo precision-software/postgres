@@ -44,7 +44,7 @@
 #define FD_H
 
 #include <dirent.h>
-#include "c.h"
+#include <fcntl.h>
 
 typedef enum RecoveryInitSyncMethod
 {
@@ -55,10 +55,16 @@ typedef enum RecoveryInitSyncMethod
 typedef int File;
 
 
+#define IO_DIRECT_DATA			0x01
+#define IO_DIRECT_WAL			0x02
+#define IO_DIRECT_WAL_INIT		0x04
+
+
 /* GUC parameter */
 extern PGDLLIMPORT int max_files_per_process;
 extern PGDLLIMPORT bool data_sync_retry;
 extern PGDLLIMPORT int recovery_init_sync_method;
+extern PGDLLIMPORT int io_direct_flags;
 
 /*
  * This is private to fd.c, but exported for save/restore_backend_variables()
@@ -83,9 +89,10 @@ extern PGDLLIMPORT int max_safe_fds;
  * to the appropriate Windows flag in src/port/open.c.  We simulate it with
  * fcntl(F_NOCACHE) on macOS inside fd.c's open() wrapper.  We use the name
  * PG_O_DIRECT rather than defining O_DIRECT in that case (probably not a good
- * idea on a Unix).
+ * idea on a Unix).  We can only use it if the compiler will correctly align
+ * PGIOAlignedBlock for us, though.
  */
-#if defined(O_DIRECT)
+#if defined(O_DIRECT) && defined(pg_attribute_aligned)
 #define		PG_O_DIRECT O_DIRECT
 #elif defined(F_NOCACHE)
 #define		PG_O_DIRECT 0x80000000
@@ -106,6 +113,9 @@ extern int	FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event
 extern ssize_t	FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
 extern ssize_t	FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
 extern int	FileSync(File file, uint32 wait_event_info);
+extern int	FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info);
+extern int	FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info);
+
 extern off_t FileSize(File file);
 extern int	FileTruncate(File file, off_t offset, uint32 wait_event_info);
 extern void FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info);
@@ -166,16 +176,12 @@ extern struct dirent *ReadDirExtended(DIR *dir, const char *dirname,
 									  int elevel);
 extern int	FreeDir(DIR *dir);
 
-/*
- * Operations to allow use of a plain kernel FD, with automatic cleanup.
- * Deprecated, use PathNameOpenTempFile() instead.
- */
+/* Operations to allow use of a plain kernel FD, with automatic cleanup. */
 extern int	OpenTransientFile(const char *fileName, int fileFlags);
 extern int	OpenTransientFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
 extern int	CloseTransientFile(int fd);
 
-/*
- * If you've really really gotta have a plain kernel FD, use this. */
+/* If you've really really gotta have a plain kernel FD, use this. */
 extern int	BasicOpenFile(const char *fileName, int fileFlags);
 extern int	BasicOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
 

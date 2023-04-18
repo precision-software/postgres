@@ -86,6 +86,7 @@
  *  PHJ_BATCH_ALLOCATE*      -- one allocates buckets
  *  PHJ_BATCH_LOAD           -- all load the hash table from disk
  *  PHJ_BATCH_PROBE          -- all probe
+ *  PHJ_BATCH_SCAN*          -- one does right/right-anti/full unmatched scan
  *  PHJ_BATCH_FREE*          -- one frees memory
  *
  * Batch 0 is a special case, because it starts out in phase
@@ -103,9 +104,10 @@
  * to a barrier, unless the barrier has reached a phase that means that no
  * process will wait on it again.  We emit tuples while attached to the build
  * barrier in phase PHJ_BUILD_RUN, and to a per-batch barrier in phase
- * PHJ_BATCH_PROBE.  These are advanced to PHJ_BUILD_FREE and PHJ_BATCH_FREE
- * respectively without waiting, using BarrierArriveAndDetach().  The last to
- * detach receives a different return value so that it knows that it's safe to
+ * PHJ_BATCH_PROBE.  These are advanced to PHJ_BUILD_FREE and PHJ_BATCH_SCAN
+ * respectively without waiting, using BarrierArriveAndDetach() and
+ * BarrierArriveAndDetachExceptLast() respectively.  The last to detach
+ * receives a different return value so that it knows that it's safe to
  * clean up.  Any straggler process that attaches after that phase is reached
  * will see that it's too late to participate or access the relevant shared
  * memory objects.
@@ -226,10 +228,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				/*
 				 * If the outer relation is completely empty, and it's not
-				 * right/full join, we can quit without building the hash
-				 * table.  However, for an inner join it is only a win to
-				 * check this when the outer relation's startup cost is less
-				 * than the projected cost of building the hash table.
+				 * right/right-anti/full join, we can quit without building
+				 * the hash table.  However, for an inner join it is only a
+				 * win to check this when the outer relation's startup cost is
+				 * less than the projected cost of building the hash table.
 				 * Otherwise it's best to build the hash table first and see
 				 * if the inner relation is empty.  (When it's a left join, we
 				 * should always make this check, since we aren't going to be
@@ -393,8 +395,23 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (HJ_FILL_INNER(node))
 					{
 						/* set up to scan for unmatched inner tuples */
-						ExecPrepHashTableForUnmatched(node);
-						node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+						if (parallel)
+						{
+							/*
+							 * Only one process is currently allow to handle
+							 * each batch's unmatched tuples, in a parallel
+							 * join.
+							 */
+							if (ExecParallelPrepHashTableForUnmatched(node))
+								node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+							else
+								node->hj_JoinState = HJ_NEED_NEW_BATCH;
+						}
+						else
+						{
+							ExecPrepHashTableForUnmatched(node);
+							node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+						}
 					}
 					else
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
@@ -487,25 +504,13 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					node->hj_MatchedOuter = true;
 
-					if (parallel)
-					{
-						/*
-						 * Full/right outer joins are currently not supported
-						 * for parallel joins, so we don't need to set the
-						 * match bit.  Experiments show that it's worth
-						 * avoiding the shared memory traffic on large
-						 * systems.
-						 */
-						Assert(!HJ_FILL_INNER(node));
-					}
-					else
-					{
-						/*
-						 * This is really only needed if HJ_FILL_INNER(node),
-						 * but we'll avoid the branch and just set it always.
-						 */
+
+					/*
+					 * This is really only needed if HJ_FILL_INNER(node), but
+					 * we'll avoid the branch and just set it always.
+					 */
+					if (!HeapTupleHeaderHasMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple)))
 						HeapTupleHeaderSetMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple));
-					}
 
 					/* In an antijoin, we never return a matched tuple */
 					if (node->js.jointype == JOIN_ANTI)
@@ -513,6 +518,14 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						node->hj_JoinState = HJ_NEED_NEW_OUTER;
 						continue;
 					}
+
+					/*
+					 * In a right-antijoin, we never return a matched tuple.
+					 * And we need to stay on the current outer tuple to
+					 * continue scanning the inner side for matches.
+					 */
+					if (node->js.jointype == JOIN_RIGHT_ANTI)
+						continue;
 
 					/*
 					 * If we only need to join to the first matching inner
@@ -559,11 +572,13 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 			case HJ_FILL_INNER_TUPLES:
 
 				/*
-				 * We have finished a batch, but we are doing right/full join,
-				 * so any unmatched inner tuples in the hashtable have to be
-				 * emitted before we continue to the next batch.
+				 * We have finished a batch, but we are doing
+				 * right/right-anti/full join, so any unmatched inner tuples
+				 * in the hashtable have to be emitted before we continue to
+				 * the next batch.
 				 */
-				if (!ExecScanHashTableForUnmatched(node, econtext))
+				if (!(parallel ? ExecParallelScanHashTableForUnmatched(node, econtext)
+					  : ExecScanHashTableForUnmatched(node, econtext)))
 				{
 					/* no more unmatched tuples */
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
@@ -726,6 +741,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 				ExecInitNullTupleSlot(estate, innerDesc, &TTSOpsVirtual);
 			break;
 		case JOIN_RIGHT:
+		case JOIN_RIGHT_ANTI:
 			hjstate->hj_NullOuterTupleSlot =
 				ExecInitNullTupleSlot(estate, outerDesc, &TTSOpsVirtual);
 			break;
@@ -966,6 +982,8 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 	}
 
 	/* End of this batch */
+	hashtable->batches[curbatch].outer_eof = true;
+
 	return NULL;
 }
 
@@ -1019,8 +1037,9 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 	 * side, but there are exceptions:
 	 *
 	 * 1. In a left/full outer join, we have to process outer batches even if
-	 * the inner batch is empty.  Similarly, in a right/full outer join, we
-	 * have to process inner batches even if the outer batch is empty.
+	 * the inner batch is empty.  Similarly, in a right/right-anti/full outer
+	 * join, we have to process inner batches even if the outer batch is
+	 * empty.
 	 *
 	 * 2. If we have increased nbatch since the initial estimate, we have to
 	 * scan inner batches since they might contain tuples that need to be
@@ -1072,7 +1091,7 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 
 	if (innerFile != NULL)
 	{
-		if (BufFileSeek(innerFile, 0, 0L, SEEK_SET))
+		if (BufFileSeek(innerFile, 0, 0, SEEK_SET))
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not rewind hash-join temporary file")));
@@ -1102,7 +1121,7 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 	 */
 	if (hashtable->outerBatchFile[curbatch] != NULL)
 	{
-		if (BufFileSeek(hashtable->outerBatchFile[curbatch], 0, 0L, SEEK_SET))
+		if (BufFileSeek(hashtable->outerBatchFile[curbatch], 0, 0, SEEK_SET))
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not rewind hash-join temporary file")));
@@ -1197,13 +1216,32 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * hash table stays alive until everyone's finished
 					 * probing it, but no participant is allowed to wait at
 					 * this barrier again (or else a deadlock could occur).
-					 * All attached participants must eventually call
-					 * BarrierArriveAndDetach() so that the final phase
-					 * PHJ_BATCH_FREE can be reached.
+					 * All attached participants must eventually detach from
+					 * the barrier and one worker must advance the phase so
+					 * that the final phase is reached.
 					 */
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
+
 					return true;
+				case PHJ_BATCH_SCAN:
+
+					/*
+					 * In principle, we could help scan for unmatched tuples,
+					 * since that phase is already underway (the thing we
+					 * can't do under current deadlock-avoidance rules is wait
+					 * for others to arrive at PHJ_BATCH_SCAN, because
+					 * PHJ_BATCH_PROBE emits tuples, but in this case we just
+					 * got here without waiting).  That is not yet done.  For
+					 * now, we just detach and go around again.  We have to
+					 * use ExecHashTableDetachBatch() because there's a small
+					 * chance we'll be the last to detach, and then we're
+					 * responsible for freeing memory.
+					 */
+					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
+					hashtable->batches[batchno].done = true;
+					ExecHashTableDetachBatch(hashtable);
+					break;
 
 				case PHJ_BATCH_FREE:
 
@@ -1322,8 +1360,8 @@ ExecReScanHashJoin(HashJoinState *node)
 			/*
 			 * Okay to reuse the hash table; needn't rescan inner, either.
 			 *
-			 * However, if it's a right/full join, we'd better reset the
-			 * inner-tuple match flags contained in the table.
+			 * However, if it's a right/right-anti/full join, we'd better
+			 * reset the inner-tuple match flags contained in the table.
 			 */
 			if (HJ_FILL_INNER(node))
 				ExecHashTableResetMatchFlags(node->hj_HashTable);

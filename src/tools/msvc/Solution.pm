@@ -262,6 +262,8 @@ sub GenerateFiles
 		HAVE_GETOPT_LONG                            => undef,
 		HAVE_GETPEEREID                             => undef,
 		HAVE_GETPEERUCRED                           => undef,
+		HAVE_GSSAPI_EXT_H                           => undef,
+		HAVE_GSSAPI_GSSAPI_EXT_H                    => undef,
 		HAVE_GSSAPI_GSSAPI_H                        => undef,
 		HAVE_GSSAPI_H                               => undef,
 		HAVE_HMAC_CTX_FREE                          => undef,
@@ -637,6 +639,16 @@ sub GenerateFiles
 		print "Generating pltclerrcodes.h...\n";
 		system(
 			'perl src/pl/tcl/generate-pltclerrcodes.pl src/backend/utils/errcodes.txt > src/pl/tcl/pltclerrcodes.h'
+		);
+	}
+
+	if (IsNewer('contrib/fuzzystrmatch/daitch_mokotoff.h',
+				'contrib/fuzzystrmatch/daitch_mokotoff_header.pl'))
+	{
+		print "Generating daitch_mokotoff.h...\n";
+		system(
+			'perl contrib/fuzzystrmatch/daitch_mokotoff_header.pl ' .
+			'contrib/fuzzystrmatch/daitch_mokotoff.h'
 		);
 	}
 

@@ -125,6 +125,7 @@ postgres_fdw_validator(PG_FUNCTION_ARGS)
 			strcmp(def->defname, "truncatable") == 0 ||
 			strcmp(def->defname, "async_capable") == 0 ||
 			strcmp(def->defname, "parallel_commit") == 0 ||
+			strcmp(def->defname, "parallel_abort") == 0 ||
 			strcmp(def->defname, "keep_connections") == 0)
 		{
 			/* these accept only boolean values */
@@ -271,6 +272,7 @@ InitPgFdwOptions(void)
 		{"async_capable", ForeignServerRelationId, false},
 		{"async_capable", ForeignTableRelationId, false},
 		{"parallel_commit", ForeignServerRelationId, false},
+		{"parallel_abort", ForeignServerRelationId, false},
 		{"keep_connections", ForeignServerRelationId, false},
 		{"password_required", UserMappingRelationId, false},
 
@@ -285,6 +287,12 @@ InitPgFdwOptions(void)
 		 */
 		{"sslcert", UserMappingRelationId, true},
 		{"sslkey", UserMappingRelationId, true},
+
+		/*
+		 * gssdeleg is also a libpq option but should be allowed in a user
+		 * mapping context too
+		 */
+		{"gssdeleg", UserMappingRelationId, true},
 
 		{NULL, InvalidOid, false}
 	};

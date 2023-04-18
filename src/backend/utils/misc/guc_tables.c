@@ -41,9 +41,11 @@
 #include "commands/trigger.h"
 #include "commands/user.h"
 #include "commands/vacuum.h"
+#include "common/scram-common.h"
 #include "jit/jit.h"
 #include "libpq/auth.h"
 #include "libpq/libpq.h"
+#include "libpq/scram.h"
 #include "nodes/queryjumble.h"
 #include "optimizer/cost.h"
 #include "optimizer/geqo.h"
@@ -161,6 +163,22 @@ static const struct config_enum_entry intervalstyle_options[] = {
 	{"postgres_verbose", INTSTYLE_POSTGRES_VERBOSE, false},
 	{"sql_standard", INTSTYLE_SQL_STANDARD, false},
 	{"iso_8601", INTSTYLE_ISO_8601, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry icu_validation_level_options[] = {
+	{"disabled", -1, false},
+	{"debug5", DEBUG5, false},
+	{"debug4", DEBUG4, false},
+	{"debug3", DEBUG3, false},
+	{"debug2", DEBUG2, false},
+	{"debug1", DEBUG1, false},
+	{"debug", DEBUG2, true},
+	{"log", LOG, false},
+	{"info", INFO, true},
+	{"notice", NOTICE, false},
+	{"warning", WARNING, false},
+	{"error", ERROR, false},
 	{NULL, 0, false}
 };
 
@@ -550,6 +568,7 @@ static char *locale_ctype;
 static char *server_encoding_string;
 static char *server_version_string;
 static int	server_version_num;
+static char *io_direct_string;
 
 #ifdef HAVE_SYSLOG
 #define	DEFAULT_SYSLOG_FACILITY LOG_LOCAL0
@@ -1709,6 +1728,16 @@ struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"gss_accept_deleg", PGC_SIGHUP, CONN_AUTH_AUTH,
+			gettext_noop("Sets whether GSSAPI delegation should be accepted from the client."),
+			NULL
+		},
+		&pg_gss_accept_deleg,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"escape_string_warning", PGC_USERSET, COMPAT_OPTIONS_PREVIOUS,
 			gettext_noop("Warn about backslash escapes in ordinary string literals."),
 			NULL
@@ -2207,6 +2236,17 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"vacuum_buffer_usage_limit", PGC_USERSET, RESOURCES_MEM,
+			gettext_noop("Sets the buffer pool size for VACUUM, ANALYZE, and autovacuum."),
+			NULL,
+			GUC_UNIT_KB
+		},
+		&VacuumBufferUsageLimit,
+		256, 0, MAX_BAS_VAC_RING_SIZE_KB,
+		check_vacuum_buffer_usage_limit, NULL, NULL
+	},
+
+	{
 		{"shared_memory_size", PGC_INTERNAL, PRESET_OPTIONS,
 			gettext_noop("Shows the size of the server's main shared memory area (rounded up to the nearest MB)."),
 			NULL,
@@ -2570,9 +2610,9 @@ struct config_int ConfigureNamesInt[] =
 	{
 		{"max_locks_per_transaction", PGC_POSTMASTER, LOCK_MANAGEMENT,
 			gettext_noop("Sets the maximum number of locks per transaction."),
-			gettext_noop("The shared lock table is sized on the assumption that "
-						 "at most max_locks_per_transaction * max_connections distinct "
-						 "objects will need to be locked at any one time.")
+			gettext_noop("The shared lock table is sized on the assumption that at most "
+						 "max_locks_per_transaction objects per server process or prepared "
+						 "transaction will need to be locked at any one time.")
 		},
 		&max_locks_per_xact,
 		64, 10, INT_MAX,
@@ -2583,8 +2623,8 @@ struct config_int ConfigureNamesInt[] =
 		{"max_pred_locks_per_transaction", PGC_POSTMASTER, LOCK_MANAGEMENT,
 			gettext_noop("Sets the maximum number of predicate locks per transaction."),
 			gettext_noop("The shared predicate lock table is sized on the assumption that "
-						 "at most max_pred_locks_per_transaction * max_connections distinct "
-						 "objects will need to be locked at any one time.")
+						 "at most max_pred_locks_per_transaction objects per server process "
+						 "or prepared transaction will need to be locked at any one time.")
 		},
 		&max_predicate_locks_per_xact,
 		64, 10, INT_MAX,
@@ -3465,6 +3505,17 @@ struct config_int ConfigureNamesInt[] =
 		},
 		&log_startup_progress_interval,
 		10000, 0, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"scram_iterations", PGC_USERSET, CONN_AUTH_AUTH,
+			gettext_noop("Sets the iteration count for SCRAM secret generation."),
+			NULL,
+			GUC_REPORT
+		},
+		&scram_sha_256_iterations,
+		SCRAM_SHA_256_DEFAULT_ITERATIONS, 1, INT_MAX,
 		NULL, NULL, NULL
 	},
 
@@ -4525,6 +4576,17 @@ struct config_string ConfigureNamesString[] =
 		check_backtrace_functions, assign_backtrace_functions, NULL
 	},
 
+	{
+		{"io_direct", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+			gettext_noop("Use direct I/O for file access."),
+			NULL,
+			GUC_LIST_INPUT | GUC_NOT_IN_SAMPLE
+		},
+		&io_direct_string,
+		"",
+		check_io_direct, assign_io_direct, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, NULL, NULL, NULL, NULL
@@ -4627,6 +4689,16 @@ struct config_enum ConfigureNamesEnum[] =
 		},
 		&IntervalStyle,
 		INTSTYLE_POSTGRES, intervalstyle_options,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"icu_validation_level", PGC_USERSET, CLIENT_CONN_LOCALE,
+		 gettext_noop("Log level for reporting invalid ICU locale strings."),
+		 NULL
+		},
+		&icu_validation_level,
+		ERROR, icu_validation_level_options,
 		NULL, NULL, NULL
 	},
 

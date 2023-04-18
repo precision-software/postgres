@@ -10,9 +10,9 @@
  * via functions such as SubTransGetTopmostTransaction().
  *
  * These functions are used to support the txid_XXX functions and the newer
- * pg_current_xact, pg_current_snapshot and related fmgr functions, since the
- * only difference between them is whether they expose xid8 or int8 values to
- * users.  The txid_XXX variants should eventually be dropped.
+ * pg_current_xact_id, pg_current_snapshot and related fmgr functions, since
+ * the only difference between them is whether they expose xid8 or int8 values
+ * to users.  The txid_XXX variants should eventually be dropped.
  *
  *
  *	Copyright (c) 2003-2023, PostgreSQL Global Development Group
@@ -678,7 +678,7 @@ pg_xact_status(PG_FUNCTION_ARGS)
 		Assert(TransactionIdIsValid(xid));
 
 		/*
-		 * Like when doing visiblity checks on a row, check whether the
+		 * Like when doing visibility checks on a row, check whether the
 		 * transaction is still in progress before looking into the CLOG.
 		 * Otherwise we would incorrectly return "committed" for a transaction
 		 * that is committing and has already updated the CLOG, but hasn't

@@ -1774,6 +1774,8 @@ GetBulkInsertState(void)
 	bistate = (BulkInsertState) palloc(sizeof(BulkInsertStateData));
 	bistate->strategy = GetAccessStrategy(BAS_BULKWRITE);
 	bistate->current_buf = InvalidBuffer;
+	bistate->next_free = InvalidBlockNumber;
+	bistate->last_free = InvalidBlockNumber;
 	return bistate;
 }
 
@@ -1847,7 +1849,8 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	 */
 	buffer = RelationGetBufferForTuple(relation, heaptup->t_len,
 									   InvalidBuffer, options, bistate,
-									   &vmbuffer, NULL);
+									   &vmbuffer, NULL,
+									   0);
 
 	/*
 	 * We're about to do the actual insert -- but check for conflict first, to
@@ -2051,6 +2054,32 @@ heap_prepare_insert(Relation relation, HeapTuple tup, TransactionId xid,
 }
 
 /*
+ * Helper for heap_multi_insert() that computes the number of entire pages
+ * that inserting the remaining heaptuples requires. Used to determine how
+ * much the relation needs to be extended by.
+ */
+static int
+heap_multi_insert_pages(HeapTuple *heaptuples, int done, int ntuples, Size saveFreeSpace)
+{
+	size_t		page_avail = BLCKSZ - SizeOfPageHeaderData - saveFreeSpace;
+	int			npages = 1;
+
+	for (int i = done; i < ntuples; i++)
+	{
+		size_t		tup_sz = sizeof(ItemIdData) + MAXALIGN(heaptuples[i]->t_len);
+
+		if (page_avail < tup_sz)
+		{
+			npages++;
+			page_avail = BLCKSZ - SizeOfPageHeaderData - saveFreeSpace;
+		}
+		page_avail -= tup_sz;
+	}
+
+	return npages;
+}
+
+/*
  *	heap_multi_insert	- insert multiple tuples into a heap
  *
  * This is like heap_insert(), but inserts multiple tuples in one operation.
@@ -2076,6 +2105,9 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	Size		saveFreeSpace;
 	bool		need_tuple_data = RelationIsLogicallyLogged(relation);
 	bool		need_cids = RelationIsAccessibleInLogicalDecoding(relation);
+	bool		starting_with_empty_page = false;
+	int			npages = 0;
+	int			npages_used = 0;
 
 	/* currently not needed (thus unsupported) for heap_multi_insert() */
 	Assert(!(options & HEAP_INSERT_NO_LOGICAL));
@@ -2126,12 +2158,30 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	while (ndone < ntuples)
 	{
 		Buffer		buffer;
-		bool		starting_with_empty_page;
 		bool		all_visible_cleared = false;
 		bool		all_frozen_set = false;
 		int			nthispage;
 
 		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * Compute number of pages needed to fit the to-be-inserted tuples in
+		 * the worst case.  This will be used to determine how much to extend
+		 * the relation by in RelationGetBufferForTuple(), if needed.  If we
+		 * filled a prior page from scratch, we can just update our last
+		 * computation, but if we started with a partially filled page,
+		 * recompute from scratch, the number of potentially required pages
+		 * can vary due to tuples needing to fit onto the page, page headers
+		 * etc.
+		 */
+		if (ndone == 0 || !starting_with_empty_page)
+		{
+			npages = heap_multi_insert_pages(heaptuples, ndone, ntuples,
+											 saveFreeSpace);
+			npages_used = 0;
+		}
+		else
+			npages_used++;
 
 		/*
 		 * Find buffer where at least the next tuple will fit.  If the page is
@@ -2142,7 +2192,8 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		 */
 		buffer = RelationGetBufferForTuple(relation, heaptuples[ndone]->t_len,
 										   InvalidBuffer, options, bistate,
-										   &vmbuffer, NULL);
+										   &vmbuffer, NULL,
+										   npages - npages_used);
 		page = BufferGetPage(buffer);
 
 		starting_with_empty_page = PageGetMaxOffsetNumber(page) == 0;
@@ -3516,7 +3567,7 @@ l2:
 			XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
 
 			xlrec.offnum = ItemPointerGetOffsetNumber(&oldtup.t_self);
-			xlrec.locking_xid = xmax_lock_old_tuple;
+			xlrec.xmax = xmax_lock_old_tuple;
 			xlrec.infobits_set = compute_infobits(oldtup.t_data->t_infomask,
 												  oldtup.t_data->t_infomask2);
 			xlrec.flags =
@@ -3576,7 +3627,8 @@ l2:
 				/* It doesn't fit, must use RelationGetBufferForTuple. */
 				newbuf = RelationGetBufferForTuple(relation, heaptup->t_len,
 												   buffer, 0, NULL,
-												   &vmbuffer_new, &vmbuffer);
+												   &vmbuffer_new, &vmbuffer,
+												   0);
 				/* We're all done. */
 				break;
 			}
@@ -4725,7 +4777,7 @@ failed:
 		XLogRegisterBuffer(0, *buffer, REGBUF_STANDARD);
 
 		xlrec.offnum = ItemPointerGetOffsetNumber(&tuple->t_self);
-		xlrec.locking_xid = xid;
+		xlrec.xmax = xid;
 		xlrec.infobits_set = compute_infobits(new_infomask,
 											  tuple->t_data->t_infomask2);
 		xlrec.flags = cleared_all_frozen ? XLH_LOCK_ALL_FROZEN_CLEARED : 0;
@@ -6698,6 +6750,7 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 		nplans = heap_log_freeze_plan(tuples, ntuples, plans, offsets);
 
 		xlrec.snapshotConflictHorizon = snapshotConflictHorizon;
+		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
 		xlrec.nplans = nplans;
 
 		XLogBeginInsert();
@@ -8268,7 +8321,7 @@ bottomup_sort_and_shrink(TM_IndexDeleteOp *delstate)
  * update the heap page's LSN.
  */
 XLogRecPtr
-log_heap_visible(RelFileLocator rlocator, Buffer heap_buffer, Buffer vm_buffer,
+log_heap_visible(Relation rel, Buffer heap_buffer, Buffer vm_buffer,
 				 TransactionId snapshotConflictHorizon, uint8 vmflags)
 {
 	xl_heap_visible xlrec;
@@ -8280,6 +8333,8 @@ log_heap_visible(RelFileLocator rlocator, Buffer heap_buffer, Buffer vm_buffer,
 
 	xlrec.snapshotConflictHorizon = snapshotConflictHorizon;
 	xlrec.flags = vmflags;
+	if (RelationIsAccessibleInLogicalDecoding(rel))
+		xlrec.flags |= VISIBILITYMAP_XLOG_CATALOG_REL;
 	XLogBeginInsert();
 	XLogRegisterData((char *) &xlrec, SizeOfHeapVisible);
 
@@ -8714,6 +8769,7 @@ heap_xlog_prune(XLogReaderState *record)
 	 */
 	if (InHotStandby)
 		ResolveRecoveryConflictWithSnapshot(xlrec->snapshotConflictHorizon,
+											xlrec->isCatalogRel,
 											rlocator);
 
 	/*
@@ -8870,6 +8926,8 @@ heap_xlog_visible(XLogReaderState *record)
 	BlockNumber blkno;
 	XLogRedoAction action;
 
+	Assert((xlrec->flags & VISIBILITYMAP_XLOG_VALID_BITS) == xlrec->flags);
+
 	XLogRecGetBlockTag(record, 1, &rlocator, NULL, &blkno);
 
 	/*
@@ -8883,6 +8941,7 @@ heap_xlog_visible(XLogReaderState *record)
 	 */
 	if (InHotStandby)
 		ResolveRecoveryConflictWithSnapshot(xlrec->snapshotConflictHorizon,
+											xlrec->flags & VISIBILITYMAP_XLOG_CATALOG_REL,
 											rlocator);
 
 	/*
@@ -8956,10 +9015,14 @@ heap_xlog_visible(XLogReaderState *record)
 	{
 		Page		vmpage = BufferGetPage(vmbuffer);
 		Relation	reln;
+		uint8		vmbits;
 
 		/* initialize the page if it was read as zeros */
 		if (PageIsNew(vmpage))
 			PageInit(vmpage, BLCKSZ, 0);
+
+		/* remove VISIBILITYMAP_XLOG_* */
+		vmbits = xlrec->flags & VISIBILITYMAP_VALID_BITS;
 
 		/*
 		 * XLogReadBufferForRedoExtended locked the buffer. But
@@ -8971,7 +9034,7 @@ heap_xlog_visible(XLogReaderState *record)
 		visibilitymap_pin(reln, blkno, &vmbuffer);
 
 		visibilitymap_set(reln, blkno, InvalidBuffer, lsn, vmbuffer,
-						  xlrec->snapshotConflictHorizon, xlrec->flags);
+						  xlrec->snapshotConflictHorizon, vmbits);
 
 		ReleaseBuffer(vmbuffer);
 		FreeFakeRelcacheEntry(reln);
@@ -9000,6 +9063,7 @@ heap_xlog_freeze_page(XLogReaderState *record)
 
 		XLogRecGetBlockTag(record, 0, &rlocator, NULL, NULL);
 		ResolveRecoveryConflictWithSnapshot(xlrec->snapshotConflictHorizon,
+											xlrec->isCatalogRel,
 											rlocator);
 	}
 
@@ -9784,7 +9848,7 @@ heap_xlog_lock(XLogReaderState *record)
 						   BufferGetBlockNumber(buffer),
 						   offnum);
 		}
-		HeapTupleHeaderSetXmax(htup, xlrec->locking_xid);
+		HeapTupleHeaderSetXmax(htup, xlrec->xmax);
 		HeapTupleHeaderSetCmax(htup, FirstCommandId, false);
 		PageSetLSN(page, lsn);
 		MarkBufferDirty(buffer);

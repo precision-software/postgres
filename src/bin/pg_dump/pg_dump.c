@@ -56,6 +56,7 @@
 #include "catalog/pg_type_d.h"
 #include "common/connect.h"
 #include "common/relpath.h"
+#include "compress_io.h"
 #include "dumputils.h"
 #include "fe_utils/option_utils.h"
 #include "fe_utils/string_utils.h"
@@ -289,7 +290,7 @@ static char *getFormattedOperatorName(const char *oproid);
 static char *convertTSFunction(Archive *fout, Oid funcOid);
 static const char *getFormattedTypeName(Archive *fout, Oid oid, OidOptions opts);
 static void getLOs(Archive *fout);
-static void dumpLO(Archive *fout, const LoInfo *binfo);
+static void dumpLO(Archive *fout, const LoInfo *loinfo);
 static int	dumpLOs(Archive *fout, const void *arg);
 static void dumpPolicy(Archive *fout, const PolicyInfo *polinfo);
 static void dumpPublication(Archive *fout, const PublicationInfo *pubinfo);
@@ -735,18 +736,18 @@ main(int argc, char **argv)
 		pg_fatal("invalid compression specification: %s",
 				 error_detail);
 
-	switch (compression_algorithm)
-	{
-		case PG_COMPRESSION_NONE:
-			/* fallthrough */
-		case PG_COMPRESSION_GZIP:
-			/* fallthrough */
-		case PG_COMPRESSION_LZ4:
-			break;
-		case PG_COMPRESSION_ZSTD:
-			pg_fatal("compression with %s is not yet supported", "ZSTD");
-			break;
-	}
+	error_detail = supports_compression(compression_spec);
+	if (error_detail != NULL)
+		pg_fatal("%s", error_detail);
+
+	/*
+	 * Disable support for zstd workers for now - these are based on threading,
+	 * and it's unclear how it interacts with parallel dumps on platforms where
+	 * that relies on threads too (e.g. Windows).
+	 */
+	if (compression_spec.options & PG_COMPRESSION_OPTION_WORKERS)
+		pg_log_warning("compression option \"%s\" is not currently supported by pg_dump",
+					   "workers");
 
 	/*
 	 * Custom and directory formats are compressed by default with gzip when
@@ -4608,6 +4609,7 @@ getSubscriptions(Archive *fout)
 	int			i_subsynccommit;
 	int			i_subpublications;
 	int			i_subbinary;
+	int			i_subpasswordrequired;
 	int			i,
 				ntups;
 
@@ -4660,9 +4662,14 @@ getSubscriptions(Archive *fout)
 						  LOGICALREP_TWOPHASE_STATE_DISABLED);
 
 	if (fout->remoteVersion >= 160000)
-		appendPQExpBufferStr(query, " s.suborigin\n");
+		appendPQExpBufferStr(query,
+							 " s.suborigin,\n"
+							 " s.subpasswordrequired\n");
 	else
-		appendPQExpBuffer(query, " '%s' AS suborigin\n", LOGICALREP_ORIGIN_ANY);
+		appendPQExpBuffer(query,
+						  " '%s' AS suborigin,\n"
+						  " 't' AS subpasswordrequired\n",
+						  LOGICALREP_ORIGIN_ANY);
 
 	appendPQExpBufferStr(query,
 						 "FROM pg_subscription s\n"
@@ -4690,6 +4697,7 @@ getSubscriptions(Archive *fout)
 	i_subtwophasestate = PQfnumber(res, "subtwophasestate");
 	i_subdisableonerr = PQfnumber(res, "subdisableonerr");
 	i_suborigin = PQfnumber(res, "suborigin");
+	i_subpasswordrequired = PQfnumber(res, "subpasswordrequired");
 
 	subinfo = pg_malloc(ntups * sizeof(SubscriptionInfo));
 
@@ -4720,6 +4728,8 @@ getSubscriptions(Archive *fout)
 		subinfo[i].subdisableonerr =
 			pg_strdup(PQgetvalue(res, i, i_subdisableonerr));
 		subinfo[i].suborigin = pg_strdup(PQgetvalue(res, i, i_suborigin));
+		subinfo[i].subpasswordrequired =
+			pg_strdup(PQgetvalue(res, i, i_subpasswordrequired));
 
 		/* Decide whether we want to dump it */
 		selectDumpableObject(&(subinfo[i].dobj), fout);
@@ -4800,6 +4810,9 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 
 	if (strcmp(subinfo->subsynccommit, "off") != 0)
 		appendPQExpBuffer(query, ", synchronous_commit = %s", fmtId(subinfo->subsynccommit));
+
+	if (strcmp(subinfo->subpasswordrequired, "t") != 0)
+		appendPQExpBuffer(query, ", password_required = false");
 
 	appendPQExpBufferStr(query, ");\n");
 

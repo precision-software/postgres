@@ -123,6 +123,7 @@ static int	ldapServiceLookup(const char *purl, PQconninfoOption *options,
 #define DefaultChannelBinding	"disable"
 #endif
 #define DefaultTargetSessionAttrs	"any"
+#define DefaultLoadBalanceHosts	"disable"
 #ifdef USE_SSL
 #define DefaultSSLMode "prefer"
 #define DefaultSSLCertMode "allow"
@@ -342,6 +343,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"GSS-library", "", 7,	/* sizeof("gssapi") == 7 */
 	offsetof(struct pg_conn, gsslib)},
 
+	{"gssdeleg", "PGGSSDELEG", NULL, NULL,
+		"GSS-delegation", "", 8,	/* sizeof("disable") == 8 */
+	offsetof(struct pg_conn, gssdeleg)},
+
 	{"replication", NULL, NULL, NULL,
 		"Replication", "D", 5,
 	offsetof(struct pg_conn, replication)},
@@ -350,6 +355,11 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		DefaultTargetSessionAttrs, NULL,
 		"Target-Session-Attrs", "", 15, /* sizeof("prefer-standby") = 15 */
 	offsetof(struct pg_conn, target_session_attrs)},
+
+	{"load_balance_hosts", "PGLOADBALANCEHOSTS",
+		DefaultLoadBalanceHosts, NULL,
+		"Load-Balance-Hosts", "", 8,	/* sizeof("disable") = 8 */
+	offsetof(struct pg_conn, load_balance_hosts)},
 
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
@@ -389,6 +399,7 @@ static bool fillPGconn(PGconn *conn, PQconninfoOption *connOptions);
 static void freePGconn(PGconn *conn);
 static void closePGconn(PGconn *conn);
 static void release_conn_addrinfo(PGconn *conn);
+static int	store_conn_addrinfo(PGconn *conn, struct addrinfo *addrlist);
 static void sendTerminateConn(PGconn *conn);
 static PQconninfoOption *conninfo_init(PQExpBuffer errorMessage);
 static PQconninfoOption *parse_connection_string(const char *connstr,
@@ -434,6 +445,8 @@ static void pgpassfileWarning(PGconn *conn);
 static void default_threadlock(int acquire);
 static bool sslVerifyProtocolVersion(const char *version);
 static bool sslVerifyProtocolRange(const char *min, const char *max);
+static bool parse_int_param(const char *value, int *result, PGconn *conn,
+							const char *context);
 
 
 /* global variable because fe-auth.c needs to access it */
@@ -596,6 +609,7 @@ pqDropServerData(PGconn *conn)
 	conn->std_strings = false;
 	conn->default_transaction_read_only = PG_BOOL_UNKNOWN;
 	conn->in_hot_standby = PG_BOOL_UNKNOWN;
+	conn->scram_sha_256_iterations = SCRAM_SHA_256_DEFAULT_ITERATIONS;
 	conn->sversion = 0;
 
 	/* Drop large-object lookup data */
@@ -607,6 +621,7 @@ pqDropServerData(PGconn *conn)
 	conn->auth_req_received = false;
 	conn->client_finished_auth = false;
 	conn->password_needed = false;
+	conn->gssapi_used = false;
 	conn->write_failed = false;
 	free(conn->write_err_msg);
 	conn->write_err_msg = NULL;
@@ -1016,6 +1031,31 @@ parse_comma_separated_list(char **startptr, bool *more)
 	*startptr = e + 1;
 
 	return p;
+}
+
+/*
+ * Initializes the prng_state field of the connection. We want something
+ * unpredictable, so if possible, use high-quality random bits for the
+ * seed. Otherwise, fall back to a seed based on the connection address,
+ * timestamp and PID.
+ */
+static void
+libpq_prng_init(PGconn *conn)
+{
+	uint64		rseed;
+	struct timeval tval = {0};
+
+	if (pg_prng_strong_seed(&conn->prng_state))
+		return;
+
+	gettimeofday(&tval, NULL);
+
+	rseed = ((uintptr_t) conn) ^
+			((uint64) getpid()) ^
+			((uint64) tval.tv_usec) ^
+			((uint64) tval.tv_sec);
+
+	pg_prng_seed(&conn->prng_state, rseed);
 }
 
 /*
@@ -1430,6 +1470,23 @@ connectOptions2(PGconn *conn)
 			goto oom_error;
 	}
 
+#ifndef USE_SSL
+
+	/*
+	 * sslrootcert=system is not supported. Since setting this changes the
+	 * default sslmode, check this _before_ we validate sslmode, to avoid
+	 * confusing the user with errors for an option they may not have set.
+	 */
+	if (conn->sslrootcert
+		&& strcmp(conn->sslrootcert, "system") == 0)
+	{
+		conn->status = CONNECTION_BAD;
+		libpq_append_conn_error(conn, "sslrootcert value \"%s\" invalid when SSL support is not compiled in",
+								conn->sslrootcert);
+		return false;
+	}
+#endif
+
 	/*
 	 * validate sslmode option
 	 */
@@ -1475,6 +1532,22 @@ connectOptions2(PGconn *conn)
 		if (!conn->sslmode)
 			goto oom_error;
 	}
+
+#ifdef USE_SSL
+
+	/*
+	 * If sslrootcert=system, make sure our chosen sslmode is compatible.
+	 */
+	if (conn->sslrootcert
+		&& strcmp(conn->sslrootcert, "system") == 0
+		&& strcmp(conn->sslmode, "verify-full") != 0)
+	{
+		conn->status = CONNECTION_BAD;
+		libpq_append_conn_error(conn, "weak sslmode \"%s\" may not be used with sslrootcert=system (use verify-full)",
+								conn->sslmode);
+		return false;
+	}
+#endif
 
 	/*
 	 * Validate TLS protocol versions for ssl_min_protocol_version and
@@ -1616,6 +1689,49 @@ connectOptions2(PGconn *conn)
 	}
 	else
 		conn->target_server_type = SERVER_TYPE_ANY;
+
+	/*
+	 * validate load_balance_hosts option, and set load_balance_type
+	 */
+	if (conn->load_balance_hosts)
+	{
+		if (strcmp(conn->load_balance_hosts, "disable") == 0)
+			conn->load_balance_type = LOAD_BALANCE_DISABLE;
+		else if (strcmp(conn->load_balance_hosts, "random") == 0)
+			conn->load_balance_type = LOAD_BALANCE_RANDOM;
+		else
+		{
+			conn->status = CONNECTION_BAD;
+			libpq_append_conn_error(conn, "invalid %s value: \"%s\"",
+									"load_balance_hosts",
+									conn->load_balance_hosts);
+			return false;
+		}
+	}
+	else
+		conn->load_balance_type = LOAD_BALANCE_DISABLE;
+
+	if (conn->load_balance_type == LOAD_BALANCE_RANDOM)
+	{
+		libpq_prng_init(conn);
+
+		/*
+		 * This is the "inside-out" variant of the Fisher-Yates shuffle
+		 * algorithm. Notionally, we append each new value to the array and
+		 * then swap it with a randomly-chosen array element (possibly
+		 * including itself, else we fail to generate permutations with the
+		 * last integer last).  The swap step can be optimized by combining it
+		 * with the insertion.
+		 */
+		for (i = 1; i < conn->nconnhost; i++)
+		{
+			int			j = pg_prng_uint64_range(&conn->prng_state, 0, i);
+			pg_conn_host temp = conn->connhost[j];
+
+			conn->connhost[j] = conn->connhost[i];
+			conn->connhost[i] = temp;
+		}
+	}
 
 	/*
 	 * Resolve special "auto" client_encoding from the locale
@@ -2294,7 +2410,7 @@ connectDBComplete(PGconn *conn)
 	time_t		finish_time = ((time_t) -1);
 	int			timeout = 0;
 	int			last_whichhost = -2;	/* certainly different from whichhost */
-	struct addrinfo *last_addr_cur = NULL;
+	int			last_whichaddr = -2;	/* certainly different from whichaddr */
 
 	if (conn == NULL || conn->status == CONNECTION_BAD)
 		return 0;
@@ -2338,11 +2454,11 @@ connectDBComplete(PGconn *conn)
 		if (flag != PGRES_POLLING_OK &&
 			timeout > 0 &&
 			(conn->whichhost != last_whichhost ||
-			 conn->addr_cur != last_addr_cur))
+			 conn->whichaddr != last_whichaddr))
 		{
 			finish_time = time(NULL) + timeout;
 			last_whichhost = conn->whichhost;
-			last_addr_cur = conn->addr_cur;
+			last_whichaddr = conn->whichaddr;
 		}
 
 		/*
@@ -2489,9 +2605,9 @@ keep_going:						/* We will come back to here until there is
 	/* Time to advance to next address, or next host if no more addresses? */
 	if (conn->try_next_addr)
 	{
-		if (conn->addr_cur && conn->addr_cur->ai_next)
+		if (conn->whichaddr < conn->naddr)
 		{
-			conn->addr_cur = conn->addr_cur->ai_next;
+			conn->whichaddr++;
 			reset_connection_state_machine = true;
 		}
 		else
@@ -2504,6 +2620,7 @@ keep_going:						/* We will come back to here until there is
 	{
 		pg_conn_host *ch;
 		struct addrinfo hint;
+		struct addrinfo *addrlist;
 		int			thisport;
 		int			ret;
 		char		portstr[MAXPGPATH];
@@ -2544,7 +2661,7 @@ keep_going:						/* We will come back to here until there is
 		/* Initialize hint structure */
 		MemSet(&hint, 0, sizeof(hint));
 		hint.ai_socktype = SOCK_STREAM;
-		conn->addrlist_family = hint.ai_family = AF_UNSPEC;
+		hint.ai_family = AF_UNSPEC;
 
 		/* Figure out the port number we're going to use. */
 		if (ch->port == NULL || ch->port[0] == '\0')
@@ -2567,8 +2684,8 @@ keep_going:						/* We will come back to here until there is
 		{
 			case CHT_HOST_NAME:
 				ret = pg_getaddrinfo_all(ch->host, portstr, &hint,
-										 &conn->addrlist);
-				if (ret || !conn->addrlist)
+										 &addrlist);
+				if (ret || !addrlist)
 				{
 					libpq_append_conn_error(conn, "could not translate host name \"%s\" to address: %s",
 											ch->host, gai_strerror(ret));
@@ -2579,8 +2696,8 @@ keep_going:						/* We will come back to here until there is
 			case CHT_HOST_ADDRESS:
 				hint.ai_flags = AI_NUMERICHOST;
 				ret = pg_getaddrinfo_all(ch->hostaddr, portstr, &hint,
-										 &conn->addrlist);
-				if (ret || !conn->addrlist)
+										 &addrlist);
+				if (ret || !addrlist)
 				{
 					libpq_append_conn_error(conn, "could not parse network address \"%s\": %s",
 											ch->hostaddr, gai_strerror(ret));
@@ -2589,7 +2706,7 @@ keep_going:						/* We will come back to here until there is
 				break;
 
 			case CHT_UNIX_SOCKET:
-				conn->addrlist_family = hint.ai_family = AF_UNIX;
+				hint.ai_family = AF_UNIX;
 				UNIXSOCK_PATH(portstr, thisport, ch->host);
 				if (strlen(portstr) >= UNIXSOCK_PATH_BUFLEN)
 				{
@@ -2604,8 +2721,8 @@ keep_going:						/* We will come back to here until there is
 				 * name as a Unix-domain socket path.
 				 */
 				ret = pg_getaddrinfo_all(NULL, portstr, &hint,
-										 &conn->addrlist);
-				if (ret || !conn->addrlist)
+										 &addrlist);
+				if (ret || !addrlist)
 				{
 					libpq_append_conn_error(conn, "could not translate Unix-domain socket path \"%s\" to address: %s",
 											portstr, gai_strerror(ret));
@@ -2614,8 +2731,41 @@ keep_going:						/* We will come back to here until there is
 				break;
 		}
 
-		/* OK, scan this addrlist for a working server address */
-		conn->addr_cur = conn->addrlist;
+		/*
+		 * Store a copy of the addrlist in private memory so we can perform
+		 * randomization for load balancing.
+		 */
+		ret = store_conn_addrinfo(conn, addrlist);
+		pg_freeaddrinfo_all(hint.ai_family, addrlist);
+		if (ret)
+			goto error_return;	/* message already logged */
+
+		/*
+		 * If random load balancing is enabled we shuffle the addresses.
+		 */
+		if (conn->load_balance_type == LOAD_BALANCE_RANDOM)
+		{
+			/*
+			 * This is the "inside-out" variant of the Fisher-Yates shuffle
+			 * algorithm. Notionally, we append each new value to the array
+			 * and then swap it with a randomly-chosen array element (possibly
+			 * including itself, else we fail to generate permutations with
+			 * the last integer last).  The swap step can be optimized by
+			 * combining it with the insertion.
+			 *
+			 * We don't need to initialize conn->prng_state here, because that
+			 * already happened in connectOptions2.
+			 */
+			for (int i = 1; i < conn->naddr; i++)
+			{
+				int			j = pg_prng_uint64_range(&conn->prng_state, 0, i);
+				AddrInfo	temp = conn->addr[j];
+
+				conn->addr[j] = conn->addr[i];
+				conn->addr[i] = temp;
+			}
+		}
+
 		reset_connection_state_machine = true;
 		conn->try_next_host = false;
 	}
@@ -2672,31 +2822,30 @@ keep_going:						/* We will come back to here until there is
 			{
 				/*
 				 * Try to initiate a connection to one of the addresses
-				 * returned by pg_getaddrinfo_all().  conn->addr_cur is the
+				 * returned by pg_getaddrinfo_all().  conn->whichaddr is the
 				 * next one to try.
 				 *
 				 * The extra level of braces here is historical.  It's not
 				 * worth reindenting this whole switch case to remove 'em.
 				 */
 				{
-					struct addrinfo *addr_cur = conn->addr_cur;
 					char		host_addr[NI_MAXHOST];
 					int			sock_type;
+					AddrInfo   *addr_cur;
 
 					/*
 					 * Advance to next possible host, if we've tried all of
 					 * the addresses for the current host.
 					 */
-					if (addr_cur == NULL)
+					if (conn->whichaddr == conn->naddr)
 					{
 						conn->try_next_host = true;
 						goto keep_going;
 					}
+					addr_cur = &conn->addr[conn->whichaddr];
 
 					/* Remember current address for possible use later */
-					memcpy(&conn->raddr.addr, addr_cur->ai_addr,
-						   addr_cur->ai_addrlen);
-					conn->raddr.salen = addr_cur->ai_addrlen;
+					memcpy(&conn->raddr, &addr_cur->addr, sizeof(SockAddr));
 
 					/*
 					 * Set connip, too.  Note we purposely ignore strdup
@@ -2731,7 +2880,7 @@ keep_going:						/* We will come back to here until there is
 					 */
 					sock_type |= SOCK_NONBLOCK;
 #endif
-					conn->sock = socket(addr_cur->ai_family, sock_type, 0);
+					conn->sock = socket(addr_cur->family, sock_type, 0);
 					if (conn->sock == PGINVALID_SOCKET)
 					{
 						int			errorno = SOCK_ERRNO;
@@ -2742,7 +2891,7 @@ keep_going:						/* We will come back to here until there is
 						 * cases where the address list includes both IPv4 and
 						 * IPv6 but kernel only accepts one family.
 						 */
-						if (addr_cur->ai_next != NULL ||
+						if (conn->whichaddr < conn->naddr ||
 							conn->whichhost + 1 < conn->nconnhost)
 						{
 							conn->try_next_addr = true;
@@ -2768,7 +2917,7 @@ keep_going:						/* We will come back to here until there is
 					 * TCP sockets, nonblock mode, close-on-exec.  Try the
 					 * next address if any of this fails.
 					 */
-					if (addr_cur->ai_family != AF_UNIX)
+					if (addr_cur->family != AF_UNIX)
 					{
 						if (!connectNoDelay(conn))
 						{
@@ -2799,7 +2948,7 @@ keep_going:						/* We will come back to here until there is
 #endif							/* F_SETFD */
 #endif
 
-					if (addr_cur->ai_family != AF_UNIX)
+					if (addr_cur->family != AF_UNIX)
 					{
 #ifndef WIN32
 						int			on = 1;
@@ -2891,8 +3040,8 @@ keep_going:						/* We will come back to here until there is
 					 * Start/make connection.  This should not block, since we
 					 * are in nonblock mode.  If it does, well, too bad.
 					 */
-					if (connect(conn->sock, addr_cur->ai_addr,
-								addr_cur->ai_addrlen) < 0)
+					if (connect(conn->sock, (struct sockaddr *) &addr_cur->addr.addr,
+								addr_cur->addr.salen) < 0)
 					{
 						if (SOCK_ERRNO == EINPROGRESS ||
 #ifdef WIN32
@@ -4182,6 +4331,7 @@ makeEmptyPGconn(void)
 	conn->std_strings = false;	/* unless server says differently */
 	conn->default_transaction_read_only = PG_BOOL_UNKNOWN;
 	conn->in_hot_standby = PG_BOOL_UNKNOWN;
+	conn->scram_sha_256_iterations = SCRAM_SHA_256_DEFAULT_ITERATIONS;
 	conn->verbosity = PQERRORS_DEFAULT;
 	conn->show_context = PQSHOW_CONTEXT_ERRORS;
 	conn->sock = PGINVALID_SOCKET;
@@ -4303,6 +4453,7 @@ freePGconn(PGconn *conn)
 	free(conn->gssencmode);
 	free(conn->krbsrvname);
 	free(conn->gsslib);
+	free(conn->gssdeleg);
 	free(conn->connip);
 	/* Note that conn->Pfdebug is not ours to close or free */
 	free(conn->write_err_msg);
@@ -4310,10 +4461,54 @@ freePGconn(PGconn *conn)
 	free(conn->outBuffer);
 	free(conn->rowBuf);
 	free(conn->target_session_attrs);
+	free(conn->load_balance_hosts);
 	termPQExpBuffer(&conn->errorMessage);
 	termPQExpBuffer(&conn->workBuffer);
 
 	free(conn);
+}
+
+/*
+ * store_conn_addrinfo
+ *	 - copy addrinfo to PGconn object
+ *
+ * Copies the addrinfos from addrlist to the PGconn object such that the
+ * addrinfos can be manipulated by libpq. Returns a positive integer on
+ * failure, otherwise zero.
+ */
+static int
+store_conn_addrinfo(PGconn *conn, struct addrinfo *addrlist)
+{
+	struct addrinfo *ai = addrlist;
+
+	conn->whichaddr = 0;
+
+	conn->naddr = 0;
+	while (ai)
+	{
+		ai = ai->ai_next;
+		conn->naddr++;
+	}
+
+	conn->addr = calloc(conn->naddr, sizeof(AddrInfo));
+	if (conn->addr == NULL)
+	{
+		libpq_append_conn_error(conn, "out of memory");
+		return 1;
+	}
+
+	ai = addrlist;
+	for (int i = 0; i < conn->naddr; i++)
+	{
+		conn->addr[i].family = ai->ai_family;
+
+		memcpy(&conn->addr[i].addr.addr, ai->ai_addr,
+			   ai->ai_addrlen);
+		conn->addr[i].addr.salen = ai->ai_addrlen;
+		ai = ai->ai_next;
+	}
+
+	return 0;
 }
 
 /*
@@ -4323,11 +4518,10 @@ freePGconn(PGconn *conn)
 static void
 release_conn_addrinfo(PGconn *conn)
 {
-	if (conn->addrlist)
+	if (conn->addr)
 	{
-		pg_freeaddrinfo_all(conn->addrlist_family, conn->addrlist);
-		conn->addrlist = NULL;
-		conn->addr_cur = NULL;	/* for safety */
+		free(conn->addr);
+		conn->addr = NULL;
 	}
 }
 
@@ -6081,6 +6275,8 @@ static bool
 conninfo_add_defaults(PQconninfoOption *options, PQExpBuffer errorMessage)
 {
 	PQconninfoOption *option;
+	PQconninfoOption *sslmode_default = NULL,
+			   *sslrootcert = NULL;
 	char	   *tmp;
 
 	/*
@@ -6097,6 +6293,9 @@ conninfo_add_defaults(PQconninfoOption *options, PQExpBuffer errorMessage)
 	 */
 	for (option = options; option->keyword != NULL; option++)
 	{
+		if (strcmp(option->keyword, "sslrootcert") == 0)
+			sslrootcert = option;	/* save for later */
+
 		if (option->val != NULL)
 			continue;			/* Value was in conninfo or service */
 
@@ -6139,6 +6338,13 @@ conninfo_add_defaults(PQconninfoOption *options, PQExpBuffer errorMessage)
 				}
 				continue;
 			}
+
+			/*
+			 * sslmode is not specified. Let it be filled in with the compiled
+			 * default for now, but if sslrootcert=system, we'll override the
+			 * default later before returning.
+			 */
+			sslmode_default = option;
 		}
 
 		/*
@@ -6168,6 +6374,27 @@ conninfo_add_defaults(PQconninfoOption *options, PQExpBuffer errorMessage)
 		{
 			option->val = pg_fe_getauthname(NULL);
 			continue;
+		}
+	}
+
+	/*
+	 * Special handling for sslrootcert=system with no sslmode explicitly
+	 * defined. In this case we want to strengthen the default sslmode to
+	 * verify-full.
+	 */
+	if (sslmode_default && sslrootcert)
+	{
+		if (sslrootcert->val && strcmp(sslrootcert->val, "system") == 0)
+		{
+			free(sslmode_default->val);
+
+			sslmode_default->val = strdup("verify-full");
+			if (!sslmode_default->val)
+			{
+				if (errorMessage)
+					libpq_append_error(errorMessage, "out of memory");
+				return false;
+			}
 		}
 	}
 
@@ -7086,6 +7313,17 @@ PQconnectionUsedPassword(const PGconn *conn)
 	if (!conn)
 		return false;
 	if (conn->password_needed)
+		return true;
+	else
+		return false;
+}
+
+int
+PQconnectionUsedGSSAPI(const PGconn *conn)
+{
+	if (!conn)
+		return false;
+	if (conn->gssapi_used)
 		return true;
 	else
 		return false;

@@ -147,6 +147,7 @@ CreateExecutorState(void)
 	estate->es_tupleTable = NIL;
 
 	estate->es_processed = 0;
+	estate->es_total_processed = 0;
 
 	estate->es_top_eflags = 0;
 	estate->es_instrument = 0;
@@ -1402,7 +1403,7 @@ GetResultRTEPermissionInfo(ResultRelInfo *relinfo, EState *estate)
 }
 
 /*
- * GetResultRelCheckAsUser
+ * ExecGetResultRelCheckAsUser
  *		Returns the user to modify passed-in result relation as
  *
  * The user is chosen by looking up the relation's or, if a child table, its
