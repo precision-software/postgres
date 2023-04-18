@@ -1474,7 +1474,7 @@ PathNameOpenFile(const char *fileName, int fileFlags)
  * (which should always be $PGDATA when this code is running).
  */
 File
-PathNameOpenFilePerm_Private(const char *fileName, int fileFlags, mode_t fileMode)
+PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	char	   *fnamecopy;
 	File		file;
@@ -1864,7 +1864,7 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
  * close a file when done with it. Return 0 if close was successfule.
  */
 int
-FileClose_Private(File file)
+FileClose_Internal(File file)
 {
 	Vfd		   *vfdP = getVfd(file);
 	int retval = 0;
@@ -2028,7 +2028,7 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 }
 
 ssize_t
-FileRead_Private(File file, void *buffer, size_t amount, off_t offset)
+FileRead_Internal(File file, void *buffer, size_t amount, off_t offset)
 {
 	ssize_t			returnCode;
 	Vfd		   *vfdP = getVfd(file);
@@ -2076,7 +2076,7 @@ retry:
 }
 
 ssize_t
-FileWrite_Private(File file, const void *buffer, size_t amount, off_t offset)
+FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset)
 {
     ssize_t			returnCode;
     Vfd		   *vfdP = getVfd(file);
@@ -2167,7 +2167,7 @@ retry:
 }
 
 int
-FileSync_Private(File file)
+FileSync_Internal(File file)
 {
     int			returnCode;
     
@@ -2272,7 +2272,7 @@ FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info)
 }
 
 off_t
-FileSize_Private(File file)
+FileSize_Internal(File file)
 {
 	Vfd *vfdP = getVfd(file);
 
@@ -2291,7 +2291,7 @@ FileSize_Private(File file)
 }
 
 int
-FileTruncate_Private(File file, off_t offset)
+FileTruncate_Internal(File file, off_t offset)
 {
 	int			returnCode;
 	Vfd *vfdP = getVfd(file);

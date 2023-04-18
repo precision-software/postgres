@@ -34,13 +34,13 @@
  * We are the only users of these hooks, so externs are here rather than in fd.h
  * where anybody could access them.
  */
-extern File PathNameOpenFilePerm_Private(const char *fileName, int fileFlags, mode_t fileMode);
-extern int FileClose_Private(File file);
-extern ssize_t FileRead_Private(File file, void *buffer, size_t amount, off_t offset);
-extern ssize_t FileWrite_Private(File file, const void *buffer, size_t amount);
-extern int FileSync_Private(File file);
-extern off_t FileSize_Private(File file);
-extern int	FileTruncate_Private(File file, off_t offset);
+extern File PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode);
+extern int FileClose_Internal(File file);
+extern ssize_t FileRead_Internal(File file, void *buffer, size_t amount, off_t offset);
+extern ssize_t FileWrite_Internal(File file, const void *buffer, size_t amount);
+extern int FileSync_Internal(File file);
+extern off_t FileSize_Internal(File file);
+extern int	FileTruncate_Internal(File file, off_t offset);
 
 
 /*
@@ -65,7 +65,7 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, int mo
 	oflags &= ~PG_STACK_MASK;
 
 	/* Open the file and get a VFD. */
-	this->file = PathNameOpenFilePerm_Private(path, oflags, mode);
+	this->file = PathNameOpenFilePerm_Internal(path, oflags, mode);
 	checkSystemError(this, this->file, "Unable to open vfd file %s", path);
 
 	/* We are byte oriented and can support all block sizes */
@@ -82,7 +82,7 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, int mo
  */
 static ssize_t vfdWrite(VfdBottom *this, const Byte *buf, size_t bufSize, off_t offset)
 {
-	ssize_t actual = FileWrite_Private(this->file, buf, bufSize);
+	ssize_t actual = FileWrite_Internal(this->file, buf, bufSize);
 	debug("vfdWrite: file=%d  name=%s  size=%zd  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
 	return checkSystemError(this, actual, "Unable to write to file");
 }
@@ -94,7 +94,7 @@ static ssize_t vfdRead(VfdBottom *this, Byte *buf, size_t bufSize, off_t offset,
 {
 	Assert(bufSize > 0 && offset >= 0);
 
-	ssize_t actual = FileRead_Private(this->file, buf, bufSize, offset);
+	ssize_t actual = FileRead_Internal(this->file, buf, bufSize, offset);
 	debug("vfdRead: file=%d  name=%s  size=%zd  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
 	return checkSystemError(this, actual, "Unable to read from file %s", getName(this->file));
 }
@@ -118,7 +118,7 @@ static ssize_t vfdClose(VfdBottom *this)
 	getVfd(file)->ioStack = NULL;
 
 	/* Close the file for real. */
-	int retval = FileClose_Private(file);
+	int retval = FileClose_Internal(file);
 
 	/* Note: We allocated ioStack in FileOpen, so we will free it in FileClose */
 	debug("vfdClose(done): file=%d  retval=%d\n", file, retval);
@@ -128,20 +128,20 @@ static ssize_t vfdClose(VfdBottom *this)
 
 static ssize_t vfdSync(VfdBottom *this)
 {
-	int retval = FileSync_Private(this->file);
+	int retval = FileSync_Internal(this->file);
 	return checkSystemError(this, retval, "Unable to sync file");
 }
 
 static off_t vfdSize(VfdBottom *this)
 {
-	off_t offset = FileSize_Private(this->file);
+	off_t offset = FileSize_Internal(this->file);
 	return checkSystemError(this, offset, "Unable to get file size");
 }
 
 
 static bool vfdTruncate(VfdBottom *this, off_t offset)
 {
-	int retval = FileTruncate_Private(this->file, offset);
+	int retval = FileTruncate_Internal(this->file, offset);
 	return checkSystemError(this, retval, "Unable to truncate file") >= 0;
 }
 
