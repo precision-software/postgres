@@ -227,14 +227,27 @@ extern int	data_sync_elevel(int elevel);
 #define PG_TEMP_FILES_DIR "pgsql_tmp"
 #define PG_TEMP_FILE_PREFIX "pgsql_tmp"
 
-/* Additional open flags to support encryption/compresion */
-#define PG_NOCRYPT        (0 << 28)
-#define PG_ENCRYPT        (1 << 28)
-#define PG_ECOMPRESS      (2 << 28)
-#define PG_ENCRYPT_PERM   (3 << 28)
-#define PG_TESTSTACK      (4 << 28)
+/* TODO: consider useing uint64 to support special flags, or use a different mechanism */
 
+/* open flags to select encryption, buffering, compression */
 #define PG_STACK_MASK     (7 << 28)
+#define PG_RAW    	      (0 << 28)   /* Direct calls to pread/pwrite (default) */
+#define PG_ENCRYPT        (1 << 28)   /* buffered an encrypted using session key */
+#define PG_ECOMPRESS      (2 << 28)   /* Encrypted and compressed, supports reandom reads - EXPERIMENTAL */
+#define PG_ENCRYPT_PERM   (3 << 28)   /* Encrypted using a permanent key */
+#define PG_TESTSTACK      (4 << 28)   /* For unit testing */
+#define PG_PLAIN          (5 << 28)   /* Plan text, buffered */
+
+/* These are flag combinations frequently used in postgres */
+#define PG_CREATE (O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY)
+#define PG_READ   (O_RDONLY | PG_BINARY)
+#define PG_UPDATE (O_RDWR   | PG_BINARY)
+
+/* Potental future flags for FileOpen (not yet) */
+#define PG_XACT 0       /* File will be closed at end of current transaction */
+#define PG_DELETE 0     /* File will be deleted when closed */
+#define PG_LIMIT 0      /* Temp file limits apply */
+
 
 
 #endif							/* FD_H */

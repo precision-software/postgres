@@ -52,11 +52,10 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 	debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x\n", fileName, fileFlags, fileMode);
 	/* Allocate an I/O stack for this file. */
 	IoStack *proto = selectIoStack(fileName, fileFlags, fileMode);
-
 	if (proto == NULL)
 		return -1;
 
-	/* I/O stacks don't implement O_APPEND, so position to FileSize instead */
+	/* I/O stacks don't implement O_APPEND. We will position to FileSize instead */
 	bool append = (fileFlags & O_APPEND) != 0;
 	fileFlags &= ~O_APPEND;
 
@@ -100,7 +99,7 @@ int FileClose(File file)
 
 	/* Close the file.  The low level routine will invalidate the "file" index */
 	IoStack *stack = getStack(file);
-	ssize_t retval = stackClose(stack);
+	int retval = stackClose(stack);
 
 	/* If failed, save the error info. In this case, it goes to the dummy "-1" io stack */
 	if (retval < 0)
@@ -159,9 +158,9 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 int FileSync(File file, uint32 wait_event_info)
 {
 	pgstat_report_wait_start(wait_event_info);
-	ssize_t retval = stackSync(getStack(file));
+	int retval = stackSync(getStack(file));
 	pgstat_report_wait_end();
-	return (int)retval;
+	return retval;
 }
 
 
