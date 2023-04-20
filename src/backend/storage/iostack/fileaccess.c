@@ -57,15 +57,17 @@ File FileOpen(const char *fileName, int fileFlags)
 /*
  * Open a file using an I/O stack.
  * If an error occurs, returns -1 and sets up error information
- * so FileError(-1) will return true.
+ * so FileError(-1) will return true. Note errno is set for compatibility.
  *
  * Note we must be sure to release *all* resources if we fail to open the file.
  * It should be the same as though never opened.
  *
- * Note stackOpen has a double return value - an ioStack and a virtual file descriptor.
- * The file descriptor is returned as ioStack->openVal.
+ * Note stackOpen has a triple return value
+ *   - an ioStack
+ *   - a virtual file descriptor  ioStack->openVal
+ *   - a required block size      ioStack->blockSize
  *
- * The coding style is an attempt at "monadic" style.  (Don't ask ...)
+ * The following coding style is an attempt at "monadic" style.  (Don't ask ...)
  * In this attempt, we do repeated tests for errors, so processing essentially stops
  * once the first error is encountered. But all those repeated tests obscure the
  * simplicity of monads, so this approach should be reconsidered.
@@ -90,6 +92,10 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 	if (proto == NULL)
 		fileSetError(-1, EIOSTACK, "No I/O stack for file %s", fileName);
 
+	/* We do not support O_DIRECT */
+	if (!FileError(-1) && (PG_O_DIRECT & fileFlags) != 0)
+		fileSetError(-1, EIOSTACK, "O_DIRECT not supported for file %s", fileName);
+
 	/* Open the  prototype I/O stack */
 	if (!FileError(-1))
 	{
@@ -99,7 +105,7 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 			saveFileError(-1, ioStack);
 	}
 
-	/* Save the I/O stack in the vfd structure */
+	/* Save the opened I/O stack in the vfd structure */
 	if (!FileError(-1))
 		getVfd(file)->ioStack = ioStack;
 
@@ -157,7 +163,6 @@ int FileClose(File file)
 	/* Close the I/O stack. The low level routine will invalidate the "file" index */
 	if (!FileError(-1))
 	{
-		ioStack = getStack(file);
 		retval = stackClose(ioStack);
 		if (retval < 0)
 			saveFileError(-1, ioStack);
@@ -169,7 +174,10 @@ int FileClose(File file)
 
 	/* No matter what, release the residual stack element */
 	if (ioStack != NULL)
-	    free(ioStack);
+	{
+		free(ioStack);
+		getVfd(file)->ioStack = NULL;
+	}
 
 	debug("FileClose(done): file=%d retval=%d\n", file, retval);
 

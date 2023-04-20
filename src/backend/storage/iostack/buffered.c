@@ -256,7 +256,7 @@ static ssize_t bufferedSync(Buffered *this)
 /*
  * Truncate the file at the given offset
  */
-static ssize_t bufferedTruncate(Buffered *this, off_t offset, uint32 wait_event)
+static ssize_t bufferedTruncate(Buffered *this, off_t offset)
 {
 	debug("bufferedTruncate: offset=%lld file=%zd\n", offset, this->ioStack.openVal);
 	/* Position our buffer with the given position */

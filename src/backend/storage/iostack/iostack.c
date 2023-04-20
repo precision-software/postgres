@@ -76,13 +76,13 @@ bool stackWriteInt32(IoStack *this, uint32_t data, off_t offset)
 /*
  * Read a 4 byte int in network byte order (big endian)
  */
-bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset)
+bool stackReadInt32(IoStack *this, void *data, off_t offset)
 {
 	Byte buf[4];
 	if (stackReadAll(this, buf, 4, offset) != 4)
 		return false;
 
-	*data = buf[0] << 24 | buf[1] << 16 | buf[2] << 8 | buf[3];
+	*(uint32_t *)data = buf[0] << 24 | buf[1] << 16 | buf[2] << 8 | buf[3];
 	debug("stackReadInt32: data=%d  offset=%lld\n", *data, offset);
 	return true;
 }
@@ -154,26 +154,15 @@ bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset)
 /*
  * Read an 8 byte int in network byte order (big endian)
  */
-bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset)
+bool stackReadInt64(IoStack *this, void *data, off_t offset)
 {
 	Byte buf[8];
 	if (stackReadAll(this, buf, 8, offset) != 8)
 		return false;
 
-	*data = (uint64_t)buf[0] << 56 | (uint64_t)buf[1] << 48 | (uint64_t)buf[2] << 40 |
+	*(uint64_t*)data = (uint64_t)buf[0] << 56 | (uint64_t)buf[1] << 48 | (uint64_t)buf[2] << 40 |
 		(uint64_t)buf[3] << 32 | (uint64_t)buf[4] << 24 | (uint64_t)buf[5] << 16 |
 		(uint64_t)buf[6] << 8 | (uint64_t)buf[7];
 	debug("stackReadInt64: data=%lld  offset=%lld\n", *data, offset);
 	return true;
-}
-
-/*
- * Clear any error conditions on the stack.
- */
-void fileClearError(void *thisVoid)
-{
-	IoStack *this = thisVoid;
-	this->errNo = 0;
-	this->eof = false;
-	strcpy(this->errMsg, "");
 }

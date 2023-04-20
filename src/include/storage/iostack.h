@@ -101,9 +101,9 @@ ssize_t stackReadAll(IoStack *this, Byte *buf, size_t size, off_t offset);
 ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset);
 ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset);
 bool stackWriteInt32(IoStack *this, uint32_t data, off_t offset);
-bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset);
+bool stackReadInt32(IoStack *this, void *data, off_t offset);
 bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset);
-bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset);
+bool stackReadInt64(IoStack *this, void *data, off_t offset);
 
 /*
  * For error handling, we need an errno value which is not encountered in normal operation

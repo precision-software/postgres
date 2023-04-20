@@ -80,7 +80,7 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, int mo
 	thisStack(this)->openVal = this->file;
 
 	/* Always return a new I/O stack structure even if we fail. It contains error info. */
-	debug("vfdOpen(done): file=%d  name=%s oflags=0x%x  mode=0x%x\n", this->file, path, oflags, mode);
+	debug("vfdOpen(done): file=%d path=%s oflags=0x%x  mode=0x%x\n", this->file, path, oflags, mode);
 	return this;
 }
 
@@ -91,7 +91,7 @@ static ssize_t vfdWrite(VfdBottom *this, const Byte *buf, size_t bufSize, off_t 
 {
 	ssize_t actual = FileWrite_Internal(this->file, buf, bufSize);
 	debug("vfdWrite: file=%d  name=%s  size=%zd  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
-	return checkSystemError(this, actual, "Unable to write to file");
+	return checkSystemError(this, actual, "Unable to write to file %s", FilePathName(this->file));
 }
 
 /*
@@ -102,8 +102,9 @@ static ssize_t vfdRead(VfdBottom *this, Byte *buf, size_t bufSize, off_t offset)
 	Assert(bufSize > 0 && offset >= 0);
 
 	ssize_t actual = FileRead_Internal(this->file, buf, bufSize, offset);
+	thisStack(this)->eof = (actual == 0);
 	debug("vfdRead: file=%d  name=%s  size=%zd  offset=%lld  actual=%zd\n", this->file, getName(this->file), bufSize, offset, actual);
-	return checkSystemError(this, actual, "Unable to read from file %s", getName(this->file));
+	return checkSystemError(this, actual, "Unable to read from file %s", FilePathName(this->file));
 }
 
 /*
@@ -111,45 +112,35 @@ static ssize_t vfdRead(VfdBottom *this, Byte *buf, size_t bufSize, off_t offset)
  */
 static ssize_t vfdClose(VfdBottom *this)
 {
-	debug("vfdClose: file=%d name=%s\n", this->file, getName(this->file));
-	/* If the file is closed, mark it as a bad file descriptor */
-	if (this->file < 0)
-	{
-		errno = EBADF;
-		return checkSystemError(this, -1, "Closing a file which is alread closed");
-	}
+	debug("vfdClose: file=%d name=%s\n", this->file, FilePathName(this->file));
 
-	/* Mark this stack as closed */
+	/* Reset the file descriptor so we don't close it twice. */
 	File file = this->file;
 	this->file = -1;
-	getVfd(file)->ioStack = NULL;
 
-	/* Close the file for real. */
+	/* Close the file */
 	ssize_t retval = FileClose_Internal(file);
-
-	/* Note: We allocated ioStack in FileOpen, so we will free it in FileClose */
-	debug("vfdClose(done): file=%d  retval=%d\n", file, retval);
-	return checkSystemError(this, retval, "Unable to close file");
+	return checkSystemError(this, retval, "Unable to close file %d", file);
 }
 
 
 static ssize_t vfdSync(VfdBottom *this)
 {
 	ssize_t retval = FileSync_Internal(this->file);
-	return checkSystemError(this, retval, "Unable to sync file");
+	return checkSystemError(this, retval, "Unable to sync file %s", FilePathName(this->file));
 }
 
 static off_t vfdSize(VfdBottom *this)
 {
 	off_t offset = FileSize_Internal(this->file);
-	return checkSystemError(this, offset, "Unable to get file size");
+	return checkSystemError(this, offset, "Unable to get file size for %s", FilePathName(this->file));
 }
 
 
 static ssize_t vfdTruncate(VfdBottom *this, off_t offset)
 {
 	ssize_t retval = FileTruncate_Internal(this->file, offset);
-	return checkSystemError(this, retval, "Unable to truncate file");
+	return checkSystemError(this, retval, "Unable to truncate file %s", FilePathName(this->file));
 }
 
 

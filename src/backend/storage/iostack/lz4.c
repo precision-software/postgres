@@ -436,7 +436,7 @@ ssize_t lz4CompressTruncate(Lz4Compress *this, off_t offset)
 	/* If the offset is not aligned, then read the last block.  (TODO: only truncate on block boundary?) */
 	ssize_t actual = 0;
 	if (offset % this->blockSize != 0)
-		actual = stackReadAll(this, this->tempBuf, this->blockSize, ROUNDDOWN(offset, this->blockSize));
+		actual = stackReadAll(thisStack(this), this->tempBuf, this->blockSize, ROUNDDOWN(offset, this->blockSize));
 
 	/* Update our internal pointers so it looks like we are truncated at the beginning of the block */
 	this->lastBlock = ROUNDDOWN(offset, this->blockSize);
