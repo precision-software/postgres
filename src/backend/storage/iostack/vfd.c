@@ -2,6 +2,10 @@
  * vfd.c contains wrappers around the PostgreSql file access routines.
  * The wrappers implement the I/O stack interface, allowing the PostgreSql file
  * access routines to be used as the bottom of an I/O stack.
+ *
+ * Note we would prefer to return error messages rather than throwing errors
+ * from the low level code.
+ * TODO: convert errors to return messages in *_Internal routines. eg. FileSync_Internal.
  */
 #include <unistd.h>
 #include "postgres.h"
@@ -46,7 +50,6 @@ extern int FileSync_Internal(File file);
 extern off_t FileSize_Internal(File file);
 extern int	FileTruncate_Internal(File file, off_t offset);
 
-
 /*
  * Bottom of an I/O stack using PostgreSql's Virtual File Descriptors.
  */
@@ -76,13 +79,13 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, int mo
 	thisStack(this)->blockSize = 1;
 	thisStack(this)->openVal = this->file;
 
-	/* Always return a new I/O stack structure. It contains error info if problems occurred. */
+	/* Always return a new I/O stack structure even if we fail. It contains error info. */
 	debug("vfdOpen(done): file=%d  name=%s oflags=0x%x  mode=0x%x\n", this->file, path, oflags, mode);
 	return this;
 }
 
 /*
- * Write a random block of data to a virtual file descriptor.
+ * Write a block of data to a virtual file descriptor.
  */
 static ssize_t vfdWrite(VfdBottom *this, const Byte *buf, size_t bufSize, off_t offset)
 {
@@ -146,7 +149,7 @@ static off_t vfdSize(VfdBottom *this)
 static ssize_t vfdTruncate(VfdBottom *this, off_t offset)
 {
 	ssize_t retval = FileTruncate_Internal(this->file, offset);
-	return checkSystemError(this, retval, "Unable to truncate file") >= 0;
+	return checkSystemError(this, retval, "Unable to truncate file");
 }
 
 
@@ -162,7 +165,7 @@ IoStackInterface vfdInterface = (IoStackInterface)
 	};
 
 
-/**
+/*
  * Create a new Vfd I/O Stack.
  */
 void *vfdStackNew()
