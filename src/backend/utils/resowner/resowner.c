@@ -521,7 +521,7 @@ ResourceOwnerReleaseInternal(ResourceOwner owner,
 	{
 		/*
 		 * Abort failed buffer IO. AbortBufferIO()->TerminateBufferIO() calls
-		 * ResourceOwnerForgetBufferIOs(), so we just have to iterate till
+		 * ResourceOwnerForgetBufferIO(), so we just have to iterate till
 		 * there are none.
 		 *
 		 * Needs to be before we release buffer pins.
@@ -533,7 +533,7 @@ ResourceOwnerReleaseInternal(ResourceOwner owner,
 			Buffer		res = DatumGetBuffer(foundres);
 
 			if (isCommit)
-				elog(PANIC, "lost track of buffer IO on buffer %u", res);
+				elog(PANIC, "lost track of buffer IO on buffer %d", res);
 			AbortBufferIO(res);
 		}
 
