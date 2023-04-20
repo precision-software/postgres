@@ -7,8 +7,9 @@
  *
  *  If an I/O stack error occurs, the calling code probably won't know what to do with it.
  *  We throw an error exception and let the caller deal with it.
- *  Normal file errors are returned as -1 and the caller can use FileError(-1)
- *  to get the error code. For compatibility, errno is also set.
+ *  Normal file errors are returned as -1. We set errno for compatibility,
+ *  but the caller can use FileErrorCode(-1)
+ *  to get the error code.
  */
 
 #include "postgres.h"
@@ -58,12 +59,16 @@ File FileOpen(const char *fileName, int fileFlags)
  * If an error occurs, returns -1 and sets up error information
  * so FileError(-1) will return true.
  *
- * Note stackOpen has a double return value - a stack and a virtual file descriptor.
+ * Note we must be sure to release *all* resources if we fail to open the file.
+ * It should be the same as though never opened.
+ *
+ * Note stackOpen has a double return value - an ioStack and a virtual file descriptor.
  * The file descriptor is returned as ioStack->openVal.
  *
- * The coding style is straight through, similar to "monads".  (Don't ask ...)
- * It means we do repeated tests for errors, but think of it as statements linked by &&
- * and we stop doing work as soon as an error is encountered.
+ * The coding style is an attempt at "monadic" style.  (Don't ask ...)
+ * In this attempt, we do repeated tests for errors, so processing essentially stops
+ * once the first error is encountered. But all those repeated tests obscure the
+ * simplicity of monads, so this approach should be reconsidered.
  */
 File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
@@ -238,11 +243,18 @@ off_t FileSize(File file)
 	return size;
 }
 
+/*
+ * Some I/O stacks require a specific blcok size. This routine returns the block size
+ * in case a caller needs to know.  (eg. O_DIRECT files,  unbeffered encryption, ...)
+ */
 ssize_t FileBlockSize(File file)
 {
 	return getStack(file)->blockSize;
 }
 
+/*
+ * Truncate a file to the specified length, returning -1 on failure.
+ */
 int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
 {
 	FileClearError(file);
@@ -258,7 +270,9 @@ int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
  * Routines to emuulate C library FILE routines (fgetc, fprintf, ...)
  */
 
-/* Similar to fgetc */
+/*
+ * Similar to fgetc. Probably best if used with buffered files.
+ */
 int
 FileGetc(File file)
 {
@@ -352,9 +366,9 @@ FileTell(File file)
 	return getVfd(file)->offset;
 }
 
-/*
+/* ===================================================================
  * Error handling code.
- * These functions are similar to ferror(), but can be accessed when the file is closed or -1.
+ * These functions are similar to ferror(), but can be accessed even when the file is closed or -1.
  * This added feature allows error info to be fetched after a failed "open" or "close" call.
  */
 
@@ -399,6 +413,9 @@ const char *FileErrorMsg(File file)
 	return stackErrorMsg(errStack(file));
 }
 
+/*
+ * Get the errno associated the last file operaton.
+ */
 int FileErrorCode(File file)
 {
 	return stackErrorCode(errStack(file));
@@ -441,7 +458,7 @@ void fileSetError(File file, int errcode, const char *fmt, ...)
 
 
 
-/* TODO: the following may belong in a different file ... */
+/* TODO: the following keys may belong in a different file ... */
 /* These need to be set properly */
 static Byte *tempKey = (Byte *)"0123456789ABCDEF0123456789ABCDEF";
 static size_t tempKeyLen = 32;
@@ -451,22 +468,14 @@ static size_t permKeyLen = 32;
 /* Function to create a test stack for unit testing */
 IoStack *(*testStackNew)() = NULL;
 
-/*
- * Construct the appropriate I/O Stack.
- * This function provides flexibility in how I/O stacks are created.
- * It can look at open flags, do GLOB matching on pathnames,
- * or create different stacks if reading vs writing.
- * The current version uses special "PG_*" open flags.
- */
-
-/* Prototype stacks */
+/* Prototype stacks.*/
 static bool ioStacksInitialized = false;
 IoStack *ioStackPlain;				/* Buffered, unmodified text */
 IoStack *ioStackEncrypt;			/* Buffered and encrypted with a session key */
 IoStack *ioStackEncryptPerm;        /* Buffered and encrypted with a session key */
 IoStack *ioStackTest;				/* Stack used for unit testing */
 IoStack *ioStackRaw;				/* Unbuffered "raw" file access */
-IoStack *ioStackCompress;			/* Buffered and compressed */
+IoStack *ioStackCompress;			/* Buffered and compressed, random reads only. */
 IoStack *ioStackCompressEncrypt;	/* Compressed and encrypted with session key */
 
 
@@ -485,7 +494,6 @@ static IoStack *selectIoStack(const char *path, int oflags, int mode)
 	if (!ioStacksInitialized)
 		ioStackSetup();
 
-	/* TODO: create prototypes at beginning. Here, we just select them */
 	/* Look at oflags to determine which stack to use */
 	switch (oflags & PG_STACK_MASK)
 	{
@@ -501,7 +509,7 @@ static IoStack *selectIoStack(const char *path, int oflags, int mode)
 
 
 /*
- * Initialize the I/O stack infrastructure. Creates prototype stacks.
+ * Initialize the I/O stack infrastructure
  */
 void ioStackSetup(void)
 {
