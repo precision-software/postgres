@@ -94,7 +94,7 @@ static ssize_t vfdWrite(VfdBottom *this, const Byte *buf, size_t bufSize, off_t 
 /*
  * Read a random block of data from a virtual file descriptor.
  */
-static ssize_t vfdRead(VfdBottom *this, Byte *buf, size_t bufSize, off_t offset, uint32 wait_event_info)
+static ssize_t vfdRead(VfdBottom *this, Byte *buf, size_t bufSize, off_t offset)
 {
 	Assert(bufSize > 0 && offset >= 0);
 
@@ -122,7 +122,7 @@ static ssize_t vfdClose(VfdBottom *this)
 	getVfd(file)->ioStack = NULL;
 
 	/* Close the file for real. */
-	int retval = FileClose_Internal(file);
+	ssize_t retval = FileClose_Internal(file);
 
 	/* Note: We allocated ioStack in FileOpen, so we will free it in FileClose */
 	debug("vfdClose(done): file=%d  retval=%d\n", file, retval);
@@ -132,7 +132,7 @@ static ssize_t vfdClose(VfdBottom *this)
 
 static ssize_t vfdSync(VfdBottom *this)
 {
-	int retval = FileSync_Internal(this->file);
+	ssize_t retval = FileSync_Internal(this->file);
 	return checkSystemError(this, retval, "Unable to sync file");
 }
 
@@ -143,9 +143,9 @@ static off_t vfdSize(VfdBottom *this)
 }
 
 
-static bool vfdTruncate(VfdBottom *this, off_t offset)
+static ssize_t vfdTruncate(VfdBottom *this, off_t offset)
 {
-	int retval = FileTruncate_Internal(this->file, offset);
+	ssize_t retval = FileTruncate_Internal(this->file, offset);
 	return checkSystemError(this, retval, "Unable to truncate file") >= 0;
 }
 

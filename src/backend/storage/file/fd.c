@@ -107,6 +107,7 @@
 File PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode);
 int FileClose_Internal(File file);
 ssize_t FileRead_Internal(File file, void *buffer, size_t amount, off_t offset);
+ssize_t FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset);
 int FileSync_Internal(File file);
 off_t FileSize_Internal(File file);
 int FileClose_Internal(File file);
