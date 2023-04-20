@@ -8,12 +8,12 @@
 #include "./framework/fileFramework.h"
 #include "./framework/unitTest.h"
 
-extern IoStack *ioStackEncrypt;
+extern IoStack *ioStackRaw;
 extern void ioStackSetup(void);
 
 static IoStack *createStack(size_t blockSize)
 {
-	return ioStackEncrypt;
+	return vfdStackNew();
 }
 
 void testMain()

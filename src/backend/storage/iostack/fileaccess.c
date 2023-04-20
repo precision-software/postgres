@@ -2,10 +2,15 @@
  * fileaccess.c
  * Provides a uniform set of file access routines.
  *  - Matches existing Virtual File Descriptor routines  (FileRead, FileWrite, FileSync).
- *  - Provides additional sequential routines similer to fread/fwrite/fseek.
- *  - Uses I/O Stacks to provide raw, buffered, encrypted and compressed files.
- *  - Layered on top of existing Postgres file access routines.
+ *  - Invoke I/O Stacks to provide raw, buffered, encrypted and compressed files.
+ *  - Eventually invoke the real FileRead, FilwWrite, FileSync routines.
+ *
+ *  If an I/O stack error occurs, the calling code probably won't know what to do with it.
+ *  We throw an error exception and let the caller deal with it.
+ *  Normal file errors are returned as -1 and the caller can use FileError(-1)
+ *  to get the error code. For compatibility, errno is also set.
  */
+
 #include "postgres.h"
 
 #include <unistd.h>
@@ -30,10 +35,11 @@
 
 /* Forward References. */
 static IoStack *selectIoStack(const char *path, int oflags, int mode);
-IoStack *vfdNew();
 void ioStackSetup(void);
-bool saveFileError(File file, IoStack *ioStack);
-static inline ssize_t checkIoStackError(File file, ssize_t retval);
+void saveFileError(File file, IoStack *ioStack);
+void fileSetError(File file, int errnum, const char *fmt, ...);
+void throwIoStackError(File file);
+void fileSetError(File file, int errnum, const char *fmt, ...);
 
 /* Wrapper for backwards compatibility */
 File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
@@ -47,71 +53,123 @@ File FileOpen(const char *fileName, int fileFlags)
 	return FileOpenPerm(fileName, fileFlags, pg_file_create_mode);
 }
 
+/*
+ * Open a file using an I/O stack.
+ * If an error occurs, returns -1 and sets up error information
+ * so FileError(-1) will return true.
+ *
+ * Note stackOpen has a double return value - a stack and a virtual file descriptor.
+ * The file descriptor is returned as ioStack->openVal.
+ *
+ * The coding style is straight through, similar to "monads".  (Don't ask ...)
+ * It means we do repeated tests for errors, but think of it as statements linked by &&
+ * and we stop doing work as soon as an error is encountered.
+ */
 File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x\n", fileName, fileFlags, fileMode);
-	/* Allocate an I/O stack for this file. */
-	IoStack *proto = selectIoStack(fileName, fileFlags, fileMode);
-	if (proto == NULL)
-		return -1;
 
-	/* I/O stacks don't implement O_APPEND. We will position to FileSize instead */
+	/* We start with no resources allocated */
+	IoStack *ioStack = NULL;
+	File file = -1;
+
+	/* I/O stacks don't implement O_APPEND. We will position to FileSize later */
 	bool append = (fileFlags & O_APPEND) != 0;
 	fileFlags &= ~O_APPEND;
 
+	/* Clear any previous error information */
+	FileClearError(-1);
+
+	/* Get a prototype I/O stack for this file. */
+	IoStack *proto = selectIoStack(fileName, fileFlags, fileMode);
+	if (proto == NULL)
+		fileSetError(-1, EIOSTACK, "No I/O stack for file %s", fileName);
+
 	/* Open the  prototype I/O stack */
-	IoStack *ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
-	File file = (File)ioStack->openVal;
-	if (file < 0)
+	if (!FileError(-1))
 	{
-		saveFileError(-1, ioStack);
-		free(ioStack);
-		return checkIoStackError(-1, -1);
+		ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
+		file = (File) ioStack->openVal;
+		if (file < 0)
+			saveFileError(-1, ioStack);
 	}
 
 	/* Save the I/O stack in the vfd structure */
-	Vfd *vfdP = getVfd(file);
-	vfdP->ioStack = ioStack;
+	if (!FileError(-1))
+		getVfd(file)->ioStack = ioStack;
 
 	/* Position at end of file if appending. This only impacts WriteSeq and ReadSeq. */
-	vfdP->offset = append? FileSize(file): 0;
-	if (vfdP->offset == -1) {
+	if (!FileError(-1))
+	{
+		getVfd(file)->offset = append ? stackSize(ioStack) : 0;
 		saveFileError(-1, ioStack);
-		FileClose(file);
-		return checkIoStackError(-1, -1);
 	}
 
+    /* If we failed, release resources */
+	if (FileError(-1))
+	{
+		if (file >= 0)
+		{
+			FileClose(file);
+			file = -1;
+		}
+		else if (ioStack != NULL)
+			free(ioStack);
+	}
+
+	/* done */
+	throwIoStackError(-1);
 	return file;
 }
 
 /*
- * Close a file.
+ * Close a file. Like FileOpen(), the error information is saved in the dummy "-1" file,
+ * but it can also be accessed using the closed virtual file descriptor.
+ *
+ * Close has special error handling. If the vfd already has an error, we don't
+ * overwrite it.  This is because the error may have been set by a previous
+ * operation on the file, and we don't want to lose that information.
+ * However, the return value will always be 0 if we closed the file successfully.
  */
 int FileClose(File file)
 {
 	debug("FileClose: name=%s, file=%d  iostack=%p\n", getName(file), file, getStack(file));
-	/* Make sure we are dealing with an open file */
-	if (file < 0 || getStack(file) == NULL)
+	int retval = -1;
+    FileClearError(-1);
+
+	/* Place to save existing error information if any */
+	IoStack saveError = {0};
+
+	/* Point to the I/O stack, if any */
+	IoStack *ioStack = (file < 0) ? NULL : getStack(file);
+	if (ioStack == NULL)
+	    fileSetError(-1, EBADF, "FileClose: invalid file descriptor %d", file);
+
+	/* Save any existing error information */
+	if (!FileError(-1))
+		copyError(&saveError, -1, ioStack);
+
+	/* Close the I/O stack. The low level routine will invalidate the "file" index */
+	if (!FileError(-1))
 	{
-		errno = EBADF;
-		return -1;
+		ioStack = getStack(file);
+		retval = stackClose(ioStack);
+		if (retval < 0)
+			saveFileError(-1, ioStack);
 	}
 
-	/* Close the file.  The low level routine will invalidate the "file" index */
-	IoStack *stack = getStack(file);
-	int retval = stackClose(stack);
+	/* However, if the file already had an error, we want to keep it instead */
+	if (stackError(&saveError))
+		saveFileError(-1, &saveError);
 
-	/* If failed, save the error info. In this case, it goes to the dummy "-1" io stack */
-	if (retval < 0)
-		saveFileError(-1, stack);
-	else
-		FileClearError(-1);
+	/* No matter what, release the residual stack element */
+	if (ioStack != NULL)
+	    free(ioStack);
 
-	/* No matter what, release the memory on Close */
-	free(stack);  /* TODO: do we need to restore errno? */
 	debug("FileClose(done): file=%d retval=%d\n", file, retval);
 
-	return (int)checkIoStackError(-1, retval);
+	throwIoStackError(-1);
+	return retval;
 }
 
 
@@ -121,6 +179,7 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 	Assert(offset >= 0);
 	Assert((ssize_t)amount > 0);
 
+	FileClearError(file);
 	IoStack *stack = getStack(file);
 
 	/* Read the data as requested */
@@ -133,6 +192,7 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 		getVfd(file)->offset = offset + actual;
 
 	debug("FileRead(done): file=%d  name=%s  actual=%zd\n", file, getName(file), actual);
+	throwIoStackError(file);
 	return actual;
 }
 
@@ -141,6 +201,8 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 {
 	debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld\n", getName(file), file, amount, offset);
 	Assert(offset >= 0 && (ssize_t)amount > 0);
+
+	FileClearError(file);
 
 	/* Write the data as requested */
 	pgstat_report_wait_start(wait_event_info);
@@ -152,22 +214,27 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 		getVfd(file)->offset = offset + actual;
 
 	debug("FileWrite(done): file=%d  name=%s  actual=%zd\n", file, getName(file), actual);
+	throwIoStackError(file);
 	return actual;
 }
 
 int FileSync(File file, uint32 wait_event_info)
 {
+	FileClearError(file);
 	pgstat_report_wait_start(wait_event_info);
 	int retval = stackSync(getStack(file));
 	pgstat_report_wait_end();
+	throwIoStackError(file);
 	return retval;
 }
 
 
 off_t FileSize(File file)
 {
+	FileClearError(file);
 	off_t size = stackSize(getStack(file));
 	debug("FileSize: name=%s file=%d  size=%lld\n", getName(file), file, size);
+	throwIoStackError(file);
 	return size;
 }
 
@@ -178,9 +245,11 @@ ssize_t FileBlockSize(File file)
 
 int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
 {
+	FileClearError(file);
 	pgstat_report_wait_start(wait_event_info);
 	ssize_t retval = stackTruncate(getStack(file), offset);
 	pgstat_report_wait_end();
+	throwIoStackError(file);
 	return (int)retval;
 }
 
@@ -245,36 +314,22 @@ int FilePuts(File file, const char *string)
 	return FileWriteSeq(file, string, strlen(string), WAIT_EVENT_NONE);
 }
 
-
-/* If there was an I/O stack error, throw the error exception.  Regular file I/O errors will return normally */
-static inline ssize_t checkIoStackError(File file, ssize_t retval)
-{
-	if (retval < 0 && FileErrorCode(file) == EIOSTACK)
-		ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR), errmsg("I/O Error for %s: %s", FilePathName(file), FileErrorMsg(file)));
-
-	return retval;
-}
-
 /*
  * Read sequentially from the file.
  */
 ssize_t
-FileReadSeq(File file, void *buffer, size_t amount,
-			uint32 wait_event_info)
+FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info)
 {
-	ssize_t retval = FileRead(file, buffer, amount, getVfd(file)->offset, wait_event_info);
-	return checkIoStackError(file, retval);
+	return FileRead(file, buffer, amount, getVfd(file)->offset, wait_event_info);
 }
 
 /*
  * Write sequentially to the file.
  */
 ssize_t
-FileWriteSeq(File file, const void *buffer, size_t amount,
-			 uint32 wait_event_info)
+FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info)
 {
-	ssize_t retval = FileWrite(file, buffer, amount, getVfd(file)->offset, wait_event_info);
-	return checkIoStackError(file, retval);
+	return FileWrite(file, buffer, amount, getVfd(file)->offset, wait_event_info);
 }
 
 /*
@@ -299,9 +354,8 @@ FileTell(File file)
 
 /*
  * Error handling code.
- * These functions are similar to ferror(), but can be accessed even when the file index is -1.
- * This added feature allows error info to be fetched after a failed "open" call.
- * TODO:; consider inlining some of these.
+ * These functions are similar to ferror(), but can be accessed when the file is closed or -1.
+ * This added feature allows error info to be fetched after a failed "open" or "close" call.
  */
 
 /*
@@ -310,11 +364,11 @@ FileTell(File file)
  */
 static inline IoStack *errStack(File file)
 {
-	/* Static, dummy I/O stack when file == -1 */
+	/* dummy I/O stack when file == -1 */
 	static IoStack staticIoStack = {0};
 
 	/* Return the dummy if index is -1, else return the real stack */
-	if (file == -1)
+	if (file < 0 || getVfd(file)->ioStack == NULL)
 		return &staticIoStack;
 	else
 		return getStack(file);
@@ -349,15 +403,42 @@ int FileErrorCode(File file)
 {
 	return stackErrorCode(errStack(file));
 }
+
 /*
  * Helper function to save any errors from the I/O stack to the virtual file index.
  */
-bool saveFileError(File file, IoStack *ioStack)
+void saveFileError(File file, IoStack *ioStack)
 {
 	/* Copy the error, or clear the error, depending on ioStack */
 	copyError(errStack(file), -1, ioStack);
-	return stackError(ioStack);
 }
+
+/*
+ * Throw an error if an I/O stack error occurred on the file.
+ * Since callers don't know what to do with non-system errors,
+ * this is probably the best way to handle them.
+ * As a side effect, sets errno.
+ */
+void throwIoStackError(File file)
+{
+	if (FileErrorCode(file) == EIOSTACK)
+	{
+		const char *path = (file < 0 || getVfd(file)->fileName == NULL) ? "unknown" : FilePathName(file);
+		ereport(ERROR,
+				errcode(ERRCODE_INTERNAL_ERROR),
+				errmsg("I/O Error for %s: %s", path, FileErrorMsg(file)));
+	}
+	errno = FileErrorCode(file);
+}
+
+void fileSetError(File file, int errcode, const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	setError(errStack(file), errcode, fmt, args);
+	va_end(args);
+}
+
 
 
 /* TODO: the following may belong in a different file ... */
@@ -372,7 +453,7 @@ IoStack *(*testStackNew)() = NULL;
 
 /*
  * Construct the appropriate I/O Stack.
- * This function provides flexibility in now I/O stacks are created.
+ * This function provides flexibility in how I/O stacks are created.
  * It can look at open flags, do GLOB matching on pathnames,
  * or create different stacks if reading vs writing.
  * The current version uses special "PG_*" open flags.
@@ -440,20 +521,4 @@ void ioStackSetup(void)
 																			vfdStackNew()))));
 	/* Note we are now initialized */
 	ioStacksInitialized = true;
-}
-
-
-bool endsWith(const char * str, const char * suffix)
-{
-	size_t strLen = strlen(str);
-	size_t suffixLen = strlen(suffix);
-
-	return
-		strLen >= suffixLen &&
-		strcmp(str + strLen - suffixLen, suffix) == 0;
-}
-
-bool startsWith(const char *str, const char *prefix)
-{
-	return strncmp(prefix, str, strlen(prefix)) == 0;
 }

@@ -1,4 +1,8 @@
-
+/*
+ * vfd.c contains wrappers around the PostgreSql file access routines.
+ * The wrappers implement the I/O stack interface, allowing the PostgreSql file
+ * access routines to be used as the bottom of an I/O stack.
+ */
 #include <unistd.h>
 #include "postgres.h"
 

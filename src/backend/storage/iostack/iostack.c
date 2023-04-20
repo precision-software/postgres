@@ -1,9 +1,14 @@
-/**/
+/*
+ * iostack.c implements helper functions for supporting I/O stacks.
+ */
 #include <stdlib.h>
 #include "storage/iostack_internal.h"
 #include "packed.h"
 
 
+/*
+ * Write an entire buffer. Returns the number of bytes written or -1 on error.
+ */
 ssize_t stackWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset)
 {
 	/* Repeat until the entire buffer is written (or error) */
@@ -24,6 +29,9 @@ ssize_t stackWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset)
 }
 
 
+/*
+ * Read an entire buffer. Returns the number of bytes read or -1 on error.
+ */
 ssize_t stackReadAll(IoStack *this, Byte *buf, size_t size, off_t offset)
 {
 	/* Repeat until the entire buffer is read (or EOF or error) */
@@ -79,7 +87,10 @@ bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset)
 	return true;
 }
 
-
+/*
+ * Write a sized record (size followed by data).
+ * Returns the number of data bytes written or -1 on error.
+ */
 ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset)
 {
 	Assert(size <= MAX_BLOCK_SIZE);
@@ -121,7 +132,9 @@ ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset)
 	return actual;
 }
 
-
+/*
+ * Write a 8 byte int in network byte order (big endian)
+ */
 bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset)
 {
 	debug("stackWriteInt64: data=%lld  offset=%lld\n", data, offset);
@@ -154,25 +167,13 @@ bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset)
 	return true;
 }
 
+/*
+ * Clear any error conditions on the stack.
+ */
 void fileClearError(void *thisVoid)
 {
 	IoStack *this = thisVoid;
 	this->errNo = 0;
 	this->eof = false;
 	strcpy(this->errMsg, "");
-}
-
-bool stackErrorInfo(void *thisVoid, int *errNo, char *errMsg)
-{
-	IoStack *this = thisVoid;
-	*errNo = errno = this->errNo;
-	strcpy(errMsg, this->errMsg);
-	return stackError(this);
-}
-
-
-int stackErrorNo(void *thisVoid)
-{
-	IoStack *this = thisVoid;
-	return this->errNo;
 }

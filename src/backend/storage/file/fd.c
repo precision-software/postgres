@@ -103,6 +103,16 @@
 #include "utils/resowner_private.h"
 #include "utils/varlena.h"
 
+/* Function prototypes for "Internal" functions (internal functions shared with vfd.c) */
+File PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode);
+int FileClose_Internal(File file);
+ssize_t FileRead_Internal(File file, void *buffer, size_t amount, off_t offset);
+int FileSync_Internal(File file);
+off_t FileSize_Internal(File file);
+int FileClose_Internal(File file);
+int FileTruncate_Internal(File file, off_t offset);
+
+
 /* Define PG_FLUSH_DATA_WORKS if we have an implementation for pg_flush_data */
 #if defined(HAVE_SYNC_FILE_RANGE)
 #define PG_FLUSH_DATA_WORKS 1
