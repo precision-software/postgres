@@ -83,14 +83,17 @@ might as well just use an encrypted file system. There also doesn't seem
 to be a way to prevent key extraction if someone has read permission on
 postgres process memory.
 
+(Additionally, it is possible to "replay" an
+old encrypted page by copying it on top of a newer one.)
+
 Initialization Vector
 ---------------------
 
 Nonce means "number used once". An Initialization Vector (IV) is a
-specific type of nonce. That is, unique but not necessarily random or
-secret, as specified by the NIST
+nonce which is used to initialize an encryption primitive. For AES encryption,
+a nonce must be unique but not necessarily random or secret. The NIST recomends two
+methods for generating unique IVs. See [NIST SP 800-38A]
 (https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38a.pdf).
-To generate unique IVs, the NIST recommends two methods:
 
 	The first method is to apply the forward cipher function, under
 	the same key that is used for the encryption of the plaintext,
@@ -100,29 +103,40 @@ To generate unique IVs, the NIST recommends two methods:
 	number. The second method is to generate a random data block
 	using a FIPS-approved random number generator.
 
-We will use the first method to generate IVs. That is, select nonce
-carefully and use a cipher with the key to make it unique enough to use
-as an IV. The nonce selection for buffer encryption and WAL encryption
+We use a variation of the first method to generate IVs. That is,
+we select a nonce carefully to make it unique enough to use as an IV.
+The nonce selection for buffer encryption and WAL encryption
 are described below.
 
-If the IV was used more than once with the same key (and we only use one
+If an IV is used more than once with the same key (and we only use one
 data encryption key), changes in the unencrypted data would be visible
 in the encrypted data.
 
 IV for Heap/Index Encryption
 - - - - - - - - - - - - - -
+Unlike sequential streams, heaps and indexes write multiple versions
+of the same page. To ensure each page update has a unique IV, we
+combine the page number with a version number to generate a unique IV.
 
-To create the 16-byte IV needed by AES for each page version, we will
-use the page LSN (8 bytes) and page number (4 bytes).  In the remaining
-four bytes, one bit will be used to indicate if the LSN is WAL (real) or
-fake (see below). The LSN is ideal for use in the IV because it is
-always increasing, and is changed every time a page is updated.  The
-same LSN is never used for two relations with different page contents.
+The page number is a 32 bit integer, assigned sequentially to each page.
 
-However, the same LSN can be used in multiple pages in the same relation
---- this can happen when a heap update expires an old tuple and adds a
-new tuple to another page.  By adding the page number to the IV, we keep
-the IV unique.
+The version number is based on the page LSN (64 bits). The LSN is ideal
+for use as a version number because it changes every time a page is updated.
+As described below, pages which do not have LSNs are assigned a "fake" LSN.
+We add one extra flag bit to distinguish between real and fake LSNs. In total,
+the version number is 65 bits
+
+Note a given LSN can apply to multiple pages. For example, a heap update
+may expire an old tuple on one page and add a new tuple to another page. By
+including both the page number and the version number,
+we keep the IV unique even when the same LSN is used on multiple pages.
+
+The 16-byte IV consists of the 65-bit version number concatenated with the
+32-bit page number. The remaining 31 bits are set to zero and
+reserved for future use.
+
+(Question: AES-GCM uses a 12-byte IV internally. Is there a problem?)
+(Question: What about AES-GCM-SIV instead of version number?)
 
 CREATE DATABASE can be run with two different strategies: FILE_COPY or
 WAL_LOG.  If using WAL_LOG, the heap/index files are automatically
