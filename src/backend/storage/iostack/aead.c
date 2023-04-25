@@ -27,9 +27,9 @@ static off_t aeadSize(Aead *this);
 static bool openSSLError(int code);
 void generateNonce(Byte *nonce, Byte *iv, size_t ivSize, size_t seqNr);
 ssize_t aead_encrypt(Aead *this, const Byte *plainBlock, size_t plainSize, Byte *header,
-                  size_t headerSize, Byte *cipherBlock, size_t cipherSize, Byte *tag, ssize_t blockNr);
+                  size_t headerSize, Byte *cipherBlock, size_t cipherSize, Byte *tag, size_t blockNr);
 ssize_t aead_decrypt(Aead *this, Byte *plainText, size_t plainSize, Byte *header,
-                  size_t headerSize, Byte *cipherText, size_t cipherSize, Byte *tag, ssize_t blockNr);
+                  size_t headerSize, Byte *cipherText, size_t cipherSize, Byte *tag, size_t blockNr);
 bool aeadCipherSetup(Aead *this, char *cipherName);
 bool aeadConfigure(Aead *this);
 size_t paddingSize(Aead *this, size_t suggestedSize);
@@ -182,14 +182,13 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
     if (actual <= 0)
         return copyNextError(this, actual);
 
-    /* Extract the tag from the end of our buffer. */
-    Byte tag[EVP_MAX_MD_SIZE];
-    size_t cipherTextSize = actual - this->tagSize;
-    memcpy(tag, this->cryptBuf + cipherTextSize, this->tagSize);
+    /* Point to the tag at the end of our buffer. */
+	size_t cipherBlockSize = actual - this->tagSize;
+	Byte *tag = this->cryptBuf + cipherBlockSize;
 
     /* Decrypt the ciphertext from our buffer into our caller's buffer */
-	ssize_t blockNr = (offset / this->plainSize); /* TODO: add as parameter to aead_decrypt? */
-    ssize_t plainSize = aead_decrypt(this, buf, size, NULL, 0, this->cryptBuf, cipherTextSize, tag, blockNr);
+	size_t blockNr = (offset / this->plainSize);
+    ssize_t plainSize = aead_decrypt(this, buf, size, NULL, 0, this->cryptBuf, cipherBlockSize, tag, blockNr);
     if (plainSize < 0)
         return plainSize;
 
@@ -429,6 +428,11 @@ IoStackInterface aeadInterface = {
  */
 void *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keySize, void *next)
 {
+	/* Pick a default cipher name */
+	if (cipherName == NULL)
+		cipherName = "AES-256-GCM-SIV";
+
+	/* Create the aead structure */
     Aead *this = malloc(sizeof(Aead));
 	*this = (Aead) {
 		.suggestedSize = suggestedSize,
@@ -593,7 +597,7 @@ bool aeadHeaderWrite(Aead *this)
     Byte emptyCiphertext[EVP_MAX_BLOCK_LENGTH];
     Byte emptyPlaintext[0];
     Byte tag[EVP_MAX_MD_SIZE];
-    size_t emptyCipherSize = aead_encrypt(this, emptyPlaintext, 0, header, bp-header,
+    ssize_t emptyCipherSize = aead_encrypt(this, emptyPlaintext, 0, header, bp-header,
 			 emptyCiphertext, sizeof(emptyCiphertext), tag, HEADER_SEQUENCE_NUMBER);
     if (emptyCipherSize != paddingSize(this, 0) || emptyCipherSize > 256)
         return setIoStackError(this, -1, "Size of cipher padding for empty record was miscalculated");
@@ -638,7 +642,7 @@ bool aeadCipherSetup(Aead *this, char *cipherName)
     /* Lookup cipher by name. */
     this->cipher = EVP_CIPHER_fetch(NULL, this->cipherName, NULL);
     if (this->cipher == NULL)
-        return setIoStackError(this, -1, "Encryption problem - cipher name %w not recognized", this->cipherName);
+        return setIoStackError(this, false, "Encryption problem - cipher name %s not recognized", this->cipherName);
 
     /* Verify cipher is an AEAD cipher */
     /* TODO: should be possible */
@@ -646,7 +650,7 @@ bool aeadCipherSetup(Aead *this, char *cipherName)
     /* Get the properties of the selected cipher */
     this->ivSize = EVP_CIPHER_iv_length(this->cipher);
     if (this->keySize != EVP_CIPHER_key_length(this->cipher))
-        return setIoStackError(this, -1, "Cipher key is the wrong size");
+        return setIoStackError(this, false, "Cipher key is the wrong size");
     this->cipherBlockSize = EVP_CIPHER_block_size(this->cipher);
     this->hasPadding = (this->cipherBlockSize != 1);
     this->tagSize = 16;  /* TODO: EVP_CIPHER_CTX_get_tag_length(this->ctx); But only after initialized. */
@@ -656,12 +660,12 @@ bool aeadCipherSetup(Aead *this, char *cipherName)
 
 
 /*
- * Calculate how much padding is added when encrypting a record.
+ * Calculate how much padding is added when encrypting a block.
  */
-size_t paddingSize(Aead *this, size_t recordSize)
+size_t paddingSize(Aead *this, size_t blockSize)
 {
     return (this->hasPadding)
-       ? this->cipherBlockSize - (recordSize % this->cipherBlockSize)
+       ? this->cipherBlockSize - (blockSize % this->cipherBlockSize)
        : 0;
 }
 
@@ -684,7 +688,7 @@ aead_encrypt(Aead *this,
              const Byte *plainText, size_t plainSize,
              Byte *header, size_t headerSize,
              Byte *cipherText, size_t cipherSize,
-             Byte *tag, ssize_t blockNr)
+             Byte *tag, size_t blockNr)
 {
 
     //debug("Encrypt: plainText='%.*s' plainSize=%zd  cipher=%s\n", (int)sizeMin(plainSize,64), plainText, plainSize, this->cipherName);
@@ -694,7 +698,7 @@ aead_encrypt(Aead *this,
     /* Reinitialize the encryption context to start a new record */
     EVP_CIPHER_CTX_reset(this->ctx);
 
-    /* Generate nonce by XOR'ing the initialization vector with the sequence number */
+    /* Generate nonce by XOR'ing the initialization vector with the block number */
     Byte nonce[EVP_MAX_IV_LENGTH];
     generateNonce(nonce, this->iv, this->ivSize, blockNr);
     debug("Encrypt: iv=%s  blockNr=%zd  nonce=%s  key=%s\n",
@@ -753,7 +757,7 @@ aead_decrypt(Aead *this,
              Byte *plainText, size_t plainSize,
              Byte *header, size_t headerSize,
              Byte *cipherText, size_t cipherSize,
-             Byte *tag, ssize_t blockNr)
+             Byte *tag, size_t blockNr)
 {
     debug("Decrypt:  cryptSize=%zd  cipher=%s  cipherText=%.128s \n", cipherSize, this->cipherName,  asHex(cipherText, cipherSize));
 	debug("    headerSize=%zd  header=%s\n", headerSize, asHex(header, headerSize));

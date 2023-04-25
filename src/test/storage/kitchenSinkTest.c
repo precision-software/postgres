@@ -13,7 +13,7 @@ static IoStack *createStack(size_t blockSize)
 	return 	bufferedNew(1,
 				lz4CompressNew(16*1024,
 					bufferedNew(16*1024,
-						aeadNew("AES-256-GCM", blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32,
+						aeadNew(NULL, blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32,
 							vfdStackNew())),
 					 bufferedNew(16*1024,
 						aeadNew("AES-256-GCM", blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32,
