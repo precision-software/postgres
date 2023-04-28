@@ -25,7 +25,7 @@ typedef struct Aead Aead;
 /* Forward references */
 static off_t aeadSize(Aead *this);
 static bool openSSLError(int code);
-void generateNonce(Byte *nonce, Byte *iv, size_t ivSize, size_t seqNr);
+void generateIV(Byte *iv, Byte *nonce, size_t ivSize, size_t seqNr);
 ssize_t aead_encrypt(Aead *this, const Byte *plainBlock, size_t plainSize, Byte *header,
                   size_t headerSize, Byte *cipherBlock, size_t cipherSize, Byte *tag, size_t blockNr);
 ssize_t aead_decrypt(Aead *this, Byte *plainText, size_t plainSize, Byte *header,
@@ -64,7 +64,7 @@ struct Aead
     size_t cipherBlockSize;      /* Size of the cipher block. (typically 16 bytes for AES) */
     size_t tagSize;              /* Size of the MAC tag to authenticate the encrypted block. */
     bool hasPadding;             /* Whether cipher block padding is added to the encrypted blocks */
-    Byte iv[EVP_MAX_IV_LENGTH];  /* The initialization vector for the sequence of blocks. */
+    Byte fileNonce[EVP_MAX_IV_LENGTH];  /* The random nonce used to generate IVs for the entire file. */
     EVP_CIPHER *cipher;          /* The libcrypto cipher structure */
     EVP_CIPHER_CTX *ctx;         /* libcrypto context. */
 
@@ -190,7 +190,7 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
 	size_t blockNr = (offset / this->plainSize);
     ssize_t plainSize = aead_decrypt(this, buf, size, NULL, 0, this->cryptBuf, cipherBlockSize, tag, blockNr);
     if (plainSize < 0)
-        return plainSize;
+        return -1;
 
 	/* Track our position for EOF handling */
     this->sizeConfirmed |= (plainSize < this->plainSize);
@@ -226,7 +226,9 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
     Byte tag[EVP_MAX_MD_SIZE];
     size_t plainSize = MIN(size, this->plainSize);
 	ssize_t blockNr = offset / this->plainSize;
-    size_t cipherSize = aead_encrypt(this, buf, plainSize, NULL, 0, this->cryptBuf, this->cryptSize - this->tagSize, tag, blockNr);
+    ssize_t cipherSize = aead_encrypt(this, buf, plainSize, NULL, 0, this->cryptBuf, this->cryptSize - this->tagSize, tag, blockNr);
+	if (cipherSize < 0)
+		return -1;
 
     /* Append the tag to the encrypted data */
     memcpy(this->cryptBuf + cipherSize, tag, this->tagSize);
@@ -524,9 +526,9 @@ bool aeadHeaderRead(Aead *this)
 
     /* Get the initialization vector */
     this->ivSize = unpack1(&bp, end);
-    if (this->ivSize > sizeof(this->iv))
-        return setIoStackError(this, -1, "Initialization vector size (%zd) exceeeds %zd", this->ivSize, sizeof(this->iv));
-    unpackBytes(&bp, end, this->iv, this->ivSize);
+    if (this->ivSize > sizeof(this->fileNonce))
+        return setIoStackError(this, -1, "Initialization vector size (%zd) exceeeds %zd", this->ivSize, sizeof(this->fileNonce));
+    unpackBytes(&bp, end, this->fileNonce, this->ivSize);
 
     /* Get the empty cipher text block */
     Byte emptyBlock[EVP_MAX_BLOCK_LENGTH];
@@ -570,7 +572,7 @@ bool aeadHeaderWrite(Aead *this)
 		return false;
 
     /* Generate an initialization vector. */
-    RAND_bytes(this->iv, (int)this->ivSize);
+    RAND_bytes(this->fileNonce, (int)this->ivSize);
 
     /* Declare a local buffer to hold the header we're creating */
     Byte header[MAX_AEAD_HEADER_SIZE];
@@ -587,7 +589,7 @@ bool aeadHeaderWrite(Aead *this)
 
     /* Initialization vector */
     pack1(&bp, end, this->ivSize);
-    packBytes(&bp, end, this->iv, this->ivSize);
+    packBytes(&bp, end, this->fileNonce, this->ivSize);
 
     /* Verify we haven't overflowed our buffer. */
     if (bp > end)
@@ -629,11 +631,6 @@ bool aeadHeaderWrite(Aead *this)
  */
 bool aeadCipherSetup(Aead *this, char *cipherName)
 {
-    /* Save the cipher name. The name must be an exact match to a libcrypto name. */
-    /* TODO KLUDGE: The cipher name is already in this->cipherName. Don't copy if already there ... FIX IT!  */
-    if (this->cipherName != cipherName) /* comparing pointers */
-        strlcpy(this->cipherName, cipherName, sizeof(this->cipherName));
-
     /* Create an OpenSSL cipher context. */
     this->ctx = EVP_CIPHER_CTX_new();
 	if (this->ctx == NULL)
@@ -643,9 +640,6 @@ bool aeadCipherSetup(Aead *this, char *cipherName)
     this->cipher = EVP_CIPHER_fetch(NULL, this->cipherName, NULL);
     if (this->cipher == NULL)
         return setIoStackError(this, false, "Encryption problem - cipher name %s not recognized", this->cipherName);
-
-    /* Verify cipher is an AEAD cipher */
-    /* TODO: should be possible */
 
     /* Get the properties of the selected cipher */
     this->ivSize = EVP_CIPHER_iv_length(this->cipher);
@@ -698,14 +692,14 @@ aead_encrypt(Aead *this,
     /* Reinitialize the encryption context to start a new record */
     EVP_CIPHER_CTX_reset(this->ctx);
 
-    /* Generate nonce by XOR'ing the initialization vector with the block number */
-    Byte nonce[EVP_MAX_IV_LENGTH];
-    generateNonce(nonce, this->iv, this->ivSize, blockNr);
-    debug("Encrypt: iv=%s  blockNr=%zd  nonce=%s  key=%s\n",
-          asHex(this->iv, this->ivSize), blockNr, asHex(nonce, this->ivSize), asHex(this->key, this->keySize));
+    /* Generate IV by XOR'ing the fil's nonce with the block number */
+    Byte iv[EVP_MAX_IV_LENGTH];
+	generateIV(iv, this->fileNonce, this->ivSize, blockNr);
+    debug("Encrypt: nonce=%s  blockNr=%zd  iv=%s  key=%s\n",
+		  asHex(this->fileNonce, this->ivSize), blockNr, asHex(iv, this->ivSize), asHex(this->key, this->keySize));
 
     /* Configure the cipher with the key and nonce */
-    if (!EVP_CipherInit_ex2(this->ctx, this->cipher, this->key, nonce, 1, NULL))
+    if (!EVP_CipherInit_ex2(this->ctx, this->cipher, this->key, iv, 1, NULL))
         return setOpenSSLError(this, -1);
 
     /* Include the header, if any, in the digest */
@@ -713,7 +707,7 @@ aead_encrypt(Aead *this,
     {
         int zero = 0;
         if (!EVP_CipherUpdate(this->ctx, NULL, &zero, header, (int)headerSize))
-            return setOpenSSLError(this, false);
+            return setOpenSSLError(this, -1);
     }
 
     /* Encrypt the plaintext if any. */
@@ -766,9 +760,9 @@ aead_decrypt(Aead *this,
 
     /* Generate nonce by XOR'ing the initialization vector with the sequence number */
     Byte nonce[EVP_MAX_IV_LENGTH];
-    generateNonce(nonce, this->iv, this->ivSize, blockNr);
+	generateIV(nonce, this->fileNonce, this->ivSize, blockNr);
     debug("Decrypt: iv=%s  blockNr=%zd  nonce=%s  key=%s  tag=%s\n",
-          asHex(this->iv, this->ivSize), blockNr, asHex(nonce, this->ivSize), asHex(this->key, this->keySize), asHex(tag, this->tagSize));
+		  asHex(this->fileNonce, this->ivSize), blockNr, asHex(nonce, this->ivSize), asHex(this->key, this->keySize), asHex(tag, this->tagSize));
 
     /* Configure the cipher with key and initialization vector */
     if (!EVP_CipherInit_ex2(this->ctx, this->cipher, this->key, nonce, 0, NULL))
@@ -816,18 +810,19 @@ aead_decrypt(Aead *this,
  *  - process the sequence number in network (big endian) order.
  *  - XOR the IV and sequence bytes to create the nonce.
  */
-void generateNonce(Byte *nonce, Byte *iv, size_t ivSize, size_t seqNr)
+void generateIV(Byte *iv, Byte *nonce, size_t ivSize, size_t seqNr)
 {
     /* Starting at the right, create the nonce moving left one byte at a time */
-    Byte *nonceP = nonce + ivSize;
     Byte *ivP = iv + ivSize;
-    while (nonceP > nonce)
+    Byte *nonceP = nonce + ivSize;
+    while (ivP > iv)
     {
         /* Move the pointers leftward in unison */
-        nonceP--; ivP--;
+        ivP--; nonceP--;
+
 
         /* Create the nonce byte by XOR'ing sequence number with IV. */
-        *nonceP = (Byte)seqNr ^ *ivP;
+        *ivP = (Byte)seqNr ^ *nonceP;
 
         /* get next higher byte of the sequence number, rolling off to zero. */
         seqNr = seqNr >> 8;
