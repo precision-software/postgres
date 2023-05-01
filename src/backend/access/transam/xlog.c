@@ -469,9 +469,11 @@ typedef struct XLogCtlData
 
 	XLogSegNo	lastRemovedSegNo;	/* latest removed/recycled XLOG segment */
 
-	/* Fake LSN counter, for unlogged relations. Protected by ulsn_lck. */
-	XLogRecPtr	unloggedLSN;
-	slock_t		ulsn_lck;
+	/* Fake LSN counters for unlogged relations. Protected by ulsn_lck. */
+	XLogRecPtr  temporaryLSN;      /* current unlogged LSN for temporary files */
+	XLogRecPtr	unloggedLSN;       /* current unlogged LSN for permanent files */
+	XLogRecPtr  recoveryLSN;       /* unlogged LSN after recovery */
+	slock_t		ulsn_lck;          /* locks temporaryLSN, unloggedLSN, recoveryLSN */
 
 	/* Time and LSN of last xlog segment switch. Protected by WALWriteLock. */
 	pg_time_t	lastSegSwitchTime;
@@ -4207,20 +4209,57 @@ DataChecksumsEnabled(void)
  * Returns a fake LSN for unlogged relations.
  *
  * Each call generates an LSN that is greater than any previous value
- * returned. The current counter value is saved and restored across clean
- * shutdowns, but like unlogged relations, does not survive a crash. This can
- * be used in lieu of real LSN values returned by XLogInsert, if you need an
- * LSN-like increasing sequence of numbers without writing any WAL.
+ * returned. The counter value is saved and restored across shutdowns
+ * and crashes.
+ *
+ * To keep overhead low and support crash recovery, we reserve a block
+ * of unlogged LSNs. The reserved LSNs are lost if a crash occurs,
+ * but given the 64-bit pointer, this isn't a significant loss.
  */
+static const size_t toBeReserved = 16*1024*1024;
+
+
 XLogRecPtr
 GetFakeLSNForUnloggedRel(void)
 {
 	XLogRecPtr	nextUnloggedLSN;
+	bool available;
 
-	/* increment the unloggedLSN counter, need SpinLock */
-	SpinLockAcquire(&XLogCtl->ulsn_lck);
-	nextUnloggedLSN = XLogCtl->unloggedLSN++;
-	SpinLockRelease(&XLogCtl->ulsn_lck);
+	/* Repeat until we succeed in getting an available, unlogged LSN */
+	while (true)
+	{
+
+		/* increment the unloggedLSN counter if more available. */
+		SpinLockAcquire(&XLogCtl->ulsn_lck);
+		available = XLogCtl->unloggedLSN < XLogCtl->recoveryLSN;
+		if (available)
+			nextUnloggedLSN = XLogCtl->unloggedLSN++;
+		SpinLockRelease(&XLogCtl->ulsn_lck);
+
+		/* If we succeeded, then we're done */
+		if (available)
+			break;
+
+		/* Lock the Control File */
+		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+
+		/* If LSNs are still unavailable, ... */
+		SpinLockAcquire(&XLogCtl->ulsn_lck);
+		available = XLogCtl->unloggedLSN < XLogCtl->recoveryLSN;
+		if (!available)
+		{
+			/* Reserve additional LSNs in the Control file */
+			ControlFile->unloggedLSN = XLogCtl->recoveryLSN + toBeReserved;
+			SpinLockRelease(&XLogCtl->ulsn_lck);
+			UpdateControlFile();
+			SpinLockAcquire(&XLogCtl->ulsn_lck);
+
+			/* Once the control file is updated, make the reserved LSNs available */
+			XLogCtl->recoveryLSN  = ControlFile->unloggedLSN;
+		}
+		SpinLockRelease(&XLogCtl->ulsn_lck);
+		LWLockRelease(ControlFileLock);
+	}
 
 	return nextUnloggedLSN;
 }
@@ -5235,14 +5274,14 @@ StartupXLOG(void)
 	StartupReplicationOrigin();
 
 	/*
-	 * Initialize unlogged LSN. On a clean shutdown, it's restored from the
-	 * control file. On recovery, all unlogged relations are blown away, so
-	 * the unlogged LSN counter can be reset too.
+	 * Restore the unlogged LSN from the control file.
 	 */
-	if (ControlFile->state == DB_SHUTDOWNED)
-		XLogCtl->unloggedLSN = ControlFile->unloggedLSN;
-	else
-		XLogCtl->unloggedLSN = FirstNormalUnloggedLSN;
+	XLogCtl->unloggedLSN = ControlFile->unloggedLSN;
+
+	/*
+	 * Start a new Temporary LSN sequence.
+	 */
+	XLogCtl->temporaryLSN = FirstNormalUnloggedLSN;
 
 	/*
 	 * Copy any missing timeline history files between 'now' and the recovery
@@ -6780,12 +6819,16 @@ CreateCheckPoint(int flags)
 	ControlFile->minRecoveryPointTLI = 0;
 
 	/*
-	 * Persist unloggedLSN value. It's reset on crash recovery, so this goes
-	 * unused on non-shutdown checkpoints, but seems useful to store it always
-	 * for debugging purposes.
+	 * Persist unloggedLSN value. If we are up and running,
+	 * persist the reserved value so we will start there after
+	 * recovery. If shutting down, persist the current value
+	 * so we don't waste LSNs unnecessarily.
 	 */
 	SpinLockAcquire(&XLogCtl->ulsn_lck);
-	ControlFile->unloggedLSN = XLogCtl->unloggedLSN;
+	if (shutdown)
+	    ControlFile->unloggedLSN = XLogCtl->unloggedLSN;
+	else
+		ControlFile->unloggedLSN = XLogCtl->recoveryLSN;
 	SpinLockRelease(&XLogCtl->ulsn_lck);
 
 	UpdateControlFile();
