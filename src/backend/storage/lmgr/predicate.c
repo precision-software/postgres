@@ -313,14 +313,6 @@
 	((targethash) ^ ((uint32) PointerGetDatum((predicatelocktag)->myXact)) \
 	 << LOG2_NUM_PREDICATELOCK_PARTITIONS)
 
-
-/*
- * The SLRU buffer area through which we access the old xids.
- */
-static SlruCtlData SerialSlruCtlData;
-
-#define SerialSlruCtl			(&SerialSlruCtlData)
-
 #define SERIAL_PAGESIZE			BLCKSZ
 #define SERIAL_ENTRYSIZE			sizeof(SerCommitSeqNo)
 #define SERIAL_ENTRIESPERPAGE	(SERIAL_PAGESIZE / SERIAL_ENTRYSIZE)
@@ -332,8 +324,8 @@ static SlruCtlData SerialSlruCtlData;
 
 #define SerialNextPage(page) (((page) >= SERIAL_MAX_PAGE) ? 0 : (page) + 1)
 
-#define SerialValue(slotno, xid) (*((SerCommitSeqNo *) \
-	(SerialSlruCtl->shared->page_buffer[slotno] + \
+#define SerialValue(buffer, xid) (*((SerCommitSeqNo *) \
+	(BufferGetPage(buffer) + \
 	((((uint32) (xid)) % SERIAL_ENTRIESPERPAGE) * SERIAL_ENTRYSIZE))))
 
 #define SerialPage(xid)	(((uint32) (xid)) / SERIAL_ENTRIESPERPAGE)
@@ -803,17 +795,10 @@ SerialInit(void)
 {
 	bool		found;
 
-	/*
-	 * Set up SLRU management of the pg_serial data.
-	 */
-	SerialSlruCtl->PagePrecedes = SerialPagePrecedesLogically;
-	SimpleLruInit(SerialSlruCtl, "Serial",
-				  NUM_SERIAL_BUFFERS, 0, SerialSLRULock, "pg_serial",
-				  LWTRANCHE_SERIAL_BUFFER, SYNC_HANDLER_NONE);
 #ifdef USE_ASSERT_CHECKING
 	SerialPagePrecedesLogicallyUnitTests();
 #endif
-	SlruPagePrecedesUnitTests(SerialSlruCtl, SERIAL_ENTRIESPERPAGE);
+	SlruPagePrecedesUnitTests(SerialPagePrecedesLogically, SERIAL_ENTRIESPERPAGE);
 
 	/*
 	 * Create or attach to the SerialControl structure.
@@ -843,9 +828,9 @@ SerialAdd(TransactionId xid, SerCommitSeqNo minConflictCommitSeqNo)
 {
 	TransactionId tailXid;
 	int			targetPage;
-	int			slotno;
 	int			firstZeroPage;
 	bool		isNewPage;
+	Buffer		buffer;
 
 	Assert(TransactionIdIsValid(xid));
 
@@ -890,16 +875,22 @@ SerialAdd(TransactionId xid, SerCommitSeqNo minConflictCommitSeqNo)
 		/* Initialize intervening pages. */
 		while (firstZeroPage != targetPage)
 		{
-			(void) SimpleLruZeroPage(SerialSlruCtl, firstZeroPage);
+			buffer = ZeroSlruBuffer(SLRU_SERIAL_ID, firstZeroPage);
+			MarkBufferDirty(buffer);
+			UnlockReleaseBuffer(buffer);
 			firstZeroPage = SerialNextPage(firstZeroPage);
 		}
-		slotno = SimpleLruZeroPage(SerialSlruCtl, targetPage);
+		buffer = ZeroSlruBuffer(SLRU_SERIAL_ID, targetPage);
 	}
 	else
-		slotno = SimpleLruReadPage(SerialSlruCtl, targetPage, true, xid);
+	{
+		buffer = ReadSlruBuffer(SLRU_SERIAL_ID, targetPage);
+		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+	}
 
-	SerialValue(slotno, xid) = minConflictCommitSeqNo;
-	SerialSlruCtl->shared->page_dirty[slotno] = true;
+	SerialValue(buffer, xid) = minConflictCommitSeqNo;
+	MarkBufferDirty(buffer);
+	UnlockReleaseBuffer(buffer);
 
 	LWLockRelease(SerialSLRULock);
 }
@@ -915,7 +906,7 @@ SerialGetMinConflictCommitSeqNo(TransactionId xid)
 	TransactionId headXid;
 	TransactionId tailXid;
 	SerCommitSeqNo val;
-	int			slotno;
+	Buffer		buffer;
 
 	Assert(TransactionIdIsValid(xid));
 
@@ -937,9 +928,9 @@ SerialGetMinConflictCommitSeqNo(TransactionId xid)
 	 * The following function must be called without holding SerialSLRULock,
 	 * but will return with that lock held, which must then be released.
 	 */
-	slotno = SimpleLruReadPage_ReadOnly(SerialSlruCtl,
-										SerialPage(xid), xid);
-	val = SerialValue(slotno, xid);
+	buffer = ReadSlruBuffer(SLRU_SERIAL_ID, SerialPage(xid));
+	val = SerialValue(buffer, xid);
+	ReleaseBuffer(buffer);
 	LWLockRelease(SerialSLRULock);
 	return val;
 }
@@ -1058,19 +1049,7 @@ CheckPointPredicate(void)
 	LWLockRelease(SerialSLRULock);
 
 	/* Truncate away pages that are no longer required */
-	SimpleLruTruncate(SerialSlruCtl, tailPage);
-
-	/*
-	 * Write dirty SLRU pages to disk
-	 *
-	 * This is not actually necessary from a correctness point of view. We do
-	 * it merely as a debugging aid.
-	 *
-	 * We're doing this after the truncation to avoid writing pages right
-	 * before deleting the file in which they sit, which would be completely
-	 * pointless.
-	 */
-	SimpleLruWriteAll(SerialSlruCtl, true);
+	SimpleLruTruncate(SLRU_SERIAL_ID, SerialPagePrecedesLogically, tailPage);
 }
 
 /*------------------------------------------------------------------------*/
@@ -1331,7 +1310,6 @@ PredicateLockShmemSize(void)
 
 	/* Shared memory structures for SLRU tracking of old committed xids. */
 	size = add_size(size, sizeof(SerialControlData));
-	size = add_size(size, SimpleLruShmemSize(NUM_SERIAL_BUFFERS, 0));
 
 	return size;
 }

@@ -22,6 +22,16 @@
 #include "common/relpath.h"
 #include "storage/backendid.h"
 
+/*
+ * SLRU ID to path mapping
+ */
+#define PG_SLRU(symname,name,path,synchronize) \
+	path,
+
+static char *slru_dirs[] =
+{
+#include "access/slrulist.h"
+};
 
 /*
  * Lookup table of fork name by fork number.
@@ -143,7 +153,22 @@ GetSMgrFilePath(Oid dbOid, Oid spcOid, RelFileNumber relNumber,
 {
 	char	   *path;
 
-	if (spcOid == GLOBALTABLESPACE_OID)
+	if (spcOid == SLRU_SPC_OID)
+	{
+		if (dbOid >= lengthof(slru_dirs) || forkNumber != 0 || backendId != InvalidBackendId)
+		{
+#ifndef FRONTEND
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid SLRU file locator %u/%u/%u/%u/%u",
+							spcOid, dbOid, relNumber, backendId, forkNumber)));
+#else
+			return NULL;
+#endif
+		}
+		path = psprintf("%s/%04X", slru_dirs[dbOid], relNumber);
+	}
+	else if (spcOid == GLOBALTABLESPACE_OID)
 	{
 		/* Shared system relations live in {datadir}/global */
 		Assert(dbOid == 0);

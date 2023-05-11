@@ -63,6 +63,9 @@ typedef enum ForkNumber
 
 #define FORKNAMECHARS	4		/* max chars for a fork name */
 
+/* Pseudo tablespace ID used for SLRUs. */
+#define SLRU_SPC_OID 9
+
 extern PGDLLIMPORT const char *const forkNames[];
 
 extern ForkNumber forkname_to_number(const char *forkName);

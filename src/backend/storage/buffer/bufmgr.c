@@ -57,10 +57,21 @@
 #include "utils/resowner_private.h"
 #include "utils/timestamp.h"
 
+/*
+ * XXX Ideally we'd switch to standard pages for SLRU data, but in the
+ * meantime we need some way to identify buffers that hold raw data (no
+ * invasive LSN, no checksums).
+ */
+#define BufferHasStandardPage(bufHdr)			\
+	((bufHdr)->tag.spcOid != 9)
+
+#define BufferHasExternalLSN(bufHdr)			\
+	!BufferHasStandardPage(bufHdr)
 
 /* Note: these two macros only work on shared buffers, not local ones! */
 #define BufHdrGetBlock(bufHdr)	((Block) (BufferBlocks + ((Size) (bufHdr)->buf_id) * BLCKSZ))
-#define BufferGetLSN(bufHdr)	(PageGetLSN(BufHdrGetBlock(bufHdr)))
+#define BufferGetLSN(bufHdr) \
+	(BufferHasExternalLSN(bufHdr) ? BufferGetExternalLSN(bufHdr) : PageGetLSN(BufHdrGetBlock(bufHdr)))
 
 /* Note: this macro only works on local buffers, not shared ones! */
 #define LocalBufHdrGetBlock(bufHdr) \
@@ -786,6 +797,18 @@ ReadBufferWithoutRelcache(RelFileLocator rlocator, ForkNumber forkNum,
 							 mode, strategy, &hit);
 }
 
+Buffer
+ReadBufferWithoutRelcacheWithHit(RelFileLocator rlocator, ForkNumber forkNum,
+								 BlockNumber blockNum, ReadBufferMode mode,
+								 BufferAccessStrategy strategy, bool permanent, bool *hit)
+{
+	SMgrFileHandle sfile = smgropen(rlocator, InvalidBackendId, forkNum);
+
+	return ReadBuffer_common(sfile, permanent ? RELPERSISTENCE_PERMANENT :
+							 RELPERSISTENCE_UNLOGGED, blockNum,
+							 mode, strategy, hit);
+}
+
 
 /*
  * ReadBuffer_common -- common logic for all ReadBuffer variants
@@ -1032,7 +1055,8 @@ ReadBuffer_common(SMgrFileHandle sfile, char relpersistence,
 			}
 
 			/* check for garbage data */
-			if (!PageIsVerifiedExtended((Page) bufBlock, blockNum,
+			if (BufferHasStandardPage(bufHdr) &&
+				!PageIsVerifiedExtended((Page) bufBlock, blockNum,
 										PIV_LOG_WARNING | PIV_REPORT_STAT))
 			{
 				if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
@@ -1432,6 +1456,9 @@ BufferAlloc(SMgrFileHandle sfile, char relpersistence,
 		LWLockRelease(newPartitionLock);
 		UnpinBuffer(buf);
 	}
+
+	if (BufferHasExternalLSN(buf))
+		BufferSetExternalLSN(buf, InvalidXLogRecPtr);
 
 	/*
 	 * Okay, it's finally safe to rename the buffer.
@@ -3087,7 +3114,10 @@ BufferGetLSNAtomic(Buffer buffer)
 	Assert(BufferIsPinned(buffer));
 
 	buf_state = LockBufHdr(bufHdr);
-	lsn = PageGetLSN(page);
+	if (BufferHasStandardPage(bufHdr))
+		lsn = PageGetLSN(page);
+	else
+		lsn = BufferGetExternalLSN(bufHdr);
 	UnlockBufHdr(bufHdr, buf_state);
 
 	return lsn;
@@ -5067,4 +5097,30 @@ TestForOldSnapshot_impl(Snapshot snapshot, Relation relation)
 		ereport(ERROR,
 				(errcode(ERRCODE_SNAPSHOT_TOO_OLD),
 				 errmsg("snapshot too old")));
+}
+
+/*
+ * Check if a buffer tag is currently mapped.
+ *
+ * XXX Dubious semantics; needed only for multixact's handling for
+ * inconsistent states.
+ */
+bool
+BufferProbe(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockNum)
+{
+	BufferTag	tag;
+	uint32		hash;
+	LWLock	   *partitionLock;
+	int			buf_id;
+
+	InitBufferTag(&tag, &rlocator, forkNum, blockNum);
+
+	hash = BufTableHashCode(&tag);
+	partitionLock = BufMappingPartitionLock(hash);
+
+	LWLockAcquire(partitionLock, LW_SHARED);
+	buf_id = BufTableLookup(&tag, hash);
+	LWLockRelease(partitionLock);
+
+	return buf_id >= 0;
 }

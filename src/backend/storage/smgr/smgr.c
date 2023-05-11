@@ -420,6 +420,48 @@ smgrunlink_multi(RelFileLocator rlocator, BackendId backend,
 	}
 }
 
+/*
+ *     smgrdounlink() -- Immediately unlink a file
+ *
+ *             If isRedo is true, it is okay for the underlying file(s) to be gone
+ *             already.
+ *
+ * To remove a relation transactionally, see RelationDropStorage() instead.
+ * This will cause cache invalidation of all forks of the relation, not just
+ * this one.
+ */
+void
+smgrunlink(SMgrFileHandle sfile, bool isRedo)
+{
+	SMgrFileLocator locator;
+	int			which;
+
+	/* remember before closing */
+	which = sfile->smgr_which;
+	locator = sfile->smgr_locator;
+
+	/* Close the file at smgr level */
+	smgrclose(sfile);
+
+	/*
+	 * Send a shared-inval message to force other backends to close any
+	 * dangling smgr references they may have for these rels.  We should do
+	 * this before starting the actual unlinking, in case we fail partway
+	 * through that step.  Note that the sinval messages will eventually come
+	 * back to this backend, too, and thereby provide a backstop that we
+	 * closed our own smgr rel.
+	 */
+	CacheInvalidateSmgr(locator.locator, locator.backend);
+
+	/*
+	 * Delete the physical file(s).
+	 *
+	 * Note: smgr_unlink must treat deletion failure as a WARNING, not an
+	 * ERROR, because we've already decided to commit or abort the current
+	 * xact.
+	 */
+	smgrsw[which].smgr_unlink(locator, isRedo);
+}
 
 /*
  *	smgrextend() -- Add a new block to a file.

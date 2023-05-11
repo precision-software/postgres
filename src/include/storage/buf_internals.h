@@ -307,6 +307,7 @@ typedef struct WritebackContext
 
 /* in buf_init.c */
 extern PGDLLIMPORT BufferDescPadded *BufferDescriptors;
+extern PGDLLIMPORT XLogRecPtr *BufferExternalLSNs;
 extern PGDLLIMPORT ConditionVariableMinimallyPadded *BufferIOCVArray;
 extern PGDLLIMPORT WritebackContext BackendWritebackContext;
 
@@ -342,6 +343,18 @@ static inline LWLock *
 BufferDescriptorGetContentLock(const BufferDesc *bdesc)
 {
 	return (LWLock *) (&bdesc->content_lock);
+}
+
+static inline XLogRecPtr
+BufferGetExternalLSN(const BufferDesc *bdesc)
+{
+	return BufferExternalLSNs[bdesc->buf_id];
+}
+
+static inline void
+BufferSetExternalLSN(const BufferDesc *bdesc, XLogRecPtr lsn)
+{
+	BufferExternalLSNs[bdesc->buf_id] = lsn;
 }
 
 /*

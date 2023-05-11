@@ -191,9 +191,12 @@ mdcreate(SMgrFileHandle sfile, bool isRedo)
 	 * should be here and not in commands/tablespace.c?  But that would imply
 	 * importing a lot of stuff that smgr.c oughtn't know, either.
 	 */
-	TablespaceCreateDbspace(sfile->smgr_locator.locator.spcOid,
-							sfile->smgr_locator.locator.dbOid,
-							isRedo);
+	if (sfile->smgr_locator.locator.spcOid != SLRU_SPC_OID)
+	{
+		TablespaceCreateDbspace(sfile->smgr_locator.locator.spcOid,
+								sfile->smgr_locator.locator.dbOid,
+								isRedo);
+	}
 
 	path = smgrfilepath(sfile->smgr_locator);
 

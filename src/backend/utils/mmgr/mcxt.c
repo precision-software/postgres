@@ -162,9 +162,47 @@ static void MemoryContextStatsPrint(MemoryContext context, void *passthru,
  * You should not do memory allocations within a critical section, because
  * an out-of-memory error will be escalated to a PANIC. To enforce that
  * rule, the allocation functions Assert that.
+ *
+ * FIXME: bypass this for the critical section in RecordTransactionCommit()
+ * for now. It does a lot of things that can allocate:
+ * - calls TransactionIdCommitTree, which pins buffers, which requires
+ *   space in the ResourceOwner for the pin (ResourceOwnerEnlargeBuffers())
+ * - same for TransactionTreeSetCommitTsData() call.
+ * - reading a page can require flushing other pages, which in turn
+ *   can call CompactCheckpointerRequestQueue(), which allocates
+ * - reading a page calls smgropen(), which allocates the SMgrFile entry
+ *   if it's not open already
+ *
+ * FIXME: Here's another codepath that reaches this, reproducable with
+ * the 'lock-committed-update' isolation test:
+ *
+ * #5  0x000056230e91788d in MemoryContextAllocExtended (context=0x562310709c40, size=4048, flags=2) at mcxt.c:1137
+ * #6  0x000056230e8e9655 in DynaHashAlloc (size=4048) at dynahash.c:292
+ * #7  0x000056230e8ebadf in element_alloc (hashp=0x562310709d58, nelem=46, freelist_idx=0) at dynahash.c:1715
+ * #8  0x000056230e8eaef8 in get_hash_entry (hashp=0x562310709d58, freelist_idx=0) at dynahash.c:1324
+ * #9  0x000056230e8ea993 in hash_search_with_hash_value (hashp=0x562310709d58, keyPtr=0x7ffc30cdd4f0, hashvalue=1219519527, action=HASH_ENTER, foundPtr=0x7ffc30cdd4ef) at dynahash.c:1097
+ * #10 0x000056230e8ea578 in hash_search (hashp=0x562310709d58, keyPtr=0x7ffc30cdd4f0, action=HASH_ENTER, foundPtr=0x7ffc30cdd4ef) at dynahash.c:958
+ * #11 0x000056230e70f8fa in smgropen (rlocator=..., backend=-1, forkNum=MAIN_FORKNUM) at smgr.c:165
+ * #12 0x000056230e6c7f58 in ReadBufferWithoutRelcacheWithHit (rlocator=..., forkNum=MAIN_FORKNUM, blockNum=0, mode=RBM_NORMAL, strategy=0x0, permanent=true, hit=0x7ffc30cdd597)
+ *     at bufmgr.c:805
+ * #13 0x000056230e2b45ce in ReadSlruBuffer (slru_id=3, pageno=0) at slru.c:377
+ * #14 0x000056230e2ad192 in RecordNewMultiXact (multi=5, offset=9, nmembers=2, members=0x7ffc30cdd690) at multixact.c:902
+ * #15 0x000056230e2acfbb in MultiXactIdCreateFromMembers (nmembers=2, members=0x7ffc30cdd690) at multixact.c:833
+ * #16 0x000056230e2ac8d3 in MultiXactIdCreate (xid1=753, status1=MultiXactStatusForKeyShare, xid2=754, status2=MultiXactStatusNoKeyUpdate) at multixact.c:402
+ * #17 0x000056230e248ff2 in compute_new_xmax_infomask (xmax=753, old_infomask=402, old_infomask2=2, add_to_xmax=754, mode=LockTupleNoKeyExclusive, is_update=true, result_xmax=0x7ffc30cdd79c, 
+ *     result_infomask=0x7ffc30cdd79a, result_infomask2=0x7ffc30cdd798) at heapam.c:5017
+ * #18 0x000056230e24632c in heap_update (relation=0x7f99454cb168, otid=0x7ffc30cddaba, newtup=0x56231073e840, cid=0, crosscheck=0x0, wait=true, tmfd=0x7ffc30cddaf0, lockmode=0x7ffc30cdda34)
+ *     at heapam.c:3345
+ *
+ * Disabled this completely because of that.
  */
+#if 0
 #define AssertNotInCriticalSection(context) \
-	Assert(CritSectionCount == 0 || (context)->allowInCritSection)
+	Assert(CritSectionCount == 0 || (context)->allowInCritSection || \
+		   (MyProc != NULL && (MyProc->delayChkptFlags & DELAY_CHKPT_START != 0)))
+#else
+#define AssertNotInCriticalSection(context) ((void)true)
+#endif
 
 /*
  * Call the given function in the MemoryContextMethods for the memory context

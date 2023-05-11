@@ -123,6 +123,7 @@ extern void smgrwriteback(SMgrFileHandle sfile,
 extern BlockNumber smgrnblocks(SMgrFileHandle sfile);
 extern BlockNumber smgrnblocks_cached(SMgrFileHandle sfile);
 extern void smgrimmedsync(SMgrFileHandle sfile);
+extern void smgrunlink(SMgrFileHandle sfile, bool isRedo);
 
 extern void smgrtruncate_multi(RelFileLocator rlocator, BackendId backend, ForkNumber *forks, int nforks, BlockNumber *nblocks);
 extern void smgrunlink_multi(RelFileLocator rlocator, BackendId backend, ForkNumber *forks, int nforks, bool isRedo);

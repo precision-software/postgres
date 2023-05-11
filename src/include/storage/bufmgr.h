@@ -129,12 +129,18 @@ extern Buffer ReadBufferWithoutRelcache(RelFileLocator rlocator,
 										ForkNumber forkNum, BlockNumber blockNum,
 										ReadBufferMode mode, BufferAccessStrategy strategy,
 										bool permanent);
+extern Buffer ReadBufferWithoutRelcacheWithHit(RelFileLocator rlocator,
+											   ForkNumber forkNum, BlockNumber blockNum,
+											   ReadBufferMode mode, BufferAccessStrategy strategy,
+											   bool permanent, bool *hit);
 extern void ReleaseBuffer(Buffer buffer);
 extern void UnlockReleaseBuffer(Buffer buffer);
 extern void MarkBufferDirty(Buffer buffer);
 extern void IncrBufferRefCount(Buffer buffer);
 extern Buffer ReleaseAndReadBuffer(Buffer buffer, Relation relation,
 								   BlockNumber blockNum);
+extern bool BufferProbe(RelFileLocator rlocator, ForkNumber forkNum,
+						BlockNumber blockNum);
 
 extern void InitBufferPoolAccess(void);
 extern void AtEOXact_Buffers(bool isCommit);
