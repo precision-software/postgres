@@ -415,11 +415,10 @@ extern int	BufTableInsert(BufferTag *tagPtr, uint32 hashcode, int buf_id);
 extern void BufTableDelete(BufferTag *tagPtr, uint32 hashcode);
 
 /* localbuf.c */
-extern PrefetchBufferResult PrefetchLocalBuffer(SMgrRelation smgr,
-												ForkNumber forkNum,
+extern PrefetchBufferResult PrefetchLocalBuffer(SMgrFileHandle smgr,
 												BlockNumber blockNum);
-extern BufferDesc *LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum,
-									BlockNumber blockNum, bool *foundPtr, IOContext *io_context);
+extern BufferDesc *LocalBufferAlloc(SMgrFileHandle smgr, BlockNumber blockNum,
+									bool *foundPtr, IOContext *io_context);
 extern void MarkLocalBufferDirty(Buffer buffer);
 extern void DropRelationLocalBuffers(RelFileLocator rlocator,
 									 ForkNumber forkNum,

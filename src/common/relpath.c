@@ -129,7 +129,7 @@ GetDatabasePath(Oid dbOid, Oid spcOid)
 }
 
 /*
- * GetRelationPath - construct path to a relation's file
+ * GetSMgrFilePath - construct path to a relation's file
  *
  * Result is a palloc'd string.
  *
@@ -138,7 +138,7 @@ GetDatabasePath(Oid dbOid, Oid spcOid)
  * the trouble considering BackendId is just int anyway.
  */
 char *
-GetRelationPath(Oid dbOid, Oid spcOid, RelFileNumber relNumber,
+GetSMgrFilePath(Oid dbOid, Oid spcOid, RelFileNumber relNumber,
 				int backendId, ForkNumber forkNumber)
 {
 	char	   *path;

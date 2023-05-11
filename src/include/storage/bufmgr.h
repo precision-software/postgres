@@ -64,7 +64,7 @@ typedef struct PrefetchBufferResult
 struct WritebackContext;
 
 /* forward declared, to avoid including smgr.h here */
-struct SMgrRelationData;
+struct SMgrFileData;
 
 /* in globals.c ... this duplicates miscadmin.h */
 extern PGDLLIMPORT int NBuffers;
@@ -115,8 +115,7 @@ extern PGDLLIMPORT int32 *LocalRefCount;
 /*
  * prototypes for functions in bufmgr.c
  */
-extern PrefetchBufferResult PrefetchSharedBuffer(struct SMgrRelationData *smgr_reln,
-												 ForkNumber forkNum,
+extern PrefetchBufferResult PrefetchSharedBuffer(struct SMgrFileData *smgr_file,
 												 BlockNumber blockNum);
 extern PrefetchBufferResult PrefetchBuffer(Relation reln, ForkNumber forkNum,
 										   BlockNumber blockNum);
@@ -144,18 +143,26 @@ extern void CheckPointBuffers(int flags);
 extern BlockNumber BufferGetBlockNumber(Buffer buffer);
 extern BlockNumber RelationGetNumberOfBlocksInFork(Relation relation,
 												   ForkNumber forkNum);
-extern void FlushOneBuffer(Buffer buffer);
-extern void FlushRelationBuffers(Relation rel);
-extern void FlushRelationsAllBuffers(struct SMgrRelationData **smgrs, int nrels);
 extern void CreateAndCopyRelationData(RelFileLocator src_rlocator,
 									  RelFileLocator dst_rlocator,
 									  bool permanent);
+
+extern void FlushOneBuffer(Buffer buffer);
+extern void FlushRelationBuffers(Relation rel);
+extern void FlushRelationsAllBuffers(RelFileLocator *locators, int nlocators);
 extern void FlushDatabaseBuffers(Oid dbid);
-extern void DropRelationBuffers(struct SMgrRelationData *smgr_reln,
+
+extern void DropRelationBuffers(RelFileLocator rlocator, BackendId backend,
 								ForkNumber *forkNum,
 								int nforks, BlockNumber *firstDelBlock);
-extern void DropRelationsAllBuffers(struct SMgrRelationData **smgr_reln,
-									int nlocators);
+
+typedef struct RelFileLocatorBackend
+{
+	RelFileLocator locator;
+	BackendId	backend;
+} RelFileLocatorBackend;
+
+extern void DropRelationsAllBuffers(RelFileLocatorBackend *locators, int nlocators);
 extern void DropDatabaseBuffers(Oid dbid);
 
 #define RelationGetNumberOfBlocks(reln) \
