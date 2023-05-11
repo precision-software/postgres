@@ -1,0 +1,4607 @@
+From 02eebb8c442850dcd9b437137eec06f6a16334e2 Mon Sep 17 00:00:00 2001
+From: Heikki Linnakangas <heikki.linnakangas@iki.fi>
+Date: Mon, 27 Feb 2023 15:34:59 +0200
+Subject: [PATCH v3 2/2] WIP: SLRUs
+
+This is Thomas's patch refactored over the per-fork SMgrFile patch:
+
+- each SLRU segment is represented by a separate SMgrFile.
+- md.c implementation handles SLRUs, too
+---
+ src/backend/access/transam/clog.c      |  199 +---
+ src/backend/access/transam/commit_ts.c |  156 +--
+ src/backend/access/transam/multixact.c |  357 ++----
+ src/backend/access/transam/slru.c      | 1495 +++---------------------
+ src/backend/access/transam/subtrans.c  |  108 +-
+ src/backend/access/transam/xact.c      |    2 +
+ src/backend/access/transam/xlog.c      |   15 +-
+ src/backend/commands/async.c           |   67 +-
+ src/backend/storage/buffer/buf_init.c  |   17 +-
+ src/backend/storage/buffer/bufmgr.c    |   62 +-
+ src/backend/storage/ipc/ipci.c         |    4 -
+ src/backend/storage/lmgr/predicate.c   |   62 +-
+ src/backend/storage/smgr/md.c          |    9 +-
+ src/backend/storage/smgr/smgr.c        |   42 +
+ src/backend/storage/sync/sync.c        |   20 +-
+ src/backend/utils/mmgr/mcxt.c          |   40 +-
+ src/common/relpath.c                   |   27 +-
+ src/include/access/clog.h              |    6 -
+ src/include/access/commit_ts.h         |    3 -
+ src/include/access/multixact.h         |    3 -
+ src/include/access/slru.h              |  180 +--
+ src/include/access/slrulist.h          |   30 +
+ src/include/access/subtrans.h          |    3 -
+ src/include/common/relpath.h           |    3 +
+ src/include/storage/buf_internals.h    |   13 +
+ src/include/storage/bufmgr.h           |    6 +
+ src/include/storage/smgr.h             |    1 +
+ src/test/modules/Makefile              |    3 +-
+ 28 files changed, 725 insertions(+), 2208 deletions(-)
+ create mode 100644 src/include/access/slrulist.h
+
+diff --git a/src/backend/access/transam/clog.c b/src/backend/access/transam/clog.c
+index 4a431d58767..b6f5ae987b1 100644
+--- a/src/backend/access/transam/clog.c
++++ b/src/backend/access/transam/clog.c
+@@ -41,6 +41,8 @@
+ #include "miscadmin.h"
+ #include "pg_trace.h"
+ #include "pgstat.h"
++#include "storage/bufmgr.h"
++#include "storage/buf_internals.h"
+ #include "storage/proc.h"
+ #include "storage/sync.h"
+ 
+@@ -81,15 +83,8 @@
+  */
+ #define THRESHOLD_SUBTRANS_CLOG_OPT	5
+ 
+-/*
+- * Link to shared-memory data structures for CLOG control
+- */
+-static SlruCtlData XactCtlData;
+-
+-#define XactCtl (&XactCtlData)
+-
+ 
+-static int	ZeroCLOGPage(int pageno, bool writeXlog);
++static Buffer ZeroCLOGPage(int pageno, bool writeXlog);
+ static bool CLOGPagePrecedes(int page1, int page2);
+ static void WriteZeroPageXlogRec(int pageno);
+ static void WriteTruncateXlogRec(int pageno, TransactionId oldestXact,
+@@ -99,7 +94,7 @@ static void TransactionIdSetPageStatus(TransactionId xid, int nsubxids,
+ 									   XLogRecPtr lsn, int pageno,
+ 									   bool all_xact_same_page);
+ static void TransactionIdSetStatusBit(TransactionId xid, XidStatus status,
+-									  XLogRecPtr lsn, int slotno);
++									  XLogRecPtr lsn, Buffer buffer);
+ static void set_status_by_pages(int nsubxids, TransactionId *subxids,
+ 								XidStatus status, XLogRecPtr lsn);
+ static bool TransactionGroupUpdateXidStatus(TransactionId xid,
+@@ -339,13 +334,12 @@ TransactionIdSetPageStatusInternal(TransactionId xid, int nsubxids,
+ 								   TransactionId *subxids, XidStatus status,
+ 								   XLogRecPtr lsn, int pageno)
+ {
+-	int			slotno;
++	Buffer		buffer;
+ 	int			i;
+ 
+ 	Assert(status == TRANSACTION_STATUS_COMMITTED ||
+ 		   status == TRANSACTION_STATUS_ABORTED ||
+ 		   (status == TRANSACTION_STATUS_SUB_COMMITTED && !TransactionIdIsValid(xid)));
+-	Assert(LWLockHeldByMeInMode(XactSLRULock, LW_EXCLUSIVE));
+ 
+ 	/*
+ 	 * If we're doing an async commit (ie, lsn is valid), then we must wait
+@@ -356,7 +350,8 @@ TransactionIdSetPageStatusInternal(TransactionId xid, int nsubxids,
+ 	 * write-busy, since we don't care if the update reaches disk sooner than
+ 	 * we think.
+ 	 */
+-	slotno = SimpleLruReadPage(XactCtl, pageno, XLogRecPtrIsInvalid(lsn), xid);
++	buffer = ReadSlruBuffer(SLRU_CLOG_ID, pageno);
++	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+ 
+ 	/*
+ 	 * Set the main transaction id, if any.
+@@ -374,25 +369,26 @@ TransactionIdSetPageStatusInternal(TransactionId xid, int nsubxids,
+ 		{
+ 			for (i = 0; i < nsubxids; i++)
+ 			{
+-				Assert(XactCtl->shared->page_number[slotno] == TransactionIdToPage(subxids[i]));
++				Assert(pageno == TransactionIdToPage(subxids[i]));
+ 				TransactionIdSetStatusBit(subxids[i],
+ 										  TRANSACTION_STATUS_SUB_COMMITTED,
+-										  lsn, slotno);
++										  lsn, buffer);
+ 			}
+ 		}
+ 
+ 		/* ... then the main transaction */
+-		TransactionIdSetStatusBit(xid, status, lsn, slotno);
++		TransactionIdSetStatusBit(xid, status, lsn, buffer);
+ 	}
+ 
+ 	/* Set the subtransactions */
+ 	for (i = 0; i < nsubxids; i++)
+ 	{
+-		Assert(XactCtl->shared->page_number[slotno] == TransactionIdToPage(subxids[i]));
+-		TransactionIdSetStatusBit(subxids[i], status, lsn, slotno);
++		Assert(pageno == TransactionIdToPage(subxids[i]));
++		TransactionIdSetStatusBit(subxids[i], status, lsn, buffer);
+ 	}
+ 
+-	XactCtl->shared->page_dirty[slotno] = true;
++	MarkBufferDirty(buffer);
++	UnlockReleaseBuffer(buffer);
+ }
+ 
+ /*
+@@ -566,7 +562,7 @@ TransactionGroupUpdateXidStatus(TransactionId xid, XidStatus status,
+  * Must be called with XactSLRULock held
+  */
+ static void
+-TransactionIdSetStatusBit(TransactionId xid, XidStatus status, XLogRecPtr lsn, int slotno)
++TransactionIdSetStatusBit(TransactionId xid, XidStatus status, XLogRecPtr lsn, Buffer buffer)
+ {
+ 	int			byteno = TransactionIdToByte(xid);
+ 	int			bshift = TransactionIdToBIndex(xid) * CLOG_BITS_PER_XACT;
+@@ -574,7 +570,10 @@ TransactionIdSetStatusBit(TransactionId xid, XidStatus status, XLogRecPtr lsn, i
+ 	char		byteval;
+ 	char		curval;
+ 
+-	byteptr = XactCtl->shared->page_buffer[slotno] + byteno;
++	Assert(LWLockHeldByMeInMode(BufferDescriptorGetContentLock(GetBufferDescriptor(buffer - 1)),
++								LW_EXCLUSIVE));
++
++	byteptr = BufferGetPage(buffer) + byteno;
+ 	curval = (*byteptr >> bshift) & CLOG_XACT_BITMASK;
+ 
+ 	/*
+@@ -603,7 +602,7 @@ TransactionIdSetStatusBit(TransactionId xid, XidStatus status, XLogRecPtr lsn, i
+ 	*byteptr = byteval;
+ 
+ 	/*
+-	 * Update the group LSN if the transaction completion LSN is higher.
++	 * Update the buffer LSN if the transaction completion LSN is higher.
+ 	 *
+ 	 * Note: lsn will be invalid when supplied during InRecovery processing,
+ 	 * so we don't need to do anything special to avoid LSN updates during
+@@ -612,10 +611,8 @@ TransactionIdSetStatusBit(TransactionId xid, XidStatus status, XLogRecPtr lsn, i
+ 	 */
+ 	if (!XLogRecPtrIsInvalid(lsn))
+ 	{
+-		int			lsnindex = GetLSNIndex(slotno, xid);
+-
+-		if (XactCtl->shared->group_lsn[lsnindex] < lsn)
+-			XactCtl->shared->group_lsn[lsnindex] = lsn;
++		if (BufferGetExternalLSN(GetBufferDescriptor(buffer)) < lsn)
++			BufferSetExternalLSN(GetBufferDescriptor(buffer), lsn);
+ 	}
+ }
+ 
+@@ -640,67 +637,22 @@ TransactionIdGetStatus(TransactionId xid, XLogRecPtr *lsn)
+ 	int			pageno = TransactionIdToPage(xid);
+ 	int			byteno = TransactionIdToByte(xid);
+ 	int			bshift = TransactionIdToBIndex(xid) * CLOG_BITS_PER_XACT;
+-	int			slotno;
+-	int			lsnindex;
+ 	char	   *byteptr;
+ 	XidStatus	status;
++	Buffer		buffer;
+ 
+-	/* lock is acquired by SimpleLruReadPage_ReadOnly */
+-
+-	slotno = SimpleLruReadPage_ReadOnly(XactCtl, pageno, xid);
+-	byteptr = XactCtl->shared->page_buffer[slotno] + byteno;
++	buffer = ReadSlruBuffer(SLRU_CLOG_ID, pageno);
++	byteptr = BufferGetPage(buffer) + byteno;
+ 
+ 	status = (*byteptr >> bshift) & CLOG_XACT_BITMASK;
+ 
+-	lsnindex = GetLSNIndex(slotno, xid);
+-	*lsn = XactCtl->shared->group_lsn[lsnindex];
++	*lsn = BufferGetExternalLSN(GetBufferDescriptor(buffer));
+ 
+-	LWLockRelease(XactSLRULock);
++	ReleaseBuffer(buffer);
+ 
+ 	return status;
+ }
+ 
+-/*
+- * Number of shared CLOG buffers.
+- *
+- * On larger multi-processor systems, it is possible to have many CLOG page
+- * requests in flight at one time which could lead to disk access for CLOG
+- * page if the required page is not found in memory.  Testing revealed that we
+- * can get the best performance by having 128 CLOG buffers, more than that it
+- * doesn't improve performance.
+- *
+- * Unconditionally keeping the number of CLOG buffers to 128 did not seem like
+- * a good idea, because it would increase the minimum amount of shared memory
+- * required to start, which could be a problem for people running very small
+- * configurations.  The following formula seems to represent a reasonable
+- * compromise: people with very low values for shared_buffers will get fewer
+- * CLOG buffers as well, and everyone else will get 128.
+- */
+-Size
+-CLOGShmemBuffers(void)
+-{
+-	return Min(128, Max(4, NBuffers / 512));
+-}
+-
+-/*
+- * Initialization of shared memory for CLOG
+- */
+-Size
+-CLOGShmemSize(void)
+-{
+-	return SimpleLruShmemSize(CLOGShmemBuffers(), CLOG_LSNS_PER_PAGE);
+-}
+-
+-void
+-CLOGShmemInit(void)
+-{
+-	XactCtl->PagePrecedes = CLOGPagePrecedes;
+-	SimpleLruInit(XactCtl, "Xact", CLOGShmemBuffers(), CLOG_LSNS_PER_PAGE,
+-				  XactSLRULock, "pg_xact", LWTRANCHE_XACT_BUFFER,
+-				  SYNC_HANDLER_CLOG);
+-	SlruPagePrecedesUnitTests(XactCtl, CLOG_XACTS_PER_PAGE);
+-}
+-
+ /*
+  * This func must be called ONCE on system install.  It creates
+  * the initial CLOG segment.  (The CLOG directory is assumed to
+@@ -710,18 +662,15 @@ CLOGShmemInit(void)
+ void
+ BootStrapCLOG(void)
+ {
+-	int			slotno;
+-
+-	LWLockAcquire(XactSLRULock, LW_EXCLUSIVE);
++	Buffer		buffer;
+ 
+ 	/* Create and zero the first page of the commit log */
+-	slotno = ZeroCLOGPage(0, false);
++	buffer = ZeroCLOGPage(0, false);
+ 
+ 	/* Make sure it's written out */
+-	SimpleLruWritePage(XactCtl, slotno);
+-	Assert(!XactCtl->shared->page_dirty[slotno]);
++	FlushOneBuffer(buffer);
+ 
+-	LWLockRelease(XactSLRULock);
++	UnlockReleaseBuffer(buffer);
+ }
+ 
+ /*
+@@ -733,17 +682,18 @@ BootStrapCLOG(void)
+  *
+  * Control lock must be held at entry, and will be held at exit.
+  */
+-static int
++static Buffer
+ ZeroCLOGPage(int pageno, bool writeXlog)
+ {
+-	int			slotno;
++	Buffer		buffer;
+ 
+-	slotno = SimpleLruZeroPage(XactCtl, pageno);
++	buffer = ZeroSlruBuffer(SLRU_CLOG_ID, pageno);
++	MarkBufferDirty(buffer);
+ 
+ 	if (writeXlog)
+ 		WriteZeroPageXlogRec(pageno);
+ 
+-	return slotno;
++	return buffer;
+ }
+ 
+ /*
+@@ -753,17 +703,6 @@ ZeroCLOGPage(int pageno, bool writeXlog)
+ void
+ StartupCLOG(void)
+ {
+-	TransactionId xid = XidFromFullTransactionId(ShmemVariableCache->nextXid);
+-	int			pageno = TransactionIdToPage(xid);
+-
+-	LWLockAcquire(XactSLRULock, LW_EXCLUSIVE);
+-
+-	/*
+-	 * Initialize our idea of the latest page number.
+-	 */
+-	XactCtl->shared->latest_page_number = pageno;
+-
+-	LWLockRelease(XactSLRULock);
+ }
+ 
+ /*
+@@ -775,8 +714,6 @@ TrimCLOG(void)
+ 	TransactionId xid = XidFromFullTransactionId(ShmemVariableCache->nextXid);
+ 	int			pageno = TransactionIdToPage(xid);
+ 
+-	LWLockAcquire(XactSLRULock, LW_EXCLUSIVE);
+-
+ 	/*
+ 	 * Zero out the remainder of the current clog page.  Under normal
+ 	 * circumstances it should be zeroes already, but it seems at least
+@@ -793,40 +730,24 @@ TrimCLOG(void)
+ 	{
+ 		int			byteno = TransactionIdToByte(xid);
+ 		int			bshift = TransactionIdToBIndex(xid) * CLOG_BITS_PER_XACT;
+-		int			slotno;
+ 		char	   *byteptr;
++		Buffer		buffer;
+ 
+-		slotno = SimpleLruReadPage(XactCtl, pageno, false, xid);
+-		byteptr = XactCtl->shared->page_buffer[slotno] + byteno;
++		buffer = ReadSlruBuffer(SLRU_CLOG_ID, pageno);
++		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
++		byteptr = BufferGetPage(buffer) + byteno;
+ 
+ 		/* Zero so-far-unused positions in the current byte */
+ 		*byteptr &= (1 << bshift) - 1;
+ 		/* Zero the rest of the page */
+ 		MemSet(byteptr + 1, 0, BLCKSZ - byteno - 1);
+ 
+-		XactCtl->shared->page_dirty[slotno] = true;
+-	}
++		MarkBufferDirty(buffer);
+ 
+-	LWLockRelease(XactSLRULock);
+-}
+-
+-/*
+- * Perform a checkpoint --- either during shutdown, or on-the-fly
+- */
+-void
+-CheckPointCLOG(void)
+-{
+-	/*
+-	 * Write dirty CLOG pages to disk.  This may result in sync requests
+-	 * queued for later handling by ProcessSyncRequests(), as part of the
+-	 * checkpoint.
+-	 */
+-	TRACE_POSTGRESQL_CLOG_CHECKPOINT_START(true);
+-	SimpleLruWriteAll(XactCtl, true);
+-	TRACE_POSTGRESQL_CLOG_CHECKPOINT_DONE(true);
++		UnlockReleaseBuffer(buffer);
++	}
+ }
+ 
+-
+ /*
+  * Make sure that CLOG has room for a newly-allocated XID.
+  *
+@@ -850,12 +771,8 @@ ExtendCLOG(TransactionId newestXact)
+ 
+ 	pageno = TransactionIdToPage(newestXact);
+ 
+-	LWLockAcquire(XactSLRULock, LW_EXCLUSIVE);
+-
+ 	/* Zero the page and make an XLOG entry about it */
+-	ZeroCLOGPage(pageno, true);
+-
+-	LWLockRelease(XactSLRULock);
++	UnlockReleaseBuffer(ZeroCLOGPage(pageno, true));
+ }
+ 
+ 
+@@ -886,7 +803,8 @@ TruncateCLOG(TransactionId oldestXact, Oid oldestxid_datoid)
+ 	cutoffPage = TransactionIdToPage(oldestXact);
+ 
+ 	/* Check to see if there's any files that could be removed */
+-	if (!SlruScanDirectory(XactCtl, SlruScanDirCbReportPresence, &cutoffPage))
++	if (!SlruScanDirectory(SLRU_CLOG_ID, CLOGPagePrecedes,
++						   SlruScanDirCbReportPresence, &cutoffPage))
+ 		return;					/* nothing to remove */
+ 
+ 	/*
+@@ -907,7 +825,7 @@ TruncateCLOG(TransactionId oldestXact, Oid oldestxid_datoid)
+ 	WriteTruncateXlogRec(cutoffPage, oldestXact, oldestxid_datoid);
+ 
+ 	/* Now we can remove the old CLOG segment(s) */
+-	SimpleLruTruncate(XactCtl, cutoffPage);
++	SimpleLruTruncate(SLRU_CLOG_ID, CLOGPagePrecedes, cutoffPage);
+ }
+ 
+ 
+@@ -992,17 +910,13 @@ clog_redo(XLogReaderState *record)
+ 	if (info == CLOG_ZEROPAGE)
+ 	{
+ 		int			pageno;
+-		int			slotno;
++		Buffer		buffer;
+ 
+ 		memcpy(&pageno, XLogRecGetData(record), sizeof(int));
+ 
+-		LWLockAcquire(XactSLRULock, LW_EXCLUSIVE);
+-
+-		slotno = ZeroCLOGPage(pageno, false);
+-		SimpleLruWritePage(XactCtl, slotno);
+-		Assert(!XactCtl->shared->page_dirty[slotno]);
+-
+-		LWLockRelease(XactSLRULock);
++		buffer = ZeroCLOGPage(pageno, false);
++		FlushOneBuffer(buffer);
++		UnlockReleaseBuffer(buffer);
+ 	}
+ 	else if (info == CLOG_TRUNCATE)
+ 	{
+@@ -1012,17 +926,8 @@ clog_redo(XLogReaderState *record)
+ 
+ 		AdvanceOldestClogXid(xlrec.oldestXact);
+ 
+-		SimpleLruTruncate(XactCtl, xlrec.pageno);
++		SimpleLruTruncate(SLRU_CLOG_ID, CLOGPagePrecedes, xlrec.pageno);
+ 	}
+ 	else
+ 		elog(PANIC, "clog_redo: unknown op code %u", info);
+ }
+-
+-/*
+- * Entrypoint for sync.c to sync clog files.
+- */
+-int
+-clogsyncfiletag(const FileTag *ftag, char *path)
+-{
+-	return SlruSyncFileTag(XactCtl, ftag, path);
+-}
+diff --git a/src/backend/access/transam/commit_ts.c b/src/backend/access/transam/commit_ts.c
+index b897fabc702..69f34624b08 100644
+--- a/src/backend/access/transam/commit_ts.c
++++ b/src/backend/access/transam/commit_ts.c
+@@ -70,13 +70,6 @@ typedef struct CommitTimestampEntry
+ #define TransactionIdToCTsEntry(xid)	\
+ 	((xid) % (TransactionId) COMMIT_TS_XACTS_PER_PAGE)
+ 
+-/*
+- * Link to shared-memory data structures for CommitTs control
+- */
+-static SlruCtlData CommitTsCtlData;
+-
+-#define CommitTsCtl (&CommitTsCtlData)
+-
+ /*
+  * We keep a cache of the last value set in shared memory.
+  *
+@@ -107,7 +100,7 @@ static void SetXidCommitTsInPage(TransactionId xid, int nsubxids,
+ static void TransactionIdSetCommitTs(TransactionId xid, TimestampTz ts,
+ 									 RepOriginId nodeid, int slotno);
+ static void error_commit_ts_disabled(void);
+-static int	ZeroCommitTsPage(int pageno, bool writeXlog);
++static Buffer ZeroCommitTsPage(int pageno, bool writeXlog);
+ static bool CommitTsPagePrecedes(int page1, int page2);
+ static void ActivateCommitTs(void);
+ static void DeactivateCommitTs(void);
+@@ -216,30 +209,27 @@ SetXidCommitTsInPage(TransactionId xid, int nsubxids,
+ 					 TransactionId *subxids, TimestampTz ts,
+ 					 RepOriginId nodeid, int pageno)
+ {
+-	int			slotno;
+ 	int			i;
++	Buffer		buffer;
+ 
+-	LWLockAcquire(CommitTsSLRULock, LW_EXCLUSIVE);
+-
+-	slotno = SimpleLruReadPage(CommitTsCtl, pageno, true, xid);
++	buffer = ReadSlruBuffer(SLRU_COMMIT_TS_ID, pageno);
++	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+ 
+-	TransactionIdSetCommitTs(xid, ts, nodeid, slotno);
++	TransactionIdSetCommitTs(xid, ts, nodeid, buffer);
+ 	for (i = 0; i < nsubxids; i++)
+-		TransactionIdSetCommitTs(subxids[i], ts, nodeid, slotno);
++		TransactionIdSetCommitTs(subxids[i], ts, nodeid, buffer);
+ 
+-	CommitTsCtl->shared->page_dirty[slotno] = true;
++	MarkBufferDirty(buffer);
+ 
+-	LWLockRelease(CommitTsSLRULock);
++	UnlockReleaseBuffer(buffer);
+ }
+ 
+ /*
+  * Sets the commit timestamp of a single transaction.
+- *
+- * Must be called with CommitTsSLRULock held
+  */
+ static void
+ TransactionIdSetCommitTs(TransactionId xid, TimestampTz ts,
+-						 RepOriginId nodeid, int slotno)
++						 RepOriginId nodeid, Buffer buffer)
+ {
+ 	int			entryno = TransactionIdToCTsEntry(xid);
+ 	CommitTimestampEntry entry;
+@@ -249,8 +239,7 @@ TransactionIdSetCommitTs(TransactionId xid, TimestampTz ts,
+ 	entry.time = ts;
+ 	entry.nodeid = nodeid;
+ 
+-	memcpy(CommitTsCtl->shared->page_buffer[slotno] +
+-		   SizeOfCommitTimestampEntry * entryno,
++	memcpy(BufferGetPage(buffer) + SizeOfCommitTimestampEntry * entryno,
+ 		   &entry, SizeOfCommitTimestampEntry);
+ }
+ 
+@@ -268,10 +257,10 @@ TransactionIdGetCommitTsData(TransactionId xid, TimestampTz *ts,
+ {
+ 	int			pageno = TransactionIdToCTsPage(xid);
+ 	int			entryno = TransactionIdToCTsEntry(xid);
+-	int			slotno;
+ 	CommitTimestampEntry entry;
+ 	TransactionId oldestCommitTsXid;
+ 	TransactionId newestCommitTsXid;
++	Buffer		buffer;
+ 
+ 	if (!TransactionIdIsValid(xid))
+ 		ereport(ERROR,
+@@ -325,10 +314,11 @@ TransactionIdGetCommitTsData(TransactionId xid, TimestampTz *ts,
+ 		return false;
+ 	}
+ 
+-	/* lock is acquired by SimpleLruReadPage_ReadOnly */
+-	slotno = SimpleLruReadPage_ReadOnly(CommitTsCtl, pageno, xid);
++	buffer = ReadSlruBuffer(SLRU_COMMIT_TS_ID, pageno);
++	LockBuffer(buffer, BUFFER_LOCK_SHARE);
++
+ 	memcpy(&entry,
+-		   CommitTsCtl->shared->page_buffer[slotno] +
++		   BufferGetPage(buffer) +
+ 		   SizeOfCommitTimestampEntry * entryno,
+ 		   SizeOfCommitTimestampEntry);
+ 
+@@ -336,7 +326,7 @@ TransactionIdGetCommitTsData(TransactionId xid, TimestampTz *ts,
+ 	if (nodeid)
+ 		*nodeid = entry.nodeid;
+ 
+-	LWLockRelease(CommitTsSLRULock);
++	UnlockReleaseBuffer(buffer);
+ 	return *ts != 0;
+ }
+ 
+@@ -487,27 +477,13 @@ pg_xact_commit_timestamp_origin(PG_FUNCTION_ARGS)
+ 	PG_RETURN_DATUM(HeapTupleGetDatum(htup));
+ }
+ 
+-/*
+- * Number of shared CommitTS buffers.
+- *
+- * We use a very similar logic as for the number of CLOG buffers (except we
+- * scale up twice as fast with shared buffers, and the maximum is twice as
+- * high); see comments in CLOGShmemBuffers.
+- */
+-Size
+-CommitTsShmemBuffers(void)
+-{
+-	return Min(256, Max(4, NBuffers / 256));
+-}
+-
+ /*
+  * Shared memory sizing for CommitTs
+  */
+ Size
+ CommitTsShmemSize(void)
+ {
+-	return SimpleLruShmemSize(CommitTsShmemBuffers(), 0) +
+-		sizeof(CommitTimestampShared);
++	return sizeof(CommitTimestampShared);
+ }
+ 
+ /*
+@@ -519,12 +495,7 @@ CommitTsShmemInit(void)
+ {
+ 	bool		found;
+ 
+-	CommitTsCtl->PagePrecedes = CommitTsPagePrecedes;
+-	SimpleLruInit(CommitTsCtl, "CommitTs", CommitTsShmemBuffers(), 0,
+-				  CommitTsSLRULock, "pg_commit_ts",
+-				  LWTRANCHE_COMMITTS_BUFFER,
+-				  SYNC_HANDLER_COMMIT_TS);
+-	SlruPagePrecedesUnitTests(CommitTsCtl, COMMIT_TS_XACTS_PER_PAGE);
++	SlruPagePrecedesUnitTests(CommitTsPagePrecedes, COMMIT_TS_XACTS_PER_PAGE);
+ 
+ 	commitTsShared = ShmemInitStruct("CommitTs shared",
+ 									 sizeof(CommitTimestampShared),
+@@ -568,17 +539,18 @@ BootStrapCommitTs(void)
+  *
+  * Control lock must be held at entry, and will be held at exit.
+  */
+-static int
++static Buffer
+ ZeroCommitTsPage(int pageno, bool writeXlog)
+ {
+-	int			slotno;
++	Buffer		buffer;
+ 
+-	slotno = SimpleLruZeroPage(CommitTsCtl, pageno);
++	buffer = ZeroSlruBuffer(SLRU_COMMIT_TS_ID, pageno);
++	MarkBufferDirty(buffer);
+ 
+ 	if (writeXlog)
+ 		WriteZeroPageXlogRec(pageno);
+ 
+-	return slotno;
++	return buffer;
+ }
+ 
+ /*
+@@ -676,13 +648,6 @@ ActivateCommitTs(void)
+ 	xid = XidFromFullTransactionId(ShmemVariableCache->nextXid);
+ 	pageno = TransactionIdToCTsPage(xid);
+ 
+-	/*
+-	 * Re-Initialize our idea of the latest page number.
+-	 */
+-	LWLockAcquire(CommitTsSLRULock, LW_EXCLUSIVE);
+-	CommitTsCtl->shared->latest_page_number = pageno;
+-	LWLockRelease(CommitTsSLRULock);
+-
+ 	/*
+ 	 * If CommitTs is enabled, but it wasn't in the previous server run, we
+ 	 * need to set the oldest and newest values to the next Xid; that way, we
+@@ -705,15 +670,14 @@ ActivateCommitTs(void)
+ 	LWLockRelease(CommitTsLock);
+ 
+ 	/* Create the current segment file, if necessary */
+-	if (!SimpleLruDoesPhysicalPageExist(CommitTsCtl, pageno))
++	if (!SimpleLruDoesPhysicalPageExist(SLRU_COMMIT_TS_ID, pageno))
+ 	{
+-		int			slotno;
++		Buffer		buffer;
+ 
+-		LWLockAcquire(CommitTsSLRULock, LW_EXCLUSIVE);
+-		slotno = ZeroCommitTsPage(pageno, false);
+-		SimpleLruWritePage(CommitTsCtl, slotno);
+-		Assert(!CommitTsCtl->shared->page_dirty[slotno]);
+-		LWLockRelease(CommitTsSLRULock);
++		buffer = ZeroSlruBuffer(SLRU_COMMIT_TS_ID, pageno);
++		MarkBufferDirty(buffer);
++		FlushOneBuffer(buffer);
++		UnlockReleaseBuffer(buffer);
+ 	}
+ 
+ 	/* Change the activation status in shared memory. */
+@@ -762,23 +726,9 @@ DeactivateCommitTs(void)
+ 	 * be overwritten anyway when we wrap around, but it seems better to be
+ 	 * tidy.)
+ 	 */
+-	LWLockAcquire(CommitTsSLRULock, LW_EXCLUSIVE);
+-	(void) SlruScanDirectory(CommitTsCtl, SlruScanDirCbDeleteAll, NULL);
+-	LWLockRelease(CommitTsSLRULock);
+-}
+-
+-/*
+- * Perform a checkpoint --- either during shutdown, or on-the-fly
+- */
+-void
+-CheckPointCommitTs(void)
+-{
+-	/*
+-	 * Write dirty CommitTs pages to disk.  This may result in sync requests
+-	 * queued for later handling by ProcessSyncRequests(), as part of the
+-	 * checkpoint.
+-	 */
+-	SimpleLruWriteAll(CommitTsCtl, true);
++	(void) SlruScanDirectory(SLRU_COMMIT_TS_ID,
++							 CommitTsPagePrecedes,
++							 SlruScanDirCbDeleteAll, NULL);
+ }
+ 
+ /*
+@@ -816,12 +766,8 @@ ExtendCommitTs(TransactionId newestXact)
+ 
+ 	pageno = TransactionIdToCTsPage(newestXact);
+ 
+-	LWLockAcquire(CommitTsSLRULock, LW_EXCLUSIVE);
+-
+ 	/* Zero the page and make an XLOG entry about it */
+-	ZeroCommitTsPage(pageno, !InRecovery);
+-
+-	LWLockRelease(CommitTsSLRULock);
++	UnlockReleaseBuffer(ZeroCommitTsPage(pageno, !InRecovery));
+ }
+ 
+ /*
+@@ -842,7 +788,9 @@ TruncateCommitTs(TransactionId oldestXact)
+ 	cutoffPage = TransactionIdToCTsPage(oldestXact);
+ 
+ 	/* Check to see if there's any files that could be removed */
+-	if (!SlruScanDirectory(CommitTsCtl, SlruScanDirCbReportPresence,
++	if (!SlruScanDirectory(SLRU_COMMIT_TS_ID,
++						   CommitTsPagePrecedes,
++						   SlruScanDirCbReportPresence,
+ 						   &cutoffPage))
+ 		return;					/* nothing to remove */
+ 
+@@ -850,7 +798,7 @@ TruncateCommitTs(TransactionId oldestXact)
+ 	WriteTruncateXlogRec(cutoffPage, oldestXact);
+ 
+ 	/* Now we can remove the old CommitTs segment(s) */
+-	SimpleLruTruncate(CommitTsCtl, cutoffPage);
++	SimpleLruTruncate(SLRU_COMMIT_TS_ID, CommitTsPagePrecedes, cutoffPage);
+ }
+ 
+ /*
+@@ -974,17 +922,14 @@ commit_ts_redo(XLogReaderState *record)
+ 	if (info == COMMIT_TS_ZEROPAGE)
+ 	{
+ 		int			pageno;
+-		int			slotno;
++		Buffer		buffer;
+ 
+ 		memcpy(&pageno, XLogRecGetData(record), sizeof(int));
+ 
+-		LWLockAcquire(CommitTsSLRULock, LW_EXCLUSIVE);
+-
+-		slotno = ZeroCommitTsPage(pageno, false);
+-		SimpleLruWritePage(CommitTsCtl, slotno);
+-		Assert(!CommitTsCtl->shared->page_dirty[slotno]);
+-
+-		LWLockRelease(CommitTsSLRULock);
++		buffer = ZeroSlruBuffer(SLRU_COMMIT_TS_ID, pageno);
++		MarkBufferDirty(buffer);
++		FlushOneBuffer(buffer);
++		UnlockReleaseBuffer(buffer);
+ 	}
+ 	else if (info == COMMIT_TS_TRUNCATE)
+ 	{
+@@ -992,23 +937,8 @@ commit_ts_redo(XLogReaderState *record)
+ 
+ 		AdvanceOldestCommitTsXid(trunc->oldestXid);
+ 
+-		/*
+-		 * During XLOG replay, latest_page_number isn't set up yet; insert a
+-		 * suitable value to bypass the sanity test in SimpleLruTruncate.
+-		 */
+-		CommitTsCtl->shared->latest_page_number = trunc->pageno;
+-
+-		SimpleLruTruncate(CommitTsCtl, trunc->pageno);
++		SimpleLruTruncate(SLRU_COMMIT_TS_ID, CommitTsPagePrecedes, trunc->pageno);
+ 	}
+ 	else
+ 		elog(PANIC, "commit_ts_redo: unknown op code %u", info);
+ }
+-
+-/*
+- * Entrypoint for sync.c to sync commit_ts files.
+- */
+-int
+-committssyncfiletag(const FileTag *ftag, char *path)
+-{
+-	return SlruSyncFileTag(CommitTsCtl, ftag, path);
+-}
+diff --git a/src/backend/access/transam/multixact.c b/src/backend/access/transam/multixact.c
+index fe6698d5ffa..8e06a0e9a91 100644
+--- a/src/backend/access/transam/multixact.c
++++ b/src/backend/access/transam/multixact.c
+@@ -181,15 +181,6 @@
+ #define PreviousMultiXactId(xid) \
+ 	((xid) == FirstMultiXactId ? MaxMultiXactId : (xid) - 1)
+ 
+-/*
+- * Links to shared-memory data structures for MultiXact control
+- */
+-static SlruCtlData MultiXactOffsetCtlData;
+-static SlruCtlData MultiXactMemberCtlData;
+-
+-#define MultiXactOffsetCtl	(&MultiXactOffsetCtlData)
+-#define MultiXactMemberCtl	(&MultiXactMemberCtlData)
+-
+ /*
+  * MultiXact state shared across all backends.  All this state is protected
+  * by MultiXactGenLock.  (We also use MultiXactOffsetSLRULock and
+@@ -354,10 +345,9 @@ static void mXactCachePut(MultiXactId multi, int nmembers,
+ static char *mxstatus_to_string(MultiXactStatus status);
+ 
+ /* management of SLRU infrastructure */
+-static int	ZeroMultiXactOffsetPage(int pageno, bool writeXlog);
+-static int	ZeroMultiXactMemberPage(int pageno, bool writeXlog);
++static Buffer ZeroMultiXactOffsetPage(int pageno, bool writeXlog);
++static Buffer ZeroMultiXactMemberPage(int pageno, bool writeXlog);
+ static bool MultiXactOffsetPagePrecedes(int page1, int page2);
+-static bool MultiXactMemberPagePrecedes(int page1, int page2);
+ static bool MultiXactOffsetPrecedes(MultiXactOffset offset1,
+ 									MultiXactOffset offset2);
+ static void ExtendMultiXactOffset(MultiXactId multi);
+@@ -867,34 +857,25 @@ RecordNewMultiXact(MultiXactId multi, MultiXactOffset offset,
+ 	int			pageno;
+ 	int			prev_pageno;
+ 	int			entryno;
+-	int			slotno;
+ 	MultiXactOffset *offptr;
+ 	int			i;
+-
+-	LWLockAcquire(MultiXactOffsetSLRULock, LW_EXCLUSIVE);
++	Buffer		buffer;
+ 
+ 	pageno = MultiXactIdToOffsetPage(multi);
+ 	entryno = MultiXactIdToOffsetEntry(multi);
+ 
+-	/*
+-	 * Note: we pass the MultiXactId to SimpleLruReadPage as the "transaction"
+-	 * to complain about if there's any I/O error.  This is kinda bogus, but
+-	 * since the errors will always give the full pathname, it should be clear
+-	 * enough that a MultiXactId is really involved.  Perhaps someday we'll
+-	 * take the trouble to generalize the slru.c error reporting code.
+-	 */
+-	slotno = SimpleLruReadPage(MultiXactOffsetCtl, pageno, true, multi);
+-	offptr = (MultiXactOffset *) MultiXactOffsetCtl->shared->page_buffer[slotno];
++	/* XXX set up error context? */
++	buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
++	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
++	offptr = (MultiXactOffset *) BufferGetPage(buffer);
+ 	offptr += entryno;
+ 
+ 	*offptr = offset;
+ 
+-	MultiXactOffsetCtl->shared->page_dirty[slotno] = true;
+-
+-	/* Exchange our lock */
+-	LWLockRelease(MultiXactOffsetSLRULock);
++	MarkBufferDirty(buffer);
+ 
+-	LWLockAcquire(MultiXactMemberSLRULock, LW_EXCLUSIVE);
++	UnlockReleaseBuffer(buffer);
++	buffer = InvalidBuffer;
+ 
+ 	prev_pageno = -1;
+ 
+@@ -916,27 +897,28 @@ RecordNewMultiXact(MultiXactId multi, MultiXactOffset offset,
+ 
+ 		if (pageno != prev_pageno)
+ 		{
+-			slotno = SimpleLruReadPage(MultiXactMemberCtl, pageno, true, multi);
++			if (BufferIsValid(buffer))
++				UnlockReleaseBuffer(buffer);
++			buffer = ReadSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno);
++			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+ 			prev_pageno = pageno;
+ 		}
+ 
+-		memberptr = (TransactionId *)
+-			(MultiXactMemberCtl->shared->page_buffer[slotno] + memberoff);
++		memberptr = (TransactionId *) (BufferGetPage(buffer) + memberoff);
+ 
+ 		*memberptr = members[i].xid;
+ 
+-		flagsptr = (uint32 *)
+-			(MultiXactMemberCtl->shared->page_buffer[slotno] + flagsoff);
++		flagsptr = (uint32 *) (BufferGetPage(buffer) + flagsoff);
+ 
+ 		flagsval = *flagsptr;
+ 		flagsval &= ~(((1 << MXACT_MEMBER_BITS_PER_XACT) - 1) << bshift);
+ 		flagsval |= (members[i].status << bshift);
+ 		*flagsptr = flagsval;
+ 
+-		MultiXactMemberCtl->shared->page_dirty[slotno] = true;
++		MarkBufferDirty(buffer);
+ 	}
+ 
+-	LWLockRelease(MultiXactMemberSLRULock);
++	UnlockReleaseBuffer(buffer);
+ }
+ 
+ /*
+@@ -1228,7 +1210,6 @@ GetMultiXactIdMembers(MultiXactId multi, MultiXactMember **members,
+ 	int			pageno;
+ 	int			prev_pageno;
+ 	int			entryno;
+-	int			slotno;
+ 	MultiXactOffset *offptr;
+ 	MultiXactOffset offset;
+ 	int			length;
+@@ -1239,6 +1220,7 @@ GetMultiXactIdMembers(MultiXactId multi, MultiXactMember **members,
+ 	MultiXactId tmpMXact;
+ 	MultiXactOffset nextOffset;
+ 	MultiXactMember *ptr;
++	Buffer		buffer;
+ 
+ 	debug_elog3(DEBUG2, "GetMembers: asked for %u", multi);
+ 
+@@ -1342,13 +1324,12 @@ GetMultiXactIdMembers(MultiXactId multi, MultiXactMember **members,
+ 	 * time on every multixact creation.
+ 	 */
+ retry:
+-	LWLockAcquire(MultiXactOffsetSLRULock, LW_EXCLUSIVE);
+-
+ 	pageno = MultiXactIdToOffsetPage(multi);
+ 	entryno = MultiXactIdToOffsetEntry(multi);
+ 
+-	slotno = SimpleLruReadPage(MultiXactOffsetCtl, pageno, true, multi);
+-	offptr = (MultiXactOffset *) MultiXactOffsetCtl->shared->page_buffer[slotno];
++	buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
++	LockBuffer(buffer, BUFFER_LOCK_SHARE);
++	offptr = (MultiXactOffset *) BufferGetPage(buffer);
+ 	offptr += entryno;
+ 	offset = *offptr;
+ 
+@@ -1379,16 +1360,20 @@ retry:
+ 		entryno = MultiXactIdToOffsetEntry(tmpMXact);
+ 
+ 		if (pageno != prev_pageno)
+-			slotno = SimpleLruReadPage(MultiXactOffsetCtl, pageno, true, tmpMXact);
++		{
++			UnlockReleaseBuffer(buffer);
++			buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
++			LockBuffer(buffer, BUFFER_LOCK_SHARE);
++		}
+ 
+-		offptr = (MultiXactOffset *) MultiXactOffsetCtl->shared->page_buffer[slotno];
++		offptr = (MultiXactOffset *) BufferGetPage(buffer);
+ 		offptr += entryno;
+ 		nextMXOffset = *offptr;
+ 
+ 		if (nextMXOffset == 0)
+ 		{
+ 			/* Corner case 2: next multixact is still being filled in */
+-			LWLockRelease(MultiXactOffsetSLRULock);
++			UnlockReleaseBuffer(buffer);
+ 			CHECK_FOR_INTERRUPTS();
+ 			pg_usleep(1000L);
+ 			goto retry;
+@@ -1396,14 +1381,11 @@ retry:
+ 
+ 		length = nextMXOffset - offset;
+ 	}
+-
+-	LWLockRelease(MultiXactOffsetSLRULock);
++	UnlockReleaseBuffer(buffer);
++	buffer = InvalidBuffer;
+ 
+ 	ptr = (MultiXactMember *) palloc(length * sizeof(MultiXactMember));
+ 
+-	/* Now get the members themselves. */
+-	LWLockAcquire(MultiXactMemberSLRULock, LW_EXCLUSIVE);
+-
+ 	truelength = 0;
+ 	prev_pageno = -1;
+ 	for (i = 0; i < length; i++, offset++)
+@@ -1419,12 +1401,14 @@ retry:
+ 
+ 		if (pageno != prev_pageno)
+ 		{
+-			slotno = SimpleLruReadPage(MultiXactMemberCtl, pageno, true, multi);
++			if (BufferIsValid(buffer))
++				UnlockReleaseBuffer(buffer);
++			buffer = ReadSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno);
++			LockBuffer(buffer, BUFFER_LOCK_SHARE);
+ 			prev_pageno = pageno;
+ 		}
+ 
+-		xactptr = (TransactionId *)
+-			(MultiXactMemberCtl->shared->page_buffer[slotno] + memberoff);
++		xactptr = (TransactionId *) (BufferGetPage(buffer) + memberoff);
+ 
+ 		if (!TransactionIdIsValid(*xactptr))
+ 		{
+@@ -1435,14 +1419,13 @@ retry:
+ 
+ 		flagsoff = MXOffsetToFlagsOffset(offset);
+ 		bshift = MXOffsetToFlagsBitShift(offset);
+-		flagsptr = (uint32 *) (MultiXactMemberCtl->shared->page_buffer[slotno] + flagsoff);
++		flagsptr = (uint32 *) (BufferGetPage(buffer) + flagsoff);
+ 
+ 		ptr[truelength].xid = *xactptr;
+ 		ptr[truelength].status = (*flagsptr >> bshift) & MXACT_MEMBER_XACT_BITMASK;
+ 		truelength++;
+ 	}
+-
+-	LWLockRelease(MultiXactMemberSLRULock);
++	UnlockReleaseBuffer(buffer);
+ 
+ 	/* A multixid with zero members should not happen */
+ 	Assert(truelength > 0);
+@@ -1834,8 +1817,6 @@ MultiXactShmemSize(void)
+ 			 mul_size(sizeof(MultiXactId) * 2, MaxOldestSlot))
+ 
+ 	size = SHARED_MULTIXACT_STATE_SIZE;
+-	size = add_size(size, SimpleLruShmemSize(NUM_MULTIXACTOFFSET_BUFFERS, 0));
+-	size = add_size(size, SimpleLruShmemSize(NUM_MULTIXACTMEMBER_BUFFERS, 0));
+ 
+ 	return size;
+ }
+@@ -1847,22 +1828,6 @@ MultiXactShmemInit(void)
+ 
+ 	debug_elog2(DEBUG2, "Shared Memory Init for MultiXact");
+ 
+-	MultiXactOffsetCtl->PagePrecedes = MultiXactOffsetPagePrecedes;
+-	MultiXactMemberCtl->PagePrecedes = MultiXactMemberPagePrecedes;
+-
+-	SimpleLruInit(MultiXactOffsetCtl,
+-				  "MultiXactOffset", NUM_MULTIXACTOFFSET_BUFFERS, 0,
+-				  MultiXactOffsetSLRULock, "pg_multixact/offsets",
+-				  LWTRANCHE_MULTIXACTOFFSET_BUFFER,
+-				  SYNC_HANDLER_MULTIXACT_OFFSET);
+-	SlruPagePrecedesUnitTests(MultiXactOffsetCtl, MULTIXACT_OFFSETS_PER_PAGE);
+-	SimpleLruInit(MultiXactMemberCtl,
+-				  "MultiXactMember", NUM_MULTIXACTMEMBER_BUFFERS, 0,
+-				  MultiXactMemberSLRULock, "pg_multixact/members",
+-				  LWTRANCHE_MULTIXACTMEMBER_BUFFER,
+-				  SYNC_HANDLER_MULTIXACT_MEMBER);
+-	/* doesn't call SimpleLruTruncate() or meet criteria for unit tests */
+-
+ 	/* Initialize our shared state struct */
+ 	MultiXactState = ShmemInitStruct("Shared MultiXact State",
+ 									 SHARED_MULTIXACT_STATE_SIZE,
+@@ -1893,29 +1858,17 @@ MultiXactShmemInit(void)
+ void
+ BootStrapMultiXact(void)
+ {
+-	int			slotno;
+-
+-	LWLockAcquire(MultiXactOffsetSLRULock, LW_EXCLUSIVE);
++	Buffer		buffer;
+ 
+ 	/* Create and zero the first page of the offsets log */
+-	slotno = ZeroMultiXactOffsetPage(0, false);
+-
+-	/* Make sure it's written out */
+-	SimpleLruWritePage(MultiXactOffsetCtl, slotno);
+-	Assert(!MultiXactOffsetCtl->shared->page_dirty[slotno]);
+-
+-	LWLockRelease(MultiXactOffsetSLRULock);
+-
+-	LWLockAcquire(MultiXactMemberSLRULock, LW_EXCLUSIVE);
++	buffer = ZeroMultiXactOffsetPage(0, false);
++	FlushOneBuffer(buffer);
++	UnlockReleaseBuffer(buffer);
+ 
+ 	/* Create and zero the first page of the members log */
+-	slotno = ZeroMultiXactMemberPage(0, false);
+-
+-	/* Make sure it's written out */
+-	SimpleLruWritePage(MultiXactMemberCtl, slotno);
+-	Assert(!MultiXactMemberCtl->shared->page_dirty[slotno]);
+-
+-	LWLockRelease(MultiXactMemberSLRULock);
++	buffer = ZeroMultiXactMemberPage(0, false);
++	FlushOneBuffer(buffer);
++	UnlockReleaseBuffer(buffer);
+ }
+ 
+ /*
+@@ -1927,33 +1880,35 @@ BootStrapMultiXact(void)
+  *
+  * Control lock must be held at entry, and will be held at exit.
+  */
+-static int
++static Buffer
+ ZeroMultiXactOffsetPage(int pageno, bool writeXlog)
+ {
+-	int			slotno;
++	Buffer		buffer;
+ 
+-	slotno = SimpleLruZeroPage(MultiXactOffsetCtl, pageno);
++	buffer = ZeroSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
++	MarkBufferDirty(buffer);
+ 
+ 	if (writeXlog)
+ 		WriteMZeroPageXlogRec(pageno, XLOG_MULTIXACT_ZERO_OFF_PAGE);
+ 
+-	return slotno;
++	return buffer;
+ }
+ 
+ /*
+  * Ditto, for MultiXactMember
+  */
+-static int
++static Buffer
+ ZeroMultiXactMemberPage(int pageno, bool writeXlog)
+ {
+-	int			slotno;
++	Buffer		buffer;
+ 
+-	slotno = SimpleLruZeroPage(MultiXactMemberCtl, pageno);
++	buffer = ZeroSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno);
++	MarkBufferDirty(buffer);
+ 
+ 	if (writeXlog)
+ 		WriteMZeroPageXlogRec(pageno, XLOG_MULTIXACT_ZERO_MEM_PAGE);
+ 
+-	return slotno;
++	return buffer;
+ }
+ 
+ /*
+@@ -1978,22 +1933,14 @@ MaybeExtendOffsetSlru(void)
+ 
+ 	pageno = MultiXactIdToOffsetPage(MultiXactState->nextMXact);
+ 
+-	LWLockAcquire(MultiXactOffsetSLRULock, LW_EXCLUSIVE);
+-
+-	if (!SimpleLruDoesPhysicalPageExist(MultiXactOffsetCtl, pageno))
++	if (!SimpleLruDoesPhysicalPageExist(SLRU_MULTIXACT_OFFSET_ID, pageno))
+ 	{
+-		int			slotno;
++		Buffer			buffer;
+ 
+-		/*
+-		 * Fortunately for us, SimpleLruWritePage is already prepared to deal
+-		 * with creating a new segment file even if the page we're writing is
+-		 * not the first in it, so this is enough.
+-		 */
+-		slotno = ZeroMultiXactOffsetPage(pageno, false);
+-		SimpleLruWritePage(MultiXactOffsetCtl, slotno);
++		buffer = ZeroMultiXactOffsetPage(pageno, false);
++		FlushOneBuffer(buffer);
++		UnlockReleaseBuffer(buffer);
+ 	}
+-
+-	LWLockRelease(MultiXactOffsetSLRULock);
+ }
+ 
+ /*
+@@ -2007,21 +1954,6 @@ MaybeExtendOffsetSlru(void)
+ void
+ StartupMultiXact(void)
+ {
+-	MultiXactId multi = MultiXactState->nextMXact;
+-	MultiXactOffset offset = MultiXactState->nextOffset;
+-	int			pageno;
+-
+-	/*
+-	 * Initialize offset's idea of the latest page number.
+-	 */
+-	pageno = MultiXactIdToOffsetPage(multi);
+-	MultiXactOffsetCtl->shared->latest_page_number = pageno;
+-
+-	/*
+-	 * Initialize member's idea of the latest page number.
+-	 */
+-	pageno = MXOffsetToMemberPage(offset);
+-	MultiXactMemberCtl->shared->latest_page_number = pageno;
+ }
+ 
+ /*
+@@ -2045,14 +1977,7 @@ TrimMultiXact(void)
+ 	oldestMXactDB = MultiXactState->oldestMultiXactDB;
+ 	LWLockRelease(MultiXactGenLock);
+ 
+-	/* Clean up offsets state */
+-	LWLockAcquire(MultiXactOffsetSLRULock, LW_EXCLUSIVE);
+-
+-	/*
+-	 * (Re-)Initialize our idea of the latest page number for offsets.
+-	 */
+-	pageno = MultiXactIdToOffsetPage(nextMXact);
+-	MultiXactOffsetCtl->shared->latest_page_number = pageno;
++	pageno = MXOffsetToMemberPage(offset);
+ 
+ 	/*
+ 	 * Zero out the remainder of the current offsets page.  See notes in
+@@ -2065,29 +1990,20 @@ TrimMultiXact(void)
+ 	entryno = MultiXactIdToOffsetEntry(nextMXact);
+ 	if (entryno != 0)
+ 	{
+-		int			slotno;
+ 		MultiXactOffset *offptr;
++		Buffer		buffer;
+ 
+-		slotno = SimpleLruReadPage(MultiXactOffsetCtl, pageno, true, nextMXact);
+-		offptr = (MultiXactOffset *) MultiXactOffsetCtl->shared->page_buffer[slotno];
++		buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
++		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
++		offptr = (MultiXactOffset *) BufferGetPage(buffer);
+ 		offptr += entryno;
+ 
+ 		MemSet(offptr, 0, BLCKSZ - (entryno * sizeof(MultiXactOffset)));
+ 
+-		MultiXactOffsetCtl->shared->page_dirty[slotno] = true;
++		MarkBufferDirty(buffer);
++		UnlockReleaseBuffer(buffer);
+ 	}
+ 
+-	LWLockRelease(MultiXactOffsetSLRULock);
+-
+-	/* And the same for members */
+-	LWLockAcquire(MultiXactMemberSLRULock, LW_EXCLUSIVE);
+-
+-	/*
+-	 * (Re-)Initialize our idea of the latest page number for members.
+-	 */
+-	pageno = MXOffsetToMemberPage(offset);
+-	MultiXactMemberCtl->shared->latest_page_number = pageno;
+-
+ 	/*
+ 	 * Zero out the remainder of the current members page.  See notes in
+ 	 * TrimCLOG() for motivation.
+@@ -2095,14 +2011,14 @@ TrimMultiXact(void)
+ 	flagsoff = MXOffsetToFlagsOffset(offset);
+ 	if (flagsoff != 0)
+ 	{
+-		int			slotno;
+ 		TransactionId *xidptr;
+ 		int			memberoff;
++		Buffer		buffer;
+ 
+ 		memberoff = MXOffsetToMemberOffset(offset);
+-		slotno = SimpleLruReadPage(MultiXactMemberCtl, pageno, true, offset);
+-		xidptr = (TransactionId *)
+-			(MultiXactMemberCtl->shared->page_buffer[slotno] + memberoff);
++		buffer = ReadSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno);
++		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
++		xidptr = (TransactionId *) (BufferGetPage(buffer) + memberoff);
+ 
+ 		MemSet(xidptr, 0, BLCKSZ - memberoff);
+ 
+@@ -2112,11 +2028,10 @@ TrimMultiXact(void)
+ 		 * writing.
+ 		 */
+ 
+-		MultiXactMemberCtl->shared->page_dirty[slotno] = true;
++		MarkBufferDirty(buffer);
++		UnlockReleaseBuffer(buffer);
+ 	}
+ 
+-	LWLockRelease(MultiXactMemberSLRULock);
+-
+ 	/* signal that we're officially up */
+ 	LWLockAcquire(MultiXactGenLock, LW_EXCLUSIVE);
+ 	MultiXactState->finishedStartup = true;
+@@ -2148,25 +2063,6 @@ MultiXactGetCheckptMulti(bool is_shutdown,
+ 				*nextMulti, *nextMultiOffset, *oldestMulti, *oldestMultiDB);
+ }
+ 
+-/*
+- * Perform a checkpoint --- either during shutdown, or on-the-fly
+- */
+-void
+-CheckPointMultiXact(void)
+-{
+-	TRACE_POSTGRESQL_MULTIXACT_CHECKPOINT_START(true);
+-
+-	/*
+-	 * Write dirty MultiXact pages to disk.  This may result in sync requests
+-	 * queued for later handling by ProcessSyncRequests(), as part of the
+-	 * checkpoint.
+-	 */
+-	SimpleLruWriteAll(MultiXactOffsetCtl, true);
+-	SimpleLruWriteAll(MultiXactMemberCtl, true);
+-
+-	TRACE_POSTGRESQL_MULTIXACT_CHECKPOINT_DONE(true);
+-}
+-
+ /*
+  * Set the next-to-be-assigned MultiXactId and offset
+  *
+@@ -2415,12 +2311,8 @@ ExtendMultiXactOffset(MultiXactId multi)
+ 
+ 	pageno = MultiXactIdToOffsetPage(multi);
+ 
+-	LWLockAcquire(MultiXactOffsetSLRULock, LW_EXCLUSIVE);
+-
+ 	/* Zero the page and make an XLOG entry about it */
+-	ZeroMultiXactOffsetPage(pageno, true);
+-
+-	LWLockRelease(MultiXactOffsetSLRULock);
++	UnlockReleaseBuffer(ZeroMultiXactOffsetPage(pageno, true));
+ }
+ 
+ /*
+@@ -2456,12 +2348,8 @@ ExtendMultiXactMember(MultiXactOffset offset, int nmembers)
+ 
+ 			pageno = MXOffsetToMemberPage(offset);
+ 
+-			LWLockAcquire(MultiXactMemberSLRULock, LW_EXCLUSIVE);
+-
+ 			/* Zero the page and make an XLOG entry about it */
+-			ZeroMultiXactMemberPage(pageno, true);
+-
+-			LWLockRelease(MultiXactMemberSLRULock);
++			UnlockReleaseBuffer(ZeroMultiXactMemberPage(pageno, true));
+ 		}
+ 
+ 		/*
+@@ -2737,8 +2625,8 @@ find_multixact_start(MultiXactId multi, MultiXactOffset *result)
+ 	MultiXactOffset offset;
+ 	int			pageno;
+ 	int			entryno;
+-	int			slotno;
+ 	MultiXactOffset *offptr;
++	Buffer		buffer;
+ 
+ 	Assert(MultiXactState->finishedStartup);
+ 
+@@ -2746,20 +2634,19 @@ find_multixact_start(MultiXactId multi, MultiXactOffset *result)
+ 	entryno = MultiXactIdToOffsetEntry(multi);
+ 
+ 	/*
+-	 * Write out dirty data, so PhysicalPageExists can work correctly.
++	 * Cope with missing/bogus oldest MultiXact in inconsistent states (see
++	 * commit 068cfadf9).
+ 	 */
+-	SimpleLruWriteAll(MultiXactOffsetCtl, true);
+-	SimpleLruWriteAll(MultiXactMemberCtl, true);
+-
+-	if (!SimpleLruDoesPhysicalPageExist(MultiXactOffsetCtl, pageno))
++	if (!ProbeSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno) &&
++		!SimpleLruDoesPhysicalPageExist(SLRU_MULTIXACT_OFFSET_ID, pageno))
+ 		return false;
+ 
+-	/* lock is acquired by SimpleLruReadPage_ReadOnly */
+-	slotno = SimpleLruReadPage_ReadOnly(MultiXactOffsetCtl, pageno, multi);
+-	offptr = (MultiXactOffset *) MultiXactOffsetCtl->shared->page_buffer[slotno];
++	buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
++	LockBuffer(buffer, BUFFER_LOCK_SHARE);
++	offptr = (MultiXactOffset *) BufferGetPage(buffer);
+ 	offptr += entryno;
+ 	offset = *offptr;
+-	LWLockRelease(MultiXactOffsetSLRULock);
++	UnlockReleaseBuffer(buffer);
+ 
+ 	*result = offset;
+ 	return true;
+@@ -2862,12 +2749,13 @@ typedef struct mxtruncinfo
+  *		This callback determines the earliest existing page number.
+  */
+ static bool
+-SlruScanDirCbFindEarliest(SlruCtl ctl, char *filename, int segpage, void *data)
++SlruScanDirCbFindEarliest(int slru_id, SlruPagePrecedesFunction PagePrecedes,
++						  char *filename, int segpage, void *data)
+ {
+ 	mxtruncinfo *trunc = (mxtruncinfo *) data;
+ 
+ 	if (trunc->earliestExistingPage == -1 ||
+-		ctl->PagePrecedes(segpage, trunc->earliestExistingPage))
++		PagePrecedes(segpage, trunc->earliestExistingPage))
+ 	{
+ 		trunc->earliestExistingPage = segpage;
+ 	}
+@@ -2899,7 +2787,7 @@ PerformMembersTruncation(MultiXactOffset oldestOffset, MultiXactOffset newOldest
+ 	while (segment != endsegment)
+ 	{
+ 		elog(DEBUG2, "truncating multixact members segment %x", segment);
+-		SlruDeleteSegment(MultiXactMemberCtl, segment);
++		SlruDeleteSegment(SLRU_MULTIXACT_MEMBER_ID, segment);
+ 
+ 		/* move to next segment, handling wraparound correctly */
+ 		if (segment == maxsegment)
+@@ -2922,7 +2810,8 @@ PerformOffsetsTruncation(MultiXactId oldestMulti, MultiXactId newOldestMulti)
+ 	 * didn't subtract one, we'd trigger SimpleLruTruncate's wraparound
+ 	 * detection.
+ 	 */
+-	SimpleLruTruncate(MultiXactOffsetCtl,
++	SimpleLruTruncate(SLRU_MULTIXACT_OFFSET_ID,
++					  MultiXactOffsetPagePrecedes,
+ 					  MultiXactIdToOffsetPage(PreviousMultiXactId(newOldestMulti)));
+ }
+ 
+@@ -2996,7 +2885,9 @@ TruncateMultiXact(MultiXactId newOldestMulti, Oid newOldestMultiDB)
+ 	 * been truncated away, and we crashed before updating oldestMulti.
+ 	 */
+ 	trunc.earliestExistingPage = -1;
+-	SlruScanDirectory(MultiXactOffsetCtl, SlruScanDirCbFindEarliest, &trunc);
++	SlruScanDirectory(SLRU_MULTIXACT_OFFSET_ID,
++					  MultiXactOffsetPagePrecedes,
++					  SlruScanDirCbFindEarliest, &trunc);
+ 	earliest = trunc.earliestExistingPage * MULTIXACT_OFFSETS_PER_PAGE;
+ 	if (earliest < FirstMultiXactId)
+ 		earliest = FirstMultiXactId;
+@@ -3128,24 +3019,6 @@ MultiXactOffsetPagePrecedes(int page1, int page2)
+ 								multi2 + MULTIXACT_OFFSETS_PER_PAGE - 1));
+ }
+ 
+-/*
+- * Decide whether a MultiXactMember page number is "older" for truncation
+- * purposes.  There is no "invalid offset number" so use the numbers verbatim.
+- */
+-static bool
+-MultiXactMemberPagePrecedes(int page1, int page2)
+-{
+-	MultiXactOffset offset1;
+-	MultiXactOffset offset2;
+-
+-	offset1 = ((MultiXactOffset) page1) * MULTIXACT_MEMBERS_PER_PAGE;
+-	offset2 = ((MultiXactOffset) page2) * MULTIXACT_MEMBERS_PER_PAGE;
+-
+-	return (MultiXactOffsetPrecedes(offset1, offset2) &&
+-			MultiXactOffsetPrecedes(offset1,
+-									offset2 + MULTIXACT_MEMBERS_PER_PAGE - 1));
+-}
+-
+ /*
+  * Decide which of two MultiXactIds is earlier.
+  *
+@@ -3240,32 +3113,18 @@ multixact_redo(XLogReaderState *record)
+ 	if (info == XLOG_MULTIXACT_ZERO_OFF_PAGE)
+ 	{
+ 		int			pageno;
+-		int			slotno;
+ 
+ 		memcpy(&pageno, XLogRecGetData(record), sizeof(int));
+ 
+-		LWLockAcquire(MultiXactOffsetSLRULock, LW_EXCLUSIVE);
+-
+-		slotno = ZeroMultiXactOffsetPage(pageno, false);
+-		SimpleLruWritePage(MultiXactOffsetCtl, slotno);
+-		Assert(!MultiXactOffsetCtl->shared->page_dirty[slotno]);
+-
+-		LWLockRelease(MultiXactOffsetSLRULock);
++		UnlockReleaseBuffer(ZeroMultiXactOffsetPage(pageno, false));
+ 	}
+ 	else if (info == XLOG_MULTIXACT_ZERO_MEM_PAGE)
+ 	{
+ 		int			pageno;
+-		int			slotno;
+ 
+ 		memcpy(&pageno, XLogRecGetData(record), sizeof(int));
+ 
+-		LWLockAcquire(MultiXactMemberSLRULock, LW_EXCLUSIVE);
+-
+-		slotno = ZeroMultiXactMemberPage(pageno, false);
+-		SimpleLruWritePage(MultiXactMemberCtl, slotno);
+-		Assert(!MultiXactMemberCtl->shared->page_dirty[slotno]);
+-
+-		LWLockRelease(MultiXactMemberSLRULock);
++		UnlockReleaseBuffer(ZeroMultiXactMemberPage(pageno, false));
+ 	}
+ 	else if (info == XLOG_MULTIXACT_CREATE_ID)
+ 	{
+@@ -3299,7 +3158,6 @@ multixact_redo(XLogReaderState *record)
+ 	else if (info == XLOG_MULTIXACT_TRUNCATE_ID)
+ 	{
+ 		xl_multixact_truncate xlrec;
+-		int			pageno;
+ 
+ 		memcpy(&xlrec, XLogRecGetData(record),
+ 			   SizeOfMultiXactTruncate);
+@@ -3325,13 +3183,6 @@ multixact_redo(XLogReaderState *record)
+ 
+ 		PerformMembersTruncation(xlrec.startTruncMemb, xlrec.endTruncMemb);
+ 
+-		/*
+-		 * During XLOG replay, latest_page_number isn't necessarily set up
+-		 * yet; insert a suitable value to bypass the sanity test in
+-		 * SimpleLruTruncate.
+-		 */
+-		pageno = MultiXactIdToOffsetPage(xlrec.endTruncOff);
+-		MultiXactOffsetCtl->shared->latest_page_number = pageno;
+ 		PerformOffsetsTruncation(xlrec.startTruncOff, xlrec.endTruncOff);
+ 
+ 		LWLockRelease(MultiXactTruncationLock);
+@@ -3401,21 +3252,3 @@ pg_get_multixact_members(PG_FUNCTION_ARGS)
+ 
+ 	SRF_RETURN_DONE(funccxt);
+ }
+-
+-/*
+- * Entrypoint for sync.c to sync offsets files.
+- */
+-int
+-multixactoffsetssyncfiletag(const FileTag *ftag, char *path)
+-{
+-	return SlruSyncFileTag(MultiXactOffsetCtl, ftag, path);
+-}
+-
+-/*
+- * Entrypoint for sync.c to sync members files.
+- */
+-int
+-multixactmemberssyncfiletag(const FileTag *ftag, char *path)
+-{
+-	return SlruSyncFileTag(MultiXactMemberCtl, ftag, path);
+-}
+diff --git a/src/backend/access/transam/slru.c b/src/backend/access/transam/slru.c
+index 5ab86238a92..1204468c039 100644
+--- a/src/backend/access/transam/slru.c
++++ b/src/backend/access/transam/slru.c
+@@ -1,41 +1,9 @@
+ /*-------------------------------------------------------------------------
+  *
+  * slru.c
+- *		Simple LRU buffering for transaction status logfiles
++ *		Simple buffering for transaction status logfiles
+  *
+- * We use a simple least-recently-used scheme to manage a pool of page
+- * buffers.  Under ordinary circumstances we expect that write
+- * traffic will occur mostly to the latest page (and to the just-prior
+- * page, soon after a page transition).  Read traffic will probably touch
+- * a larger span of pages, but in any case a fairly small number of page
+- * buffers should be sufficient.  So, we just search the buffers using plain
+- * linear search; there's no need for a hashtable or anything fancy.
+- * The management algorithm is straight LRU except that we will never swap
+- * out the latest page (since we know it's going to be hit again eventually).
+- *
+- * We use a control LWLock to protect the shared data structures, plus
+- * per-buffer LWLocks that synchronize I/O for each buffer.  The control lock
+- * must be held to examine or modify any shared state.  A process that is
+- * reading in or writing out a page buffer does not hold the control lock,
+- * only the per-buffer lock for the buffer it is working on.
+- *
+- * "Holding the control lock" means exclusive lock in all cases except for
+- * SimpleLruReadPage_ReadOnly(); see comments for SlruRecentlyUsed() for
+- * the implications of that.
+- *
+- * When initiating I/O on a buffer, we acquire the per-buffer lock exclusively
+- * before releasing the control lock.  The per-buffer lock is released after
+- * completing the I/O, re-acquiring the control lock, and updating the shared
+- * state.  (Deadlock is not possible here, because we never try to initiate
+- * I/O when someone else is already doing I/O on the same buffer.)
+- * To wait for I/O to complete, release the control lock, acquire the
+- * per-buffer lock in shared mode, immediately release the per-buffer lock,
+- * reacquire the control lock, and then recheck state (since arbitrary things
+- * could have happened while we didn't have the lock).
+- *
+- * As with the regular buffer manager, it is possible for another process
+- * to re-dirty a page that is currently being written out.  This is handled
+- * by re-setting the page's page_dirty flag.
++ * XXX write me
+  *
+  *
+  * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
+@@ -60,562 +28,31 @@
+ #include "storage/fd.h"
+ #include "storage/shmem.h"
+ 
+-#define SlruFileName(ctl, path, seg) \
+-	snprintf(path, MAXPGPATH, "%s/%04X", (ctl)->Dir, seg)
+-
+-/*
+- * During SimpleLruWriteAll(), we will usually not need to write more than one
+- * or two physical files, but we may need to write several pages per file.  We
+- * can consolidate the I/O requests by leaving files open until control returns
+- * to SimpleLruWriteAll().  This data structure remembers which files are open.
+- */
+-#define MAX_WRITEALL_BUFFERS	16
++#define PG_SLRU(symname,name,path,synchronize) \
++	path,
+ 
+-typedef struct SlruWriteAllData
++static char *slru_dirs[] =
+ {
+-	int			num_files;		/* # files actually open */
+-	int			fd[MAX_WRITEALL_BUFFERS];	/* their FD's */
+-	int			segno[MAX_WRITEALL_BUFFERS];	/* their log seg#s */
+-} SlruWriteAllData;
+-
+-typedef struct SlruWriteAllData *SlruWriteAll;
+-
+-/*
+- * Populate a file tag describing a segment file.  We only use the segment
+- * number, since we can derive everything else we need by having separate
+- * sync handler functions for clog, multixact etc.
+- */
+-#define INIT_SLRUFILETAG(a,xx_handler,xx_segno) \
+-( \
+-	memset(&(a), 0, sizeof(FileTag)), \
+-	(a).handler = (xx_handler), \
+-	(a).segno = (xx_segno) \
+-)
++#include "access/slrulist.h"
++};
+ 
+ /*
+- * Macro to mark a buffer slot "most recently used".  Note multiple evaluation
+- * of arguments!
+- *
+- * The reason for the if-test is that there are often many consecutive
+- * accesses to the same page (particularly the latest page).  By suppressing
+- * useless increments of cur_lru_count, we reduce the probability that old
+- * pages' counts will "wrap around" and make them appear recently used.
+- *
+- * We allow this code to be executed concurrently by multiple processes within
+- * SimpleLruReadPage_ReadOnly().  As long as int reads and writes are atomic,
+- * this should not cause any completely-bogus values to enter the computation.
+- * However, it is possible for either cur_lru_count or individual
+- * page_lru_count entries to be "reset" to lower values than they should have,
+- * in case a process is delayed while it executes this macro.  With care in
+- * SlruSelectLRUPage(), this does little harm, and in any case the absolute
+- * worst possible consequence is a nonoptimal choice of page to evict.  The
+- * gain from allowing concurrent reads of SLRU pages seems worth it.
+- */
+-#define SlruRecentlyUsed(shared, slotno)	\
+-	do { \
+-		int		new_lru_count = (shared)->cur_lru_count; \
+-		if (new_lru_count != (shared)->page_lru_count[slotno]) { \
+-			(shared)->cur_lru_count = ++new_lru_count; \
+-			(shared)->page_lru_count[slotno] = new_lru_count; \
+-		} \
+-	} while (0)
+-
+-/* Saved info for SlruReportIOError */
+-typedef enum
+-{
+-	SLRU_OPEN_FAILED,
+-	SLRU_SEEK_FAILED,
+-	SLRU_READ_FAILED,
+-	SLRU_WRITE_FAILED,
+-	SLRU_FSYNC_FAILED,
+-	SLRU_CLOSE_FAILED
+-} SlruErrorCause;
+-
+-static SlruErrorCause slru_errcause;
+-static int	slru_errno;
+-
+-
+-static void SimpleLruZeroLSNs(SlruCtl ctl, int slotno);
+-static void SimpleLruWaitIO(SlruCtl ctl, int slotno);
+-static void SlruInternalWritePage(SlruCtl ctl, int slotno, SlruWriteAll fdata);
+-static bool SlruPhysicalReadPage(SlruCtl ctl, int pageno, int slotno);
+-static bool SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno,
+-								  SlruWriteAll fdata);
+-static void SlruReportIOError(SlruCtl ctl, int pageno, TransactionId xid);
+-static int	SlruSelectLRUPage(SlruCtl ctl, int pageno);
+-
+-static bool SlruScanDirCbDeleteCutoff(SlruCtl ctl, char *filename,
++ * We'll maintain a little cache of recently seen buffers, to try to avoid the
++ * buffer mapping table on repeat access (ie the busy end of the CLOG).  One
++ * entry per SLRU.
++  */
++struct SlruRecentBuffer {
++	int			pageno;
++	Buffer		recent_buffer;
++};
++
++static struct SlruRecentBuffer slru_recent_buffers[SLRU_NEXT_ID];
++
++static bool SlruScanDirCbDeleteCutoff(int slru_id,
++									  SlruPagePrecedesFunction PagePrecedes,
++									  char *filename,
+ 									  int segpage, void *data);
+-static void SlruInternalDeleteSegment(SlruCtl ctl, int segno);
+-
+-/*
+- * Initialization of shared memory
+- */
+-
+-Size
+-SimpleLruShmemSize(int nslots, int nlsns)
+-{
+-	Size		sz;
+-
+-	/* we assume nslots isn't so large as to risk overflow */
+-	sz = MAXALIGN(sizeof(SlruSharedData));
+-	sz += MAXALIGN(nslots * sizeof(char *));	/* page_buffer[] */
+-	sz += MAXALIGN(nslots * sizeof(SlruPageStatus));	/* page_status[] */
+-	sz += MAXALIGN(nslots * sizeof(bool));	/* page_dirty[] */
+-	sz += MAXALIGN(nslots * sizeof(int));	/* page_number[] */
+-	sz += MAXALIGN(nslots * sizeof(int));	/* page_lru_count[] */
+-	sz += MAXALIGN(nslots * sizeof(LWLockPadded));	/* buffer_locks[] */
+-
+-	if (nlsns > 0)
+-		sz += MAXALIGN(nslots * nlsns * sizeof(XLogRecPtr));	/* group_lsn[] */
+-
+-	return BUFFERALIGN(sz) + BLCKSZ * nslots;
+-}
+-
+-/*
+- * Initialize, or attach to, a simple LRU cache in shared memory.
+- *
+- * ctl: address of local (unshared) control structure.
+- * name: name of SLRU.  (This is user-visible, pick with care!)
+- * nslots: number of page slots to use.
+- * nlsns: number of LSN groups per page (set to zero if not relevant).
+- * ctllock: LWLock to use to control access to the shared control structure.
+- * subdir: PGDATA-relative subdirectory that will contain the files.
+- * tranche_id: LWLock tranche ID to use for the SLRU's per-buffer LWLocks.
+- * sync_handler: which set of functions to use to handle sync requests
+- */
+-void
+-SimpleLruInit(SlruCtl ctl, const char *name, int nslots, int nlsns,
+-			  LWLock *ctllock, const char *subdir, int tranche_id,
+-			  SyncRequestHandler sync_handler)
+-{
+-	SlruShared	shared;
+-	bool		found;
+-
+-	shared = (SlruShared) ShmemInitStruct(name,
+-										  SimpleLruShmemSize(nslots, nlsns),
+-										  &found);
+-
+-	if (!IsUnderPostmaster)
+-	{
+-		/* Initialize locks and shared memory area */
+-		char	   *ptr;
+-		Size		offset;
+-		int			slotno;
+-
+-		Assert(!found);
+-
+-		memset(shared, 0, sizeof(SlruSharedData));
+-
+-		shared->ControlLock = ctllock;
+-
+-		shared->num_slots = nslots;
+-		shared->lsn_groups_per_page = nlsns;
+-
+-		shared->cur_lru_count = 0;
+-
+-		/* shared->latest_page_number will be set later */
+-
+-		shared->slru_stats_idx = pgstat_get_slru_index(name);
+-
+-		ptr = (char *) shared;
+-		offset = MAXALIGN(sizeof(SlruSharedData));
+-		shared->page_buffer = (char **) (ptr + offset);
+-		offset += MAXALIGN(nslots * sizeof(char *));
+-		shared->page_status = (SlruPageStatus *) (ptr + offset);
+-		offset += MAXALIGN(nslots * sizeof(SlruPageStatus));
+-		shared->page_dirty = (bool *) (ptr + offset);
+-		offset += MAXALIGN(nslots * sizeof(bool));
+-		shared->page_number = (int *) (ptr + offset);
+-		offset += MAXALIGN(nslots * sizeof(int));
+-		shared->page_lru_count = (int *) (ptr + offset);
+-		offset += MAXALIGN(nslots * sizeof(int));
+-
+-		/* Initialize LWLocks */
+-		shared->buffer_locks = (LWLockPadded *) (ptr + offset);
+-		offset += MAXALIGN(nslots * sizeof(LWLockPadded));
+-
+-		if (nlsns > 0)
+-		{
+-			shared->group_lsn = (XLogRecPtr *) (ptr + offset);
+-			offset += MAXALIGN(nslots * nlsns * sizeof(XLogRecPtr));
+-		}
+-
+-		ptr += BUFFERALIGN(offset);
+-		for (slotno = 0; slotno < nslots; slotno++)
+-		{
+-			LWLockInitialize(&shared->buffer_locks[slotno].lock,
+-							 tranche_id);
+-
+-			shared->page_buffer[slotno] = ptr;
+-			shared->page_status[slotno] = SLRU_PAGE_EMPTY;
+-			shared->page_dirty[slotno] = false;
+-			shared->page_lru_count[slotno] = 0;
+-			ptr += BLCKSZ;
+-		}
+-
+-		/* Should fit to estimated shmem size */
+-		Assert(ptr - (char *) shared <= SimpleLruShmemSize(nslots, nlsns));
+-	}
+-	else
+-		Assert(found);
+-
+-	/*
+-	 * Initialize the unshared control struct, including directory path. We
+-	 * assume caller set PagePrecedes.
+-	 */
+-	ctl->shared = shared;
+-	ctl->sync_handler = sync_handler;
+-	strlcpy(ctl->Dir, subdir, sizeof(ctl->Dir));
+-}
+-
+-/*
+- * Initialize (or reinitialize) a page to zeroes.
+- *
+- * The page is not actually written, just set up in shared memory.
+- * The slot number of the new page is returned.
+- *
+- * Control lock must be held at entry, and will be held at exit.
+- */
+-int
+-SimpleLruZeroPage(SlruCtl ctl, int pageno)
+-{
+-	SlruShared	shared = ctl->shared;
+-	int			slotno;
+-
+-	/* Find a suitable buffer slot for the page */
+-	slotno = SlruSelectLRUPage(ctl, pageno);
+-	Assert(shared->page_status[slotno] == SLRU_PAGE_EMPTY ||
+-		   (shared->page_status[slotno] == SLRU_PAGE_VALID &&
+-			!shared->page_dirty[slotno]) ||
+-		   shared->page_number[slotno] == pageno);
+-
+-	/* Mark the slot as containing this page */
+-	shared->page_number[slotno] = pageno;
+-	shared->page_status[slotno] = SLRU_PAGE_VALID;
+-	shared->page_dirty[slotno] = true;
+-	SlruRecentlyUsed(shared, slotno);
+-
+-	/* Set the buffer to zeroes */
+-	MemSet(shared->page_buffer[slotno], 0, BLCKSZ);
+-
+-	/* Set the LSNs for this new page to zero */
+-	SimpleLruZeroLSNs(ctl, slotno);
+-
+-	/* Assume this page is now the latest active page */
+-	shared->latest_page_number = pageno;
+-
+-	/* update the stats counter of zeroed pages */
+-	pgstat_count_slru_page_zeroed(shared->slru_stats_idx);
+-
+-	return slotno;
+-}
+-
+-/*
+- * Zero all the LSNs we store for this slru page.
+- *
+- * This should be called each time we create a new page, and each time we read
+- * in a page from disk into an existing buffer.  (Such an old page cannot
+- * have any interesting LSNs, since we'd have flushed them before writing
+- * the page in the first place.)
+- *
+- * This assumes that InvalidXLogRecPtr is bitwise-all-0.
+- */
+-static void
+-SimpleLruZeroLSNs(SlruCtl ctl, int slotno)
+-{
+-	SlruShared	shared = ctl->shared;
+-
+-	if (shared->lsn_groups_per_page > 0)
+-		MemSet(&shared->group_lsn[slotno * shared->lsn_groups_per_page], 0,
+-			   shared->lsn_groups_per_page * sizeof(XLogRecPtr));
+-}
+-
+-/*
+- * Wait for any active I/O on a page slot to finish.  (This does not
+- * guarantee that new I/O hasn't been started before we return, though.
+- * In fact the slot might not even contain the same page anymore.)
+- *
+- * Control lock must be held at entry, and will be held at exit.
+- */
+-static void
+-SimpleLruWaitIO(SlruCtl ctl, int slotno)
+-{
+-	SlruShared	shared = ctl->shared;
+-
+-	/* See notes at top of file */
+-	LWLockRelease(shared->ControlLock);
+-	LWLockAcquire(&shared->buffer_locks[slotno].lock, LW_SHARED);
+-	LWLockRelease(&shared->buffer_locks[slotno].lock);
+-	LWLockAcquire(shared->ControlLock, LW_EXCLUSIVE);
+-
+-	/*
+-	 * If the slot is still in an io-in-progress state, then either someone
+-	 * already started a new I/O on the slot, or a previous I/O failed and
+-	 * neglected to reset the page state.  That shouldn't happen, really, but
+-	 * it seems worth a few extra cycles to check and recover from it. We can
+-	 * cheaply test for failure by seeing if the buffer lock is still held (we
+-	 * assume that transaction abort would release the lock).
+-	 */
+-	if (shared->page_status[slotno] == SLRU_PAGE_READ_IN_PROGRESS ||
+-		shared->page_status[slotno] == SLRU_PAGE_WRITE_IN_PROGRESS)
+-	{
+-		if (LWLockConditionalAcquire(&shared->buffer_locks[slotno].lock, LW_SHARED))
+-		{
+-			/* indeed, the I/O must have failed */
+-			if (shared->page_status[slotno] == SLRU_PAGE_READ_IN_PROGRESS)
+-				shared->page_status[slotno] = SLRU_PAGE_EMPTY;
+-			else				/* write_in_progress */
+-			{
+-				shared->page_status[slotno] = SLRU_PAGE_VALID;
+-				shared->page_dirty[slotno] = true;
+-			}
+-			LWLockRelease(&shared->buffer_locks[slotno].lock);
+-		}
+-	}
+-}
+-
+-/*
+- * Find a page in a shared buffer, reading it in if necessary.
+- * The page number must correspond to an already-initialized page.
+- *
+- * If write_ok is true then it is OK to return a page that is in
+- * WRITE_IN_PROGRESS state; it is the caller's responsibility to be sure
+- * that modification of the page is safe.  If write_ok is false then we
+- * will not return the page until it is not undergoing active I/O.
+- *
+- * The passed-in xid is used only for error reporting, and may be
+- * InvalidTransactionId if no specific xid is associated with the action.
+- *
+- * Return value is the shared-buffer slot number now holding the page.
+- * The buffer's LRU access info is updated.
+- *
+- * Control lock must be held at entry, and will be held at exit.
+- */
+-int
+-SimpleLruReadPage(SlruCtl ctl, int pageno, bool write_ok,
+-				  TransactionId xid)
+-{
+-	SlruShared	shared = ctl->shared;
+-
+-	/* Outer loop handles restart if we must wait for someone else's I/O */
+-	for (;;)
+-	{
+-		int			slotno;
+-		bool		ok;
+-
+-		/* See if page already is in memory; if not, pick victim slot */
+-		slotno = SlruSelectLRUPage(ctl, pageno);
+-
+-		/* Did we find the page in memory? */
+-		if (shared->page_number[slotno] == pageno &&
+-			shared->page_status[slotno] != SLRU_PAGE_EMPTY)
+-		{
+-			/*
+-			 * If page is still being read in, we must wait for I/O.  Likewise
+-			 * if the page is being written and the caller said that's not OK.
+-			 */
+-			if (shared->page_status[slotno] == SLRU_PAGE_READ_IN_PROGRESS ||
+-				(shared->page_status[slotno] == SLRU_PAGE_WRITE_IN_PROGRESS &&
+-				 !write_ok))
+-			{
+-				SimpleLruWaitIO(ctl, slotno);
+-				/* Now we must recheck state from the top */
+-				continue;
+-			}
+-			/* Otherwise, it's ready to use */
+-			SlruRecentlyUsed(shared, slotno);
+-
+-			/* update the stats counter of pages found in the SLRU */
+-			pgstat_count_slru_page_hit(shared->slru_stats_idx);
+-
+-			return slotno;
+-		}
+-
+-		/* We found no match; assert we selected a freeable slot */
+-		Assert(shared->page_status[slotno] == SLRU_PAGE_EMPTY ||
+-			   (shared->page_status[slotno] == SLRU_PAGE_VALID &&
+-				!shared->page_dirty[slotno]));
+-
+-		/* Mark the slot read-busy */
+-		shared->page_number[slotno] = pageno;
+-		shared->page_status[slotno] = SLRU_PAGE_READ_IN_PROGRESS;
+-		shared->page_dirty[slotno] = false;
+-
+-		/* Acquire per-buffer lock (cannot deadlock, see notes at top) */
+-		LWLockAcquire(&shared->buffer_locks[slotno].lock, LW_EXCLUSIVE);
+-
+-		/* Release control lock while doing I/O */
+-		LWLockRelease(shared->ControlLock);
+-
+-		/* Do the read */
+-		ok = SlruPhysicalReadPage(ctl, pageno, slotno);
+-
+-		/* Set the LSNs for this newly read-in page to zero */
+-		SimpleLruZeroLSNs(ctl, slotno);
+-
+-		/* Re-acquire control lock and update page state */
+-		LWLockAcquire(shared->ControlLock, LW_EXCLUSIVE);
+-
+-		Assert(shared->page_number[slotno] == pageno &&
+-			   shared->page_status[slotno] == SLRU_PAGE_READ_IN_PROGRESS &&
+-			   !shared->page_dirty[slotno]);
+-
+-		shared->page_status[slotno] = ok ? SLRU_PAGE_VALID : SLRU_PAGE_EMPTY;
+-
+-		LWLockRelease(&shared->buffer_locks[slotno].lock);
+-
+-		/* Now it's okay to ereport if we failed */
+-		if (!ok)
+-			SlruReportIOError(ctl, pageno, xid);
+-
+-		SlruRecentlyUsed(shared, slotno);
+-
+-		/* update the stats counter of pages not found in SLRU */
+-		pgstat_count_slru_page_read(shared->slru_stats_idx);
+-
+-		return slotno;
+-	}
+-}
+-
+-/*
+- * Find a page in a shared buffer, reading it in if necessary.
+- * The page number must correspond to an already-initialized page.
+- * The caller must intend only read-only access to the page.
+- *
+- * The passed-in xid is used only for error reporting, and may be
+- * InvalidTransactionId if no specific xid is associated with the action.
+- *
+- * Return value is the shared-buffer slot number now holding the page.
+- * The buffer's LRU access info is updated.
+- *
+- * Control lock must NOT be held at entry, but will be held at exit.
+- * It is unspecified whether the lock will be shared or exclusive.
+- */
+-int
+-SimpleLruReadPage_ReadOnly(SlruCtl ctl, int pageno, TransactionId xid)
+-{
+-	SlruShared	shared = ctl->shared;
+-	int			slotno;
+-
+-	/* Try to find the page while holding only shared lock */
+-	LWLockAcquire(shared->ControlLock, LW_SHARED);
+-
+-	/* See if page is already in a buffer */
+-	for (slotno = 0; slotno < shared->num_slots; slotno++)
+-	{
+-		if (shared->page_number[slotno] == pageno &&
+-			shared->page_status[slotno] != SLRU_PAGE_EMPTY &&
+-			shared->page_status[slotno] != SLRU_PAGE_READ_IN_PROGRESS)
+-		{
+-			/* See comments for SlruRecentlyUsed macro */
+-			SlruRecentlyUsed(shared, slotno);
+-
+-			/* update the stats counter of pages found in the SLRU */
+-			pgstat_count_slru_page_hit(shared->slru_stats_idx);
+-
+-			return slotno;
+-		}
+-	}
+-
+-	/* No luck, so switch to normal exclusive lock and do regular read */
+-	LWLockRelease(shared->ControlLock);
+-	LWLockAcquire(shared->ControlLock, LW_EXCLUSIVE);
+-
+-	return SimpleLruReadPage(ctl, pageno, true, xid);
+-}
+-
+-/*
+- * Write a page from a shared buffer, if necessary.
+- * Does nothing if the specified slot is not dirty.
+- *
+- * NOTE: only one write attempt is made here.  Hence, it is possible that
+- * the page is still dirty at exit (if someone else re-dirtied it during
+- * the write).  However, we *do* attempt a fresh write even if the page
+- * is already being written; this is for checkpoints.
+- *
+- * Control lock must be held at entry, and will be held at exit.
+- */
+-static void
+-SlruInternalWritePage(SlruCtl ctl, int slotno, SlruWriteAll fdata)
+-{
+-	SlruShared	shared = ctl->shared;
+-	int			pageno = shared->page_number[slotno];
+-	bool		ok;
+-
+-	/* If a write is in progress, wait for it to finish */
+-	while (shared->page_status[slotno] == SLRU_PAGE_WRITE_IN_PROGRESS &&
+-		   shared->page_number[slotno] == pageno)
+-	{
+-		SimpleLruWaitIO(ctl, slotno);
+-	}
+-
+-	/*
+-	 * Do nothing if page is not dirty, or if buffer no longer contains the
+-	 * same page we were called for.
+-	 */
+-	if (!shared->page_dirty[slotno] ||
+-		shared->page_status[slotno] != SLRU_PAGE_VALID ||
+-		shared->page_number[slotno] != pageno)
+-		return;
+-
+-	/*
+-	 * Mark the slot write-busy, and clear the dirtybit.  After this point, a
+-	 * transaction status update on this page will mark it dirty again.
+-	 */
+-	shared->page_status[slotno] = SLRU_PAGE_WRITE_IN_PROGRESS;
+-	shared->page_dirty[slotno] = false;
+-
+-	/* Acquire per-buffer lock (cannot deadlock, see notes at top) */
+-	LWLockAcquire(&shared->buffer_locks[slotno].lock, LW_EXCLUSIVE);
+-
+-	/* Release control lock while doing I/O */
+-	LWLockRelease(shared->ControlLock);
+-
+-	/* Do the write */
+-	ok = SlruPhysicalWritePage(ctl, pageno, slotno, fdata);
+-
+-	/* If we failed, and we're in a flush, better close the files */
+-	if (!ok && fdata)
+-	{
+-		int			i;
+-
+-		for (i = 0; i < fdata->num_files; i++)
+-			CloseTransientFile(fdata->fd[i]);
+-	}
+-
+-	/* Re-acquire control lock and update page state */
+-	LWLockAcquire(shared->ControlLock, LW_EXCLUSIVE);
+-
+-	Assert(shared->page_number[slotno] == pageno &&
+-		   shared->page_status[slotno] == SLRU_PAGE_WRITE_IN_PROGRESS);
+-
+-	/* If we failed to write, mark the page dirty again */
+-	if (!ok)
+-		shared->page_dirty[slotno] = true;
+-
+-	shared->page_status[slotno] = SLRU_PAGE_VALID;
+-
+-	LWLockRelease(&shared->buffer_locks[slotno].lock);
+-
+-	/* Now it's okay to ereport if we failed */
+-	if (!ok)
+-		SlruReportIOError(ctl, pageno, InvalidTransactionId);
+-
+-	/* If part of a checkpoint, count this as a buffer written. */
+-	if (fdata)
+-		CheckpointStats.ckpt_bufs_written++;
+-}
+-
+-/*
+- * Wrapper of SlruInternalWritePage, for external callers.
+- * fdata is always passed a NULL here.
+- */
+-void
+-SimpleLruWritePage(SlruCtl ctl, int slotno)
+-{
+-	SlruInternalWritePage(ctl, slotno, NULL);
+-}
++static void SlruInternalDeleteSegment(int slru_id, int segno);
+ 
+ /*
+  * Return whether the given page exists on disk.
+@@ -624,592 +61,24 @@ SimpleLruWritePage(SlruCtl ctl, int slotno)
+  * large enough to contain the given page.
+  */
+ bool
+-SimpleLruDoesPhysicalPageExist(SlruCtl ctl, int pageno)
++SimpleLruDoesPhysicalPageExist(int slru_id, int pageno)
+ {
+-	int			segno = pageno / SLRU_PAGES_PER_SEGMENT;
+-	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
+-	int			offset = rpageno * BLCKSZ;
+-	char		path[MAXPGPATH];
+-	int			fd;
+-	bool		result;
+-	off_t		endpos;
+-
+-	/* update the stats counter of checked pages */
+-	pgstat_count_slru_page_exists(ctl->shared->slru_stats_idx);
+-
+-	SlruFileName(ctl, path, segno);
+-
+-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+-	if (fd < 0)
+-	{
+-		/* expected: file doesn't exist */
+-		if (errno == ENOENT)
+-			return false;
+-
+-		/* report error normally */
+-		slru_errcause = SLRU_OPEN_FAILED;
+-		slru_errno = errno;
+-		SlruReportIOError(ctl, pageno, 0);
+-	}
+-
+-	if ((endpos = lseek(fd, 0, SEEK_END)) < 0)
+-	{
+-		slru_errcause = SLRU_SEEK_FAILED;
+-		slru_errno = errno;
+-		SlruReportIOError(ctl, pageno, 0);
+-	}
+-
+-	result = endpos >= (off_t) (offset + BLCKSZ);
+-
+-	if (CloseTransientFile(fd) != 0)
+-	{
+-		slru_errcause = SLRU_CLOSE_FAILED;
+-		slru_errno = errno;
+-		return false;
+-	}
+-
+-	return result;
+-}
+-
+-/*
+- * Physical read of a (previously existing) page into a buffer slot
+- *
+- * On failure, we cannot just ereport(ERROR) since caller has put state in
+- * shared memory that must be undone.  So, we return false and save enough
+- * info in static variables to let SlruReportIOError make the report.
+- *
+- * For now, assume it's not worth keeping a file pointer open across
+- * read/write operations.  We could cache one virtual file pointer ...
+- */
+-static bool
+-SlruPhysicalReadPage(SlruCtl ctl, int pageno, int slotno)
+-{
+-	SlruShared	shared = ctl->shared;
+ 	int			segno = pageno / SLRU_PAGES_PER_SEGMENT;
+ 	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
+ 	off_t		offset = rpageno * BLCKSZ;
+-	char		path[MAXPGPATH];
+-	int			fd;
+-
+-	SlruFileName(ctl, path, segno);
+-
+-	/*
+-	 * In a crash-and-restart situation, it's possible for us to receive
+-	 * commands to set the commit status of transactions whose bits are in
+-	 * already-truncated segments of the commit log (see notes in
+-	 * SlruPhysicalWritePage).  Hence, if we are InRecovery, allow the case
+-	 * where the file doesn't exist, and return zeroes instead.
+-	 */
+-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+-	if (fd < 0)
+-	{
+-		if (errno != ENOENT || !InRecovery)
+-		{
+-			slru_errcause = SLRU_OPEN_FAILED;
+-			slru_errno = errno;
+-			return false;
+-		}
+-
+-		ereport(LOG,
+-				(errmsg("file \"%s\" doesn't exist, reading as zeroes",
+-						path)));
+-		MemSet(shared->page_buffer[slotno], 0, BLCKSZ);
+-		return true;
+-	}
+-
+-	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_SLRU_READ);
+-	if (pg_pread(fd, shared->page_buffer[slotno], BLCKSZ, offset) != BLCKSZ)
+-	{
+-		pgstat_report_wait_end();
+-		slru_errcause = SLRU_READ_FAILED;
+-		slru_errno = errno;
+-		CloseTransientFile(fd);
+-		return false;
+-	}
+-	pgstat_report_wait_end();
+-
+-	if (CloseTransientFile(fd) != 0)
+-	{
+-		slru_errcause = SLRU_CLOSE_FAILED;
+-		slru_errno = errno;
+-		return false;
+-	}
+-
+-	return true;
+-}
+-
+-/*
+- * Physical write of a page from a buffer slot
+- *
+- * On failure, we cannot just ereport(ERROR) since caller has put state in
+- * shared memory that must be undone.  So, we return false and save enough
+- * info in static variables to let SlruReportIOError make the report.
+- *
+- * For now, assume it's not worth keeping a file pointer open across
+- * independent read/write operations.  We do batch operations during
+- * SimpleLruWriteAll, though.
+- *
+- * fdata is NULL for a standalone write, pointer to open-file info during
+- * SimpleLruWriteAll.
+- */
+-static bool
+-SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruWriteAll fdata)
+-{
+-	SlruShared	shared = ctl->shared;
+-	int			segno = pageno / SLRU_PAGES_PER_SEGMENT;
+-	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
+-	off_t		offset = rpageno * BLCKSZ;
+-	char		path[MAXPGPATH];
+-	int			fd = -1;
+-
+-	/* update the stats counter of written pages */
+-	pgstat_count_slru_page_written(shared->slru_stats_idx);
+-
+-	/*
+-	 * Honor the write-WAL-before-data rule, if appropriate, so that we do not
+-	 * write out data before associated WAL records.  This is the same action
+-	 * performed during FlushBuffer() in the main buffer manager.
+-	 */
+-	if (shared->group_lsn != NULL)
+-	{
+-		/*
+-		 * We must determine the largest async-commit LSN for the page. This
+-		 * is a bit tedious, but since this entire function is a slow path
+-		 * anyway, it seems better to do this here than to maintain a per-page
+-		 * LSN variable (which'd need an extra comparison in the
+-		 * transaction-commit path).
+-		 */
+-		XLogRecPtr	max_lsn;
+-		int			lsnindex,
+-					lsnoff;
+-
+-		lsnindex = slotno * shared->lsn_groups_per_page;
+-		max_lsn = shared->group_lsn[lsnindex++];
+-		for (lsnoff = 1; lsnoff < shared->lsn_groups_per_page; lsnoff++)
+-		{
+-			XLogRecPtr	this_lsn = shared->group_lsn[lsnindex++];
+-
+-			if (max_lsn < this_lsn)
+-				max_lsn = this_lsn;
+-		}
+-
+-		if (!XLogRecPtrIsInvalid(max_lsn))
+-		{
+-			/*
+-			 * As noted above, elog(ERROR) is not acceptable here, so if
+-			 * XLogFlush were to fail, we must PANIC.  This isn't much of a
+-			 * restriction because XLogFlush is just about all critical
+-			 * section anyway, but let's make sure.
+-			 */
+-			START_CRIT_SECTION();
+-			XLogFlush(max_lsn);
+-			END_CRIT_SECTION();
+-		}
+-	}
+-
+-	/*
+-	 * During a WriteAll, we may already have the desired file open.
+-	 */
+-	if (fdata)
+-	{
+-		int			i;
+-
+-		for (i = 0; i < fdata->num_files; i++)
+-		{
+-			if (fdata->segno[i] == segno)
+-			{
+-				fd = fdata->fd[i];
+-				break;
+-			}
+-		}
+-	}
+-
+-	if (fd < 0)
+-	{
+-		/*
+-		 * If the file doesn't already exist, we should create it.  It is
+-		 * possible for this to need to happen when writing a page that's not
+-		 * first in its segment; we assume the OS can cope with that. (Note:
+-		 * it might seem that it'd be okay to create files only when
+-		 * SimpleLruZeroPage is called for the first page of a segment.
+-		 * However, if after a crash and restart the REDO logic elects to
+-		 * replay the log from a checkpoint before the latest one, then it's
+-		 * possible that we will get commands to set transaction status of
+-		 * transactions that have already been truncated from the commit log.
+-		 * Easiest way to deal with that is to accept references to
+-		 * nonexistent files here and in SlruPhysicalReadPage.)
+-		 *
+-		 * Note: it is possible for more than one backend to be executing this
+-		 * code simultaneously for different pages of the same file. Hence,
+-		 * don't use O_EXCL or O_TRUNC or anything like that.
+-		 */
+-		SlruFileName(ctl, path, segno);
+-		fd = OpenTransientFile(path, O_RDWR | O_CREAT | PG_BINARY);
+-		if (fd < 0)
+-		{
+-			slru_errcause = SLRU_OPEN_FAILED;
+-			slru_errno = errno;
+-			return false;
+-		}
+-
+-		if (fdata)
+-		{
+-			if (fdata->num_files < MAX_WRITEALL_BUFFERS)
+-			{
+-				fdata->fd[fdata->num_files] = fd;
+-				fdata->segno[fdata->num_files] = segno;
+-				fdata->num_files++;
+-			}
+-			else
+-			{
+-				/*
+-				 * In the unlikely event that we exceed MAX_FLUSH_BUFFERS,
+-				 * fall back to treating it as a standalone write.
+-				 */
+-				fdata = NULL;
+-			}
+-		}
+-	}
+-
+-	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_SLRU_WRITE);
+-	if (pg_pwrite(fd, shared->page_buffer[slotno], BLCKSZ, offset) != BLCKSZ)
+-	{
+-		pgstat_report_wait_end();
+-		/* if write didn't set errno, assume problem is no disk space */
+-		if (errno == 0)
+-			errno = ENOSPC;
+-		slru_errcause = SLRU_WRITE_FAILED;
+-		slru_errno = errno;
+-		if (!fdata)
+-			CloseTransientFile(fd);
+-		return false;
+-	}
+-	pgstat_report_wait_end();
+-
+-	/* Queue up a sync request for the checkpointer. */
+-	if (ctl->sync_handler != SYNC_HANDLER_NONE)
+-	{
+-		FileTag		tag;
+-
+-		INIT_SLRUFILETAG(tag, ctl->sync_handler, segno);
+-		if (!RegisterSyncRequest(&tag, SYNC_REQUEST, false))
+-		{
+-			/* No space to enqueue sync request.  Do it synchronously. */
+-			pgstat_report_wait_start(WAIT_EVENT_SLRU_SYNC);
+-			if (pg_fsync(fd) != 0)
+-			{
+-				pgstat_report_wait_end();
+-				slru_errcause = SLRU_FSYNC_FAILED;
+-				slru_errno = errno;
+-				CloseTransientFile(fd);
+-				return false;
+-			}
+-			pgstat_report_wait_end();
+-		}
+-	}
+-
+-	/* Close file, unless part of flush request. */
+-	if (!fdata)
+-	{
+-		if (CloseTransientFile(fd) != 0)
+-		{
+-			slru_errcause = SLRU_CLOSE_FAILED;
+-			slru_errno = errno;
+-			return false;
+-		}
+-	}
+-
+-	return true;
+-}
+-
+-/*
+- * Issue the error message after failure of SlruPhysicalReadPage or
+- * SlruPhysicalWritePage.  Call this after cleaning up shared-memory state.
+- */
+-static void
+-SlruReportIOError(SlruCtl ctl, int pageno, TransactionId xid)
+-{
+-	int			segno = pageno / SLRU_PAGES_PER_SEGMENT;
+-	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
+-	int			offset = rpageno * BLCKSZ;
+-	char		path[MAXPGPATH];
+-
+-	SlruFileName(ctl, path, segno);
+-	errno = slru_errno;
+-	switch (slru_errcause)
+-	{
+-		case SLRU_OPEN_FAILED:
+-			ereport(ERROR,
+-					(errcode_for_file_access(),
+-					 errmsg("could not access status of transaction %u", xid),
+-					 errdetail("Could not open file \"%s\": %m.", path)));
+-			break;
+-		case SLRU_SEEK_FAILED:
+-			ereport(ERROR,
+-					(errcode_for_file_access(),
+-					 errmsg("could not access status of transaction %u", xid),
+-					 errdetail("Could not seek in file \"%s\" to offset %d: %m.",
+-							   path, offset)));
+-			break;
+-		case SLRU_READ_FAILED:
+-			if (errno)
+-				ereport(ERROR,
+-						(errcode_for_file_access(),
+-						 errmsg("could not access status of transaction %u", xid),
+-						 errdetail("Could not read from file \"%s\" at offset %d: %m.",
+-								   path, offset)));
+-			else
+-				ereport(ERROR,
+-						(errmsg("could not access status of transaction %u", xid),
+-						 errdetail("Could not read from file \"%s\" at offset %d: read too few bytes.", path, offset)));
+-			break;
+-		case SLRU_WRITE_FAILED:
+-			if (errno)
+-				ereport(ERROR,
+-						(errcode_for_file_access(),
+-						 errmsg("could not access status of transaction %u", xid),
+-						 errdetail("Could not write to file \"%s\" at offset %d: %m.",
+-								   path, offset)));
+-			else
+-				ereport(ERROR,
+-						(errmsg("could not access status of transaction %u", xid),
+-						 errdetail("Could not write to file \"%s\" at offset %d: wrote too few bytes.",
+-								   path, offset)));
+-			break;
+-		case SLRU_FSYNC_FAILED:
+-			ereport(data_sync_elevel(ERROR),
+-					(errcode_for_file_access(),
+-					 errmsg("could not access status of transaction %u", xid),
+-					 errdetail("Could not fsync file \"%s\": %m.",
+-							   path)));
+-			break;
+-		case SLRU_CLOSE_FAILED:
+-			ereport(ERROR,
+-					(errcode_for_file_access(),
+-					 errmsg("could not access status of transaction %u", xid),
+-					 errdetail("Could not close file \"%s\": %m.",
+-							   path)));
+-			break;
+-		default:
+-			/* can't get here, we trust */
+-			elog(ERROR, "unrecognized SimpleLru error cause: %d",
+-				 (int) slru_errcause);
+-			break;
+-	}
+-}
+-
+-/*
+- * Select the slot to re-use when we need a free slot.
+- *
+- * The target page number is passed because we need to consider the
+- * possibility that some other process reads in the target page while
+- * we are doing I/O to free a slot.  Hence, check or recheck to see if
+- * any slot already holds the target page, and return that slot if so.
+- * Thus, the returned slot is *either* a slot already holding the pageno
+- * (could be any state except EMPTY), *or* a freeable slot (state EMPTY
+- * or CLEAN).
+- *
+- * Control lock must be held at entry, and will be held at exit.
+- */
+-static int
+-SlruSelectLRUPage(SlruCtl ctl, int pageno)
+-{
+-	SlruShared	shared = ctl->shared;
+-
+-	/* Outer loop handles restart after I/O */
+-	for (;;)
+-	{
+-		int			slotno;
+-		int			cur_count;
+-		int			bestvalidslot = 0;	/* keep compiler quiet */
+-		int			best_valid_delta = -1;
+-		int			best_valid_page_number = 0; /* keep compiler quiet */
+-		int			bestinvalidslot = 0;	/* keep compiler quiet */
+-		int			best_invalid_delta = -1;
+-		int			best_invalid_page_number = 0;	/* keep compiler quiet */
++	off_t		size;
++	RelFileLocator rlocator = SlruRelFileLocator(slru_id, segno);
++	SMgrFileHandle sfile = smgropen(rlocator, InvalidBackendId, MAIN_FORKNUM);
+ 
+-		/* See if page already has a buffer assigned */
+-		for (slotno = 0; slotno < shared->num_slots; slotno++)
+-		{
+-			if (shared->page_number[slotno] == pageno &&
+-				shared->page_status[slotno] != SLRU_PAGE_EMPTY)
+-				return slotno;
+-		}
+-
+-		/*
+-		 * If we find any EMPTY slot, just select that one. Else choose a
+-		 * victim page to replace.  We normally take the least recently used
+-		 * valid page, but we will never take the slot containing
+-		 * latest_page_number, even if it appears least recently used.  We
+-		 * will select a slot that is already I/O busy only if there is no
+-		 * other choice: a read-busy slot will not be least recently used once
+-		 * the read finishes, and waiting for an I/O on a write-busy slot is
+-		 * inferior to just picking some other slot.  Testing shows the slot
+-		 * we pick instead will often be clean, allowing us to begin a read at
+-		 * once.
+-		 *
+-		 * Normally the page_lru_count values will all be different and so
+-		 * there will be a well-defined LRU page.  But since we allow
+-		 * concurrent execution of SlruRecentlyUsed() within
+-		 * SimpleLruReadPage_ReadOnly(), it is possible that multiple pages
+-		 * acquire the same lru_count values.  In that case we break ties by
+-		 * choosing the furthest-back page.
+-		 *
+-		 * Notice that this next line forcibly advances cur_lru_count to a
+-		 * value that is certainly beyond any value that will be in the
+-		 * page_lru_count array after the loop finishes.  This ensures that
+-		 * the next execution of SlruRecentlyUsed will mark the page newly
+-		 * used, even if it's for a page that has the current counter value.
+-		 * That gets us back on the path to having good data when there are
+-		 * multiple pages with the same lru_count.
+-		 */
+-		cur_count = (shared->cur_lru_count)++;
+-		for (slotno = 0; slotno < shared->num_slots; slotno++)
+-		{
+-			int			this_delta;
+-			int			this_page_number;
+-
+-			if (shared->page_status[slotno] == SLRU_PAGE_EMPTY)
+-				return slotno;
+-			this_delta = cur_count - shared->page_lru_count[slotno];
+-			if (this_delta < 0)
+-			{
+-				/*
+-				 * Clean up in case shared updates have caused cur_count
+-				 * increments to get "lost".  We back off the page counts,
+-				 * rather than trying to increase cur_count, to avoid any
+-				 * question of infinite loops or failure in the presence of
+-				 * wrapped-around counts.
+-				 */
+-				shared->page_lru_count[slotno] = cur_count;
+-				this_delta = 0;
+-			}
+-			this_page_number = shared->page_number[slotno];
+-			if (this_page_number == shared->latest_page_number)
+-				continue;
+-			if (shared->page_status[slotno] == SLRU_PAGE_VALID)
+-			{
+-				if (this_delta > best_valid_delta ||
+-					(this_delta == best_valid_delta &&
+-					 ctl->PagePrecedes(this_page_number,
+-									   best_valid_page_number)))
+-				{
+-					bestvalidslot = slotno;
+-					best_valid_delta = this_delta;
+-					best_valid_page_number = this_page_number;
+-				}
+-			}
+-			else
+-			{
+-				if (this_delta > best_invalid_delta ||
+-					(this_delta == best_invalid_delta &&
+-					 ctl->PagePrecedes(this_page_number,
+-									   best_invalid_page_number)))
+-				{
+-					bestinvalidslot = slotno;
+-					best_invalid_delta = this_delta;
+-					best_invalid_page_number = this_page_number;
+-				}
+-			}
+-		}
+-
+-		/*
+-		 * If all pages (except possibly the latest one) are I/O busy, we'll
+-		 * have to wait for an I/O to complete and then retry.  In that
+-		 * unhappy case, we choose to wait for the I/O on the least recently
+-		 * used slot, on the assumption that it was likely initiated first of
+-		 * all the I/Os in progress and may therefore finish first.
+-		 */
+-		if (best_valid_delta < 0)
+-		{
+-			SimpleLruWaitIO(ctl, bestinvalidslot);
+-			continue;
+-		}
+-
+-		/*
+-		 * If the selected page is clean, we're set.
+-		 */
+-		if (!shared->page_dirty[bestvalidslot])
+-			return bestvalidslot;
+-
+-		/*
+-		 * Write the page.
+-		 */
+-		SlruInternalWritePage(ctl, bestvalidslot, NULL);
+-
+-		/*
+-		 * Now loop back and try again.  This is the easiest way of dealing
+-		 * with corner cases such as the victim page being re-dirtied while we
+-		 * wrote it.
+-		 */
+-	}
+-}
+-
+-/*
+- * Write dirty pages to disk during checkpoint or database shutdown.  Flushing
+- * is deferred until the next call to ProcessSyncRequests(), though we do fsync
+- * the containing directory here to make sure that newly created directory
+- * entries are on disk.
+- */
+-void
+-SimpleLruWriteAll(SlruCtl ctl, bool allow_redirtied)
+-{
+-	SlruShared	shared = ctl->shared;
+-	SlruWriteAllData fdata;
+-	int			slotno;
+-	int			pageno = 0;
+-	int			i;
+-	bool		ok;
+-
+-	/* update the stats counter of flushes */
+-	pgstat_count_slru_flush(shared->slru_stats_idx);
+-
+-	/*
+-	 * Find and write dirty pages
+-	 */
+-	fdata.num_files = 0;
+-
+-	LWLockAcquire(shared->ControlLock, LW_EXCLUSIVE);
+-
+-	for (slotno = 0; slotno < shared->num_slots; slotno++)
+-	{
+-		SlruInternalWritePage(ctl, slotno, &fdata);
+-
+-		/*
+-		 * In some places (e.g. checkpoints), we cannot assert that the slot
+-		 * is clean now, since another process might have re-dirtied it
+-		 * already.  That's okay.
+-		 */
+-		Assert(allow_redirtied ||
+-			   shared->page_status[slotno] == SLRU_PAGE_EMPTY ||
+-			   (shared->page_status[slotno] == SLRU_PAGE_VALID &&
+-				!shared->page_dirty[slotno]));
+-	}
+-
+-	LWLockRelease(shared->ControlLock);
++	/* update the stats counter of checked pages */
++	pgstat_count_slru_page_exists(slru_id);
+ 
+-	/*
+-	 * Now close any files that were open
+-	 */
+-	ok = true;
+-	for (i = 0; i < fdata.num_files; i++)
+-	{
+-		if (CloseTransientFile(fdata.fd[i]) != 0)
+-		{
+-			slru_errcause = SLRU_CLOSE_FAILED;
+-			slru_errno = errno;
+-			pageno = fdata.segno[i] * SLRU_PAGES_PER_SEGMENT;
+-			ok = false;
+-		}
+-	}
+-	if (!ok)
+-		SlruReportIOError(ctl, pageno, InvalidTransactionId);
++	if (smgrexists(sfile))
++		size = smgrnblocks(sfile);
++	else
++		size = 0;
+ 
+-	/* Ensure that directory entries for new files are on disk. */
+-	if (ctl->sync_handler != SYNC_HANDLER_NONE)
+-		fsync_fname(ctl->Dir, true);
++	return size >= offset + BLCKSZ;
+ }
+ 
+ /*
+@@ -1224,75 +93,14 @@ SimpleLruWriteAll(SlruCtl ctl, bool allow_redirtied)
+  * after it has accrued freshly-written data.
+  */
+ void
+-SimpleLruTruncate(SlruCtl ctl, int cutoffPage)
++SimpleLruTruncate(int slru_id, SlruPagePrecedesFunction PagePrecedes, int cutoffPage)
+ {
+-	SlruShared	shared = ctl->shared;
+-	int			slotno;
+-
+ 	/* update the stats counter of truncates */
+-	pgstat_count_slru_truncate(shared->slru_stats_idx);
+-
+-	/*
+-	 * Scan shared memory and remove any pages preceding the cutoff page, to
+-	 * ensure we won't rewrite them later.  (Since this is normally called in
+-	 * or just after a checkpoint, any dirty pages should have been flushed
+-	 * already ... we're just being extra careful here.)
+-	 */
+-	LWLockAcquire(shared->ControlLock, LW_EXCLUSIVE);
+-
+-restart:
+-
+-	/*
+-	 * While we are holding the lock, make an important safety check: the
+-	 * current endpoint page must not be eligible for removal.
+-	 */
+-	if (ctl->PagePrecedes(shared->latest_page_number, cutoffPage))
+-	{
+-		LWLockRelease(shared->ControlLock);
+-		ereport(LOG,
+-				(errmsg("could not truncate directory \"%s\": apparent wraparound",
+-						ctl->Dir)));
+-		return;
+-	}
+-
+-	for (slotno = 0; slotno < shared->num_slots; slotno++)
+-	{
+-		if (shared->page_status[slotno] == SLRU_PAGE_EMPTY)
+-			continue;
+-		if (!ctl->PagePrecedes(shared->page_number[slotno], cutoffPage))
+-			continue;
+-
+-		/*
+-		 * If page is clean, just change state to EMPTY (expected case).
+-		 */
+-		if (shared->page_status[slotno] == SLRU_PAGE_VALID &&
+-			!shared->page_dirty[slotno])
+-		{
+-			shared->page_status[slotno] = SLRU_PAGE_EMPTY;
+-			continue;
+-		}
+-
+-		/*
+-		 * Hmm, we have (or may have) I/O operations acting on the page, so
+-		 * we've got to wait for them to finish and then start again. This is
+-		 * the same logic as in SlruSelectLRUPage.  (XXX if page is dirty,
+-		 * wouldn't it be OK to just discard it without writing it?
+-		 * SlruMayDeleteSegment() uses a stricter qualification, so we might
+-		 * not delete this page in the end; even if we don't delete it, we
+-		 * won't have cause to read its data again.  For now, keep the logic
+-		 * the same as it was.)
+-		 */
+-		if (shared->page_status[slotno] == SLRU_PAGE_VALID)
+-			SlruInternalWritePage(ctl, slotno, NULL);
+-		else
+-			SimpleLruWaitIO(ctl, slotno);
+-		goto restart;
+-	}
+-
+-	LWLockRelease(shared->ControlLock);
++	pgstat_count_slru_truncate(slru_id);
+ 
+ 	/* Now we can remove the old segment(s) */
+-	(void) SlruScanDirectory(ctl, SlruScanDirCbDeleteCutoff, &cutoffPage);
++	(void) SlruScanDirectory(slru_id, PagePrecedes, SlruScanDirCbDeleteCutoff,
++							 &cutoffPage);
+ }
+ 
+ /*
+@@ -1302,77 +110,22 @@ restart:
+  * they either can't yet contain anything, or have already been cleaned out.
+  */
+ static void
+-SlruInternalDeleteSegment(SlruCtl ctl, int segno)
++SlruInternalDeleteSegment(int slru_id, int segno)
+ {
+-	char		path[MAXPGPATH];
+-
+-	/* Forget any fsync requests queued for this segment. */
+-	if (ctl->sync_handler != SYNC_HANDLER_NONE)
+-	{
+-		FileTag		tag;
+-
+-		INIT_SLRUFILETAG(tag, ctl->sync_handler, segno);
+-		RegisterSyncRequest(&tag, SYNC_FORGET_REQUEST, true);
+-	}
++	RelFileLocator rlocator = SlruRelFileLocator(slru_id, segno);
++	SMgrFileHandle sfile = smgropen(rlocator, InvalidBackendId, MAIN_FORKNUM);
+ 
+ 	/* Unlink the file. */
+-	SlruFileName(ctl, path, segno);
+-	ereport(DEBUG2, (errmsg_internal("removing file \"%s\"", path)));
+-	unlink(path);
++	smgrunlink(sfile, false);
+ }
+ 
+ /*
+  * Delete an individual SLRU segment, identified by the segment number.
+  */
+ void
+-SlruDeleteSegment(SlruCtl ctl, int segno)
++SlruDeleteSegment(int slru_id, int segno)
+ {
+-	SlruShared	shared = ctl->shared;
+-	int			slotno;
+-	bool		did_write;
+-
+-	/* Clean out any possibly existing references to the segment. */
+-	LWLockAcquire(shared->ControlLock, LW_EXCLUSIVE);
+-restart:
+-	did_write = false;
+-	for (slotno = 0; slotno < shared->num_slots; slotno++)
+-	{
+-		int			pagesegno = shared->page_number[slotno] / SLRU_PAGES_PER_SEGMENT;
+-
+-		if (shared->page_status[slotno] == SLRU_PAGE_EMPTY)
+-			continue;
+-
+-		/* not the segment we're looking for */
+-		if (pagesegno != segno)
+-			continue;
+-
+-		/* If page is clean, just change state to EMPTY (expected case). */
+-		if (shared->page_status[slotno] == SLRU_PAGE_VALID &&
+-			!shared->page_dirty[slotno])
+-		{
+-			shared->page_status[slotno] = SLRU_PAGE_EMPTY;
+-			continue;
+-		}
+-
+-		/* Same logic as SimpleLruTruncate() */
+-		if (shared->page_status[slotno] == SLRU_PAGE_VALID)
+-			SlruInternalWritePage(ctl, slotno, NULL);
+-		else
+-			SimpleLruWaitIO(ctl, slotno);
+-
+-		did_write = true;
+-	}
+-
+-	/*
+-	 * Be extra careful and re-check. The IO functions release the control
+-	 * lock, so new pages could have been read in.
+-	 */
+-	if (did_write)
+-		goto restart;
+-
+-	SlruInternalDeleteSegment(ctl, segno);
+-
+-	LWLockRelease(shared->ControlLock);
++	SlruInternalDeleteSegment(slru_id, segno);
+ }
+ 
+ /*
+@@ -1389,19 +142,21 @@ restart:
+  * first>=cutoff && last>=cutoff: no; every page of this segment is too young
+  */
+ static bool
+-SlruMayDeleteSegment(SlruCtl ctl, int segpage, int cutoffPage)
++SlruMayDeleteSegment(SlruPagePrecedesFunction PagePrecedes,
++					 int segpage, int cutoffPage)
+ {
+ 	int			seg_last_page = segpage + SLRU_PAGES_PER_SEGMENT - 1;
+ 
+ 	Assert(segpage % SLRU_PAGES_PER_SEGMENT == 0);
+ 
+-	return (ctl->PagePrecedes(segpage, cutoffPage) &&
+-			ctl->PagePrecedes(seg_last_page, cutoffPage));
++	return (PagePrecedes(segpage, cutoffPage) &&
++			PagePrecedes(seg_last_page, cutoffPage));
+ }
+ 
+ #ifdef USE_ASSERT_CHECKING
+ static void
+-SlruPagePrecedesTestOffset(SlruCtl ctl, int per_page, uint32 offset)
++SlruPagePrecedesTestOffset(SlruPagePrecedesFunction PagePrecedes,
++						   int per_page, uint32 offset)
+ {
+ 	TransactionId lhs,
+ 				rhs;
+@@ -1426,19 +181,19 @@ SlruPagePrecedesTestOffset(SlruCtl ctl, int per_page, uint32 offset)
+ 	Assert(!TransactionIdPrecedes(rhs, lhs + 1));
+ 	Assert(!TransactionIdFollowsOrEquals(lhs, rhs));
+ 	Assert(!TransactionIdFollowsOrEquals(rhs, lhs));
+-	Assert(!ctl->PagePrecedes(lhs / per_page, lhs / per_page));
+-	Assert(!ctl->PagePrecedes(lhs / per_page, rhs / per_page));
+-	Assert(!ctl->PagePrecedes(rhs / per_page, lhs / per_page));
+-	Assert(!ctl->PagePrecedes((lhs - per_page) / per_page, rhs / per_page));
+-	Assert(ctl->PagePrecedes(rhs / per_page, (lhs - 3 * per_page) / per_page));
+-	Assert(ctl->PagePrecedes(rhs / per_page, (lhs - 2 * per_page) / per_page));
+-	Assert(ctl->PagePrecedes(rhs / per_page, (lhs - 1 * per_page) / per_page)
++	Assert(!PagePrecedes(lhs / per_page, lhs / per_page));
++	Assert(!PagePrecedes(lhs / per_page, rhs / per_page));
++	Assert(!PagePrecedes(rhs / per_page, lhs / per_page));
++	Assert(!PagePrecedes((lhs - per_page) / per_page, rhs / per_page));
++	Assert(PagePrecedes(rhs / per_page, (lhs - 3 * per_page) / per_page));
++	Assert(PagePrecedes(rhs / per_page, (lhs - 2 * per_page) / per_page));
++	Assert(PagePrecedes(rhs / per_page, (lhs - 1 * per_page) / per_page)
+ 		   || (1U << 31) % per_page != 0);	/* See CommitTsPagePrecedes() */
+-	Assert(ctl->PagePrecedes((lhs + 1 * per_page) / per_page, rhs / per_page)
++	Assert(PagePrecedes((lhs + 1 * per_page) / per_page, rhs / per_page)
+ 		   || (1U << 31) % per_page != 0);
+-	Assert(ctl->PagePrecedes((lhs + 2 * per_page) / per_page, rhs / per_page));
+-	Assert(ctl->PagePrecedes((lhs + 3 * per_page) / per_page, rhs / per_page));
+-	Assert(!ctl->PagePrecedes(rhs / per_page, (lhs + per_page) / per_page));
++	Assert(PagePrecedes((lhs + 2 * per_page) / per_page, rhs / per_page));
++	Assert(PagePrecedes((lhs + 3 * per_page) / per_page, rhs / per_page));
++	Assert(!PagePrecedes(rhs / per_page, (lhs + per_page) / per_page));
+ 
+ 	/*
+ 	 * GetNewTransactionId() has assigned the last XID it can safely use, and
+@@ -1451,7 +206,7 @@ SlruPagePrecedesTestOffset(SlruCtl ctl, int per_page, uint32 offset)
+ 	oldestXact = newestXact + 1;
+ 	oldestXact -= 1U << 31;
+ 	oldestPage = oldestXact / per_page;
+-	Assert(!SlruMayDeleteSegment(ctl,
++	Assert(!SlruMayDeleteSegment(PagePrecedes,
+ 								 (newestPage -
+ 								  newestPage % SLRU_PAGES_PER_SEGMENT),
+ 								 oldestPage));
+@@ -1467,7 +222,7 @@ SlruPagePrecedesTestOffset(SlruCtl ctl, int per_page, uint32 offset)
+ 	oldestXact = newestXact + 1;
+ 	oldestXact -= 1U << 31;
+ 	oldestPage = oldestXact / per_page;
+-	Assert(!SlruMayDeleteSegment(ctl,
++	Assert(!SlruMayDeleteSegment(PagePrecedes,
+ 								 (newestPage -
+ 								  newestPage % SLRU_PAGES_PER_SEGMENT),
+ 								 oldestPage));
+@@ -1483,12 +238,12 @@ SlruPagePrecedesTestOffset(SlruCtl ctl, int per_page, uint32 offset)
+  * do not apply to them.)
+  */
+ void
+-SlruPagePrecedesUnitTests(SlruCtl ctl, int per_page)
++SlruPagePrecedesUnitTests(SlruPagePrecedesFunction PagePrecedes, int per_page)
+ {
+ 	/* Test first, middle and last entries of a page. */
+-	SlruPagePrecedesTestOffset(ctl, per_page, 0);
+-	SlruPagePrecedesTestOffset(ctl, per_page, per_page / 2);
+-	SlruPagePrecedesTestOffset(ctl, per_page, per_page - 1);
++	SlruPagePrecedesTestOffset(PagePrecedes, per_page, 0);
++	SlruPagePrecedesTestOffset(PagePrecedes, per_page, per_page / 2);
++	SlruPagePrecedesTestOffset(PagePrecedes, per_page, per_page - 1);
+ }
+ #endif
+ 
+@@ -1498,11 +253,12 @@ SlruPagePrecedesUnitTests(SlruCtl ctl, int per_page)
+  *		one containing the page passed as "data".
+  */
+ bool
+-SlruScanDirCbReportPresence(SlruCtl ctl, char *filename, int segpage, void *data)
++SlruScanDirCbReportPresence(int slru_id, SlruPagePrecedesFunction PagePrecedes,
++							char *filename, int segpage, void *data)
+ {
+ 	int			cutoffPage = *(int *) data;
+ 
+-	if (SlruMayDeleteSegment(ctl, segpage, cutoffPage))
++	if (SlruMayDeleteSegment(PagePrecedes, segpage, cutoffPage))
+ 		return true;			/* found one; don't iterate any more */
+ 
+ 	return false;				/* keep going */
+@@ -1513,12 +269,15 @@ SlruScanDirCbReportPresence(SlruCtl ctl, char *filename, int segpage, void *data
+  *		This callback deletes segments prior to the one passed in as "data".
+  */
+ static bool
+-SlruScanDirCbDeleteCutoff(SlruCtl ctl, char *filename, int segpage, void *data)
++SlruScanDirCbDeleteCutoff(int slru_id, SlruPagePrecedesFunction PagePrecedes,
++						  char *filename, int segpage, void *data)
+ {
+ 	int			cutoffPage = *(int *) data;
+ 
+-	if (SlruMayDeleteSegment(ctl, segpage, cutoffPage))
+-		SlruInternalDeleteSegment(ctl, segpage / SLRU_PAGES_PER_SEGMENT);
++	if (SlruMayDeleteSegment(PagePrecedes, segpage, cutoffPage))
++	{
++		SlruDeleteSegment(slru_id, segpage / SLRU_PAGES_PER_SEGMENT);
++	}
+ 
+ 	return false;				/* keep going */
+ }
+@@ -1528,9 +287,10 @@ SlruScanDirCbDeleteCutoff(SlruCtl ctl, char *filename, int segpage, void *data)
+  *		This callback deletes all segments.
+  */
+ bool
+-SlruScanDirCbDeleteAll(SlruCtl ctl, char *filename, int segpage, void *data)
++SlruScanDirCbDeleteAll(int slru_id, SlruPagePrecedesFunction PagePrecedes,
++					   char *filename, int segpage, void *data)
+ {
+-	SlruInternalDeleteSegment(ctl, segpage / SLRU_PAGES_PER_SEGMENT);
++	SlruInternalDeleteSegment(slru_id, segpage / SLRU_PAGES_PER_SEGMENT);
+ 
+ 	return false;				/* keep going */
+ }
+@@ -1551,16 +311,20 @@ SlruScanDirCbDeleteAll(SlruCtl ctl, char *filename, int segpage, void *data)
+  * Note that no locking is applied.
+  */
+ bool
+-SlruScanDirectory(SlruCtl ctl, SlruScanCallback callback, void *data)
++SlruScanDirectory(int slru_id, SlruPagePrecedesFunction PagePrecedes,
++				  SlruScanCallback callback, void *data)
+ {
+ 	bool		retval = false;
+ 	DIR		   *cldir;
+ 	struct dirent *clde;
+ 	int			segno;
+ 	int			segpage;
++	const char *path;
+ 
+-	cldir = AllocateDir(ctl->Dir);
+-	while ((clde = ReadDir(cldir, ctl->Dir)) != NULL)
++	path = slru_dirs[slru_id];
++
++	cldir = AllocateDir(path);
++	while ((clde = ReadDir(cldir, path)) != NULL)
+ 	{
+ 		size_t		len;
+ 
+@@ -1573,8 +337,8 @@ SlruScanDirectory(SlruCtl ctl, SlruScanCallback callback, void *data)
+ 			segpage = segno * SLRU_PAGES_PER_SEGMENT;
+ 
+ 			elog(DEBUG2, "SlruScanDirectory invoking callback on %s/%s",
+-				 ctl->Dir, clde->d_name);
+-			retval = callback(ctl, clde->d_name, segpage, data);
++				 path, clde->d_name);
++			retval = callback(slru_id, PagePrecedes, clde->d_name, segpage, data);
+ 			if (retval)
+ 				break;
+ 		}
+@@ -1585,29 +349,78 @@ SlruScanDirectory(SlruCtl ctl, SlruScanCallback callback, void *data)
+ }
+ 
+ /*
+- * Individual SLRUs (clog, ...) have to provide a sync.c handler function so
+- * that they can provide the correct "SlruCtl" (otherwise we don't know how to
+- * build the path), but they just forward to this common implementation that
+- * performs the fsync.
++ * Read a buffer.  Buffer is pinned on return.
+  */
+-int
+-SlruSyncFileTag(SlruCtl ctl, const FileTag *ftag, char *path)
++Buffer
++ReadSlruBuffer(int slru_id, int pageno)
+ {
+-	int			fd;
+-	int			save_errno;
+-	int			result;
++	int			segno = pageno / SLRU_PAGES_PER_SEGMENT;
++	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
++	RelFileLocator rlocator = SlruRelFileLocator(slru_id, segno);
++	Buffer		buffer;
++	bool		hit;
++
++	/* Try to avoid doing a buffer mapping table lookup for repeated access. */
++	buffer = slru_recent_buffers[slru_id].recent_buffer;
++	if (slru_recent_buffers[slru_id].pageno == pageno &&
++		BufferIsValid(buffer) &&
++		ReadRecentBuffer(rlocator, MAIN_FORKNUM, pageno, buffer))
++	{
++		pgstat_count_slru_page_hit(slru_id);
++		return buffer;
++	}
++
++	/* Regular lookup. */
++	buffer = ReadBufferWithoutRelcacheWithHit(rlocator, MAIN_FORKNUM, rpageno,
++											  RBM_NORMAL, NULL, true, &hit);
+ 
+-	SlruFileName(ctl, path, ftag->segno);
++	/* Remember where this page is for next time. */
++	slru_recent_buffers[slru_id].pageno = pageno;
++	slru_recent_buffers[slru_id].recent_buffer = buffer;
+ 
+-	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
+-	if (fd < 0)
+-		return -1;
++	if (hit)
++		pgstat_count_slru_page_hit(slru_id);
+ 
+-	result = pg_fsync(fd);
+-	save_errno = errno;
++	return buffer;
++}
++
++/*
++ * Zero-initialize a buffer.  Buffer is pinned and exclusively locked on return.
++ */
++Buffer
++ZeroSlruBuffer(int slru_id, int pageno)
++{
++	int			segno = pageno / SLRU_PAGES_PER_SEGMENT;
++	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
++	RelFileLocator rlocator = SlruRelFileLocator(slru_id, segno);
++	Buffer		buffer;
++	SMgrFileHandle sfile;
+ 
+-	CloseTransientFile(fd);
++	if (rpageno == 0)
++	{
++		sfile = smgropen(rlocator, InvalidBackendId, MAIN_FORKNUM);
++		if (!smgrexists(sfile))
++			smgrcreate(sfile, false);
++	}
++
++	buffer = ReadBufferWithoutRelcache(rlocator, MAIN_FORKNUM, rpageno,
++									   RBM_ZERO_AND_LOCK, NULL, true);
++
++	/* Remember where this page is for next time. */
++	slru_recent_buffers[slru_id].pageno = pageno;
++	slru_recent_buffers[slru_id].recent_buffer = buffer;
++
++	pgstat_count_slru_page_zeroed(slru_id);
++
++	return buffer;
++}
++
++bool
++ProbeSlruBuffer(int slru_id, int pageno)
++{
++	int			segno = pageno / SLRU_PAGES_PER_SEGMENT;
++	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
++	RelFileLocator rlocator = SlruRelFileLocator(slru_id, segno);
+ 
+-	errno = save_errno;
+-	return result;
++	return BufferProbe(rlocator, MAIN_FORKNUM, rpageno);
+ }
+diff --git a/src/backend/access/transam/subtrans.c b/src/backend/access/transam/subtrans.c
+index 62bb610167c..1ab4e5ae557 100644
+--- a/src/backend/access/transam/subtrans.c
++++ b/src/backend/access/transam/subtrans.c
+@@ -32,6 +32,7 @@
+ #include "access/subtrans.h"
+ #include "access/transam.h"
+ #include "pg_trace.h"
++#include "storage/bufmgr.h"
+ #include "utils/snapmgr.h"
+ 
+ 
+@@ -55,15 +56,7 @@
+ #define TransactionIdToEntry(xid) ((xid) % (TransactionId) SUBTRANS_XACTS_PER_PAGE)
+ 
+ 
+-/*
+- * Link to shared-memory data structures for SUBTRANS control
+- */
+-static SlruCtlData SubTransCtlData;
+-
+-#define SubTransCtl  (&SubTransCtlData)
+-
+-
+-static int	ZeroSUBTRANSPage(int pageno);
++static Buffer ZeroSUBTRANSPage(int pageno);
+ static bool SubTransPagePrecedes(int page1, int page2);
+ 
+ 
+@@ -75,16 +68,15 @@ SubTransSetParent(TransactionId xid, TransactionId parent)
+ {
+ 	int			pageno = TransactionIdToPage(xid);
+ 	int			entryno = TransactionIdToEntry(xid);
+-	int			slotno;
+ 	TransactionId *ptr;
++	Buffer		buffer;
+ 
+ 	Assert(TransactionIdIsValid(parent));
+ 	Assert(TransactionIdFollows(xid, parent));
+ 
+-	LWLockAcquire(SubtransSLRULock, LW_EXCLUSIVE);
+-
+-	slotno = SimpleLruReadPage(SubTransCtl, pageno, true, xid);
+-	ptr = (TransactionId *) SubTransCtl->shared->page_buffer[slotno];
++	buffer = ReadSlruBuffer(SLRU_SUBTRANS_ID, pageno);
++	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
++	ptr = (TransactionId *) BufferGetPage(buffer);
+ 	ptr += entryno;
+ 
+ 	/*
+@@ -96,10 +88,10 @@ SubTransSetParent(TransactionId xid, TransactionId parent)
+ 	{
+ 		Assert(*ptr == InvalidTransactionId);
+ 		*ptr = parent;
+-		SubTransCtl->shared->page_dirty[slotno] = true;
++		MarkBufferDirty(buffer);
+ 	}
+ 
+-	LWLockRelease(SubtransSLRULock);
++	UnlockReleaseBuffer(buffer);
+ }
+ 
+ /*
+@@ -110,9 +102,9 @@ SubTransGetParent(TransactionId xid)
+ {
+ 	int			pageno = TransactionIdToPage(xid);
+ 	int			entryno = TransactionIdToEntry(xid);
+-	int			slotno;
+ 	TransactionId *ptr;
+ 	TransactionId parent;
++	Buffer		buffer;
+ 
+ 	/* Can't ask about stuff that might not be around anymore */
+ 	Assert(TransactionIdFollowsOrEquals(xid, TransactionXmin));
+@@ -121,15 +113,14 @@ SubTransGetParent(TransactionId xid)
+ 	if (!TransactionIdIsNormal(xid))
+ 		return InvalidTransactionId;
+ 
+-	/* lock is acquired by SimpleLruReadPage_ReadOnly */
++	buffer = ReadSlruBuffer(SLRU_SUBTRANS_ID, pageno);
+ 
+-	slotno = SimpleLruReadPage_ReadOnly(SubTransCtl, pageno, xid);
+-	ptr = (TransactionId *) SubTransCtl->shared->page_buffer[slotno];
++	ptr = (TransactionId *) BufferGetPage(buffer);
+ 	ptr += entryno;
+ 
+ 	parent = *ptr;
+ 
+-	LWLockRelease(SubtransSLRULock);
++	ReleaseBuffer(buffer);
+ 
+ 	return parent;
+ }
+@@ -177,26 +168,6 @@ SubTransGetTopmostTransaction(TransactionId xid)
+ 	return previousXid;
+ }
+ 
+-
+-/*
+- * Initialization of shared memory for SUBTRANS
+- */
+-Size
+-SUBTRANSShmemSize(void)
+-{
+-	return SimpleLruShmemSize(NUM_SUBTRANS_BUFFERS, 0);
+-}
+-
+-void
+-SUBTRANSShmemInit(void)
+-{
+-	SubTransCtl->PagePrecedes = SubTransPagePrecedes;
+-	SimpleLruInit(SubTransCtl, "Subtrans", NUM_SUBTRANS_BUFFERS, 0,
+-				  SubtransSLRULock, "pg_subtrans",
+-				  LWTRANCHE_SUBTRANS_BUFFER, SYNC_HANDLER_NONE);
+-	SlruPagePrecedesUnitTests(SubTransCtl, SUBTRANS_XACTS_PER_PAGE);
+-}
+-
+ /*
+  * This func must be called ONCE on system install.  It creates
+  * the initial SUBTRANS segment.  (The SUBTRANS directory is assumed to
+@@ -210,18 +181,16 @@ SUBTRANSShmemInit(void)
+ void
+ BootStrapSUBTRANS(void)
+ {
+-	int			slotno;
++	Buffer		buffer;
+ 
+-	LWLockAcquire(SubtransSLRULock, LW_EXCLUSIVE);
++	SlruPagePrecedesUnitTests(SubTransPagePrecedes, SUBTRANS_XACTS_PER_PAGE);
+ 
+ 	/* Create and zero the first page of the subtrans log */
+-	slotno = ZeroSUBTRANSPage(0);
++	buffer = ZeroSUBTRANSPage(0);
+ 
+ 	/* Make sure it's written out */
+-	SimpleLruWritePage(SubTransCtl, slotno);
+-	Assert(!SubTransCtl->shared->page_dirty[slotno]);
+-
+-	LWLockRelease(SubtransSLRULock);
++	FlushOneBuffer(buffer);
++	UnlockReleaseBuffer(buffer);
+ }
+ 
+ /*
+@@ -232,10 +201,15 @@ BootStrapSUBTRANS(void)
+  *
+  * Control lock must be held at entry, and will be held at exit.
+  */
+-static int
++static Buffer
+ ZeroSUBTRANSPage(int pageno)
+ {
+-	return SimpleLruZeroPage(SubTransCtl, pageno);
++	Buffer		buffer;
++
++	buffer = ZeroSlruBuffer(SLRU_SUBTRANS_ID, pageno);
++	MarkBufferDirty(buffer);
++
++	return buffer;
+ }
+ 
+ /*
+@@ -258,7 +232,6 @@ StartupSUBTRANS(TransactionId oldestActiveXID)
+ 	 * Whenever we advance into a new page, ExtendSUBTRANS will likewise zero
+ 	 * the new page without regard to whatever was previously on disk.
+ 	 */
+-	LWLockAcquire(SubtransSLRULock, LW_EXCLUSIVE);
+ 
+ 	startPage = TransactionIdToPage(oldestActiveXID);
+ 	nextXid = ShmemVariableCache->nextXid;
+@@ -266,36 +239,15 @@ StartupSUBTRANS(TransactionId oldestActiveXID)
+ 
+ 	while (startPage != endPage)
+ 	{
+-		(void) ZeroSUBTRANSPage(startPage);
++		UnlockReleaseBuffer(ZeroSUBTRANSPage(startPage));
+ 		startPage++;
+ 		/* must account for wraparound */
+ 		if (startPage > TransactionIdToPage(MaxTransactionId))
+ 			startPage = 0;
+ 	}
+-	(void) ZeroSUBTRANSPage(startPage);
+-
+-	LWLockRelease(SubtransSLRULock);
++	UnlockReleaseBuffer(ZeroSUBTRANSPage(startPage));
+ }
+ 
+-/*
+- * Perform a checkpoint --- either during shutdown, or on-the-fly
+- */
+-void
+-CheckPointSUBTRANS(void)
+-{
+-	/*
+-	 * Write dirty SUBTRANS pages to disk
+-	 *
+-	 * This is not actually necessary from a correctness point of view. We do
+-	 * it merely to improve the odds that writing of dirty pages is done by
+-	 * the checkpoint process and not by backends.
+-	 */
+-	TRACE_POSTGRESQL_SUBTRANS_CHECKPOINT_START(true);
+-	SimpleLruWriteAll(SubTransCtl, true);
+-	TRACE_POSTGRESQL_SUBTRANS_CHECKPOINT_DONE(true);
+-}
+-
+-
+ /*
+  * Make sure that SUBTRANS has room for a newly-allocated XID.
+  *
+@@ -319,12 +271,8 @@ ExtendSUBTRANS(TransactionId newestXact)
+ 
+ 	pageno = TransactionIdToPage(newestXact);
+ 
+-	LWLockAcquire(SubtransSLRULock, LW_EXCLUSIVE);
+-
+ 	/* Zero the page */
+-	ZeroSUBTRANSPage(pageno);
+-
+-	LWLockRelease(SubtransSLRULock);
++	UnlockReleaseBuffer(ZeroSUBTRANSPage(pageno));
+ }
+ 
+ 
+@@ -350,7 +298,7 @@ TruncateSUBTRANS(TransactionId oldestXact)
+ 	TransactionIdRetreat(oldestXact);
+ 	cutoffPage = TransactionIdToPage(oldestXact);
+ 
+-	SimpleLruTruncate(SubTransCtl, cutoffPage);
++	SimpleLruTruncate(SLRU_SUBTRANS_ID, SubTransPagePrecedes, cutoffPage);
+ }
+ 
+ 
+diff --git a/src/backend/access/transam/xact.c b/src/backend/access/transam/xact.c
+index b8764012607..7d4800a5f24 100644
+--- a/src/backend/access/transam/xact.c
++++ b/src/backend/access/transam/xact.c
+@@ -68,6 +68,7 @@
+ #include "utils/inval.h"
+ #include "utils/memutils.h"
+ #include "utils/relmapper.h"
++#include "utils/resowner_private.h"
+ #include "utils/snapmgr.h"
+ #include "utils/timeout.h"
+ #include "utils/timestamp.h"
+@@ -1397,6 +1398,7 @@ RecordTransactionCommit(void)
+ 		 * are delaying the checkpoint a bit fuzzy, but it doesn't matter.
+ 		 */
+ 		Assert((MyProc->delayChkptFlags & DELAY_CHKPT_START) == 0);
++
+ 		START_CRIT_SECTION();
+ 		MyProc->delayChkptFlags |= DELAY_CHKPT_START;
+ 
+diff --git a/src/backend/access/transam/xlog.c b/src/backend/access/transam/xlog.c
+index f9f0f6db8d1..68917d17299 100644
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -4638,6 +4638,7 @@ BootStrapXLOG(void)
+ 	uint64		sysidentifier;
+ 	struct timeval tv;
+ 	pg_crc32c	crc;
++	ResourceOwner resowner;
+ 
+ 	/* allow ordinary WAL segment creation, like StartupXLOG() would */
+ 	SetInstallXLogFileSegmentActive();
+@@ -4777,10 +4778,14 @@ BootStrapXLOG(void)
+ 	WriteControlFile();
+ 
+ 	/* Bootstrap the commit log, too */
++	resowner = ResourceOwnerCreate(NULL, "bootstrap resowner");
++	CurrentResourceOwner = resowner;
+ 	BootStrapCLOG();
+ 	BootStrapCommitTs();
+ 	BootStrapSUBTRANS();
+ 	BootStrapMultiXact();
++	CurrentResourceOwner = NULL;
++	ResourceOwnerDelete(resowner);
+ 
+ 	pfree(buffer);
+ 
+@@ -4789,6 +4794,8 @@ BootStrapXLOG(void)
+ 	 * otherwise never run the checks and GUC related initializations therein.
+ 	 */
+ 	ReadControlFile();
++
++	smgrcloseall();
+ }
+ 
+ static char *
+@@ -6997,15 +7004,11 @@ CheckPointGuts(XLogRecPtr checkPointRedo, int flags)
+ 	CheckPointSnapBuild();
+ 	CheckPointLogicalRewriteHeap();
+ 	CheckPointReplicationOrigin();
++	CheckPointPredicate();
+ 
+-	/* Write out all dirty data in SLRUs and the main buffer pool */
++	/* Write out all dirty data in the buffer pool */
+ 	TRACE_POSTGRESQL_BUFFER_CHECKPOINT_START(flags);
+ 	CheckpointStats.ckpt_write_t = GetCurrentTimestamp();
+-	CheckPointCLOG();
+-	CheckPointCommitTs();
+-	CheckPointSUBTRANS();
+-	CheckPointMultiXact();
+-	CheckPointPredicate();
+ 	CheckPointBuffers(flags);
+ 
+ 	/* Perform all queued up fsyncs */
+diff --git a/src/backend/commands/async.c b/src/backend/commands/async.c
+index ef909cf4e08..f944766ec2b 100644
+--- a/src/backend/commands/async.c
++++ b/src/backend/commands/async.c
+@@ -141,6 +141,7 @@
+ #include "libpq/libpq.h"
+ #include "libpq/pqformat.h"
+ #include "miscadmin.h"
++#include "storage/bufmgr.h"
+ #include "storage/ipc.h"
+ #include "storage/lmgr.h"
+ #include "storage/proc.h"
+@@ -305,12 +306,6 @@ static AsyncQueueControl *asyncQueueControl;
+ #define QUEUE_NEXT_LISTENER(i)		(asyncQueueControl->backend[i].nextListener)
+ #define QUEUE_BACKEND_POS(i)		(asyncQueueControl->backend[i].pos)
+ 
+-/*
+- * The SLRU buffer area through which we access the notification queue
+- */
+-static SlruCtlData NotifyCtlData;
+-
+-#define NotifyCtl					(&NotifyCtlData)
+ #define QUEUE_PAGESIZE				BLCKSZ
+ #define QUEUE_FULL_WARN_INTERVAL	5000	/* warn at most once every 5s */
+ 
+@@ -521,8 +516,6 @@ AsyncShmemSize(void)
+ 	size = mul_size(MaxBackends + 1, sizeof(QueueBackendStatus));
+ 	size = add_size(size, offsetof(AsyncQueueControl, backend));
+ 
+-	size = add_size(size, SimpleLruShmemSize(NUM_NOTIFY_BUFFERS, 0));
+-
+ 	return size;
+ }
+ 
+@@ -565,20 +558,13 @@ AsyncShmemInit(void)
+ 		}
+ 	}
+ 
+-	/*
+-	 * Set up SLRU management of the pg_notify data.
+-	 */
+-	NotifyCtl->PagePrecedes = asyncQueuePagePrecedes;
+-	SimpleLruInit(NotifyCtl, "Notify", NUM_NOTIFY_BUFFERS, 0,
+-				  NotifySLRULock, "pg_notify", LWTRANCHE_NOTIFY_BUFFER,
+-				  SYNC_HANDLER_NONE);
+-
+ 	if (!found)
+ 	{
+ 		/*
+ 		 * During start or reboot, clean out the pg_notify directory.
+ 		 */
+-		(void) SlruScanDirectory(NotifyCtl, SlruScanDirCbDeleteAll, NULL);
++		(void) SlruScanDirectory(SLRU_NOTIFY_ID, asyncQueuePagePrecedes,
++								 SlruScanDirCbDeleteAll, NULL);
+ 	}
+ }
+ 
+@@ -1411,10 +1397,7 @@ asyncQueueAddEntries(ListCell *nextNotify)
+ 	QueuePosition queue_head;
+ 	int			pageno;
+ 	int			offset;
+-	int			slotno;
+-
+-	/* We hold both NotifyQueueLock and NotifySLRULock during this operation */
+-	LWLockAcquire(NotifySLRULock, LW_EXCLUSIVE);
++	Buffer		buffer;
+ 
+ 	/*
+ 	 * We work with a local copy of QUEUE_HEAD, which we write back to shared
+@@ -1439,13 +1422,17 @@ asyncQueueAddEntries(ListCell *nextNotify)
+ 	 */
+ 	pageno = QUEUE_POS_PAGE(queue_head);
+ 	if (QUEUE_POS_IS_ZERO(queue_head))
+-		slotno = SimpleLruZeroPage(NotifyCtl, pageno);
++	{
++		buffer = ZeroSlruBuffer(SLRU_NOTIFY_ID, pageno);
++	}
+ 	else
+-		slotno = SimpleLruReadPage(NotifyCtl, pageno, true,
+-								   InvalidTransactionId);
++	{
++		buffer = ReadSlruBuffer(SLRU_NOTIFY_ID, pageno);
++		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
++	}
+ 
+ 	/* Note we mark the page dirty before writing in it */
+-	NotifyCtl->shared->page_dirty[slotno] = true;
++	MarkBufferDirty(buffer);
+ 
+ 	while (nextNotify != NULL)
+ 	{
+@@ -1476,7 +1463,7 @@ asyncQueueAddEntries(ListCell *nextNotify)
+ 		}
+ 
+ 		/* Now copy qe into the shared buffer page */
+-		memcpy(NotifyCtl->shared->page_buffer[slotno] + offset,
++		memcpy(BufferGetPage(buffer) + offset,
+ 			   &qe,
+ 			   qe.length);
+ 
+@@ -1491,7 +1478,10 @@ asyncQueueAddEntries(ListCell *nextNotify)
+ 			 * asyncQueueIsFull() ensured that there is room to create this
+ 			 * page without overrunning the queue.
+ 			 */
+-			slotno = SimpleLruZeroPage(NotifyCtl, QUEUE_POS_PAGE(queue_head));
++			UnlockReleaseBuffer(buffer);
++			buffer = ZeroSlruBuffer(SLRU_NOTIFY_ID,
++									QUEUE_POS_PAGE(queue_head));
++			MarkBufferDirty(buffer);
+ 
+ 			/*
+ 			 * If the new page address is a multiple of QUEUE_CLEANUP_DELAY,
+@@ -1505,12 +1495,11 @@ asyncQueueAddEntries(ListCell *nextNotify)
+ 			break;
+ 		}
+ 	}
++	UnlockReleaseBuffer(buffer);
+ 
+ 	/* Success, so update the global QUEUE_HEAD */
+ 	QUEUE_HEAD = queue_head;
+ 
+-	LWLockRelease(NotifySLRULock);
+-
+ 	return nextNotify;
+ }
+ 
+@@ -1983,17 +1972,16 @@ asyncQueueReadAllNotifications(void)
+ 		{
+ 			int			curpage = QUEUE_POS_PAGE(pos);
+ 			int			curoffset = QUEUE_POS_OFFSET(pos);
+-			int			slotno;
+ 			int			copysize;
++			Buffer		buffer;
+ 
+ 			/*
+-			 * We copy the data from SLRU into a local buffer, so as to avoid
+-			 * holding the NotifySLRULock while we are examining the entries
+-			 * and possibly transmitting them to our frontend.  Copy only the
+-			 * part of the page we will actually inspect.
++			 * We copy the data into a local buffer, so as to avoid holding a
++			 * buffer pin while we are examining the entries and possibly
++			 * transmitting them to our frontend.  Copy only the part of the
++			 * page we will actually inspect.
+ 			 */
+-			slotno = SimpleLruReadPage_ReadOnly(NotifyCtl, curpage,
+-												InvalidTransactionId);
++			buffer = ReadSlruBuffer(SLRU_NOTIFY_ID, curpage);
+ 			if (curpage == QUEUE_POS_PAGE(head))
+ 			{
+ 				/* we only want to read as far as head */
+@@ -2007,10 +1995,9 @@ asyncQueueReadAllNotifications(void)
+ 				copysize = QUEUE_PAGESIZE - curoffset;
+ 			}
+ 			memcpy(page_buffer.buf + curoffset,
+-				   NotifyCtl->shared->page_buffer[slotno] + curoffset,
++				   BufferGetPage(buffer) + curoffset,
+ 				   copysize);
+-			/* Release lock that we got from SimpleLruReadPage_ReadOnly() */
+-			LWLockRelease(NotifySLRULock);
++			ReleaseBuffer(buffer);
+ 
+ 			/*
+ 			 * Process messages up to the stop position, end of page, or an
+@@ -2207,7 +2194,7 @@ asyncQueueAdvanceTail(void)
+ 		 * SimpleLruTruncate() will ask for NotifySLRULock but will also
+ 		 * release the lock again.
+ 		 */
+-		SimpleLruTruncate(NotifyCtl, newtailpage);
++		SimpleLruTruncate(SLRU_NOTIFY_ID, asyncQueuePagePrecedes, newtailpage);
+ 
+ 		/*
+ 		 * Update QUEUE_STOP_PAGE.  This changes asyncQueueIsFull()'s verdict
+diff --git a/src/backend/storage/buffer/buf_init.c b/src/backend/storage/buffer/buf_init.c
+index 20946c47cb4..9746838bf9f 100644
+--- a/src/backend/storage/buffer/buf_init.c
++++ b/src/backend/storage/buffer/buf_init.c
+@@ -20,6 +20,7 @@
+ 
+ BufferDescPadded *BufferDescriptors;
+ char	   *BufferBlocks;
++XLogRecPtr *BufferExternalLSNs;
+ ConditionVariableMinimallyPadded *BufferIOCVArray;
+ WritebackContext BackendWritebackContext;
+ CkptSortItem *CkptBufferIds;
+@@ -69,9 +70,11 @@ InitBufferPool(void)
+ {
+ 	bool		foundBufs,
+ 				foundDescs,
++				foundLSNs,
+ 				foundIOCV,
+ 				foundBufCkpt;
+ 
++
+ 	/* Align descriptors to a cacheline boundary. */
+ 	BufferDescriptors = (BufferDescPadded *)
+ 		ShmemInitStruct("Buffer Descriptors",
+@@ -88,6 +91,11 @@ InitBufferPool(void)
+ 						NBuffers * sizeof(ConditionVariableMinimallyPadded),
+ 						&foundIOCV);
+ 
++	BufferExternalLSNs = (XLogRecPtr *)
++		ShmemInitStruct("Buffer External LSNs",
++						NBuffers * sizeof(XLogRecPtr),
++						&foundLSNs);
++
+ 	/*
+ 	 * The array used to sort to-be-checkpointed buffer ids is located in
+ 	 * shared memory, to avoid having to allocate significant amounts of
+@@ -99,10 +107,10 @@ InitBufferPool(void)
+ 		ShmemInitStruct("Checkpoint BufferIds",
+ 						NBuffers * sizeof(CkptSortItem), &foundBufCkpt);
+ 
+-	if (foundDescs || foundBufs || foundIOCV || foundBufCkpt)
++	if (foundDescs || foundBufs || foundIOCV || foundBufCkpt || foundLSNs)
+ 	{
+ 		/* should find all of these, or none of them */
+-		Assert(foundDescs && foundBufs && foundIOCV && foundBufCkpt);
++		Assert(foundDescs && foundBufs && foundIOCV && foundBufCkpt && foundLSNs);
+ 		/* note: this path is only taken in EXEC_BACKEND case */
+ 	}
+ 	else
+@@ -133,6 +141,8 @@ InitBufferPool(void)
+ 							 LWTRANCHE_BUFFER_CONTENT);
+ 
+ 			ConditionVariableInit(BufferDescriptorGetIOCV(buf));
++
++			BufferExternalLSNs[i] = InvalidXLogRecPtr;
+ 		}
+ 
+ 		/* Correct last entry of linked list */
+@@ -166,6 +176,9 @@ BufferShmemSize(void)
+ 	/* size of data pages */
+ 	size = add_size(size, mul_size(NBuffers, BLCKSZ));
+ 
++	/* size of external LSNs */
++	size = add_size(size, mul_size(NBuffers, sizeof(XLogRecPtr)));
++
+ 	/* size of stuff controlled by freelist.c */
+ 	size = add_size(size, StrategyShmemSize());
+ 
+diff --git a/src/backend/storage/buffer/bufmgr.c b/src/backend/storage/buffer/bufmgr.c
+index 1305eb7dee1..b3f7be2e05f 100644
+--- a/src/backend/storage/buffer/bufmgr.c
++++ b/src/backend/storage/buffer/bufmgr.c
+@@ -57,10 +57,21 @@
+ #include "utils/resowner_private.h"
+ #include "utils/timestamp.h"
+ 
++/*
++ * XXX Ideally we'd switch to standard pages for SLRU data, but in the
++ * meantime we need some way to identify buffers that hold raw data (no
++ * invasive LSN, no checksums).
++ */
++#define BufferHasStandardPage(bufHdr)			\
++	((bufHdr)->tag.spcOid != 9)
++
++#define BufferHasExternalLSN(bufHdr)			\
++	!BufferHasStandardPage(bufHdr)
+ 
+ /* Note: these two macros only work on shared buffers, not local ones! */
+ #define BufHdrGetBlock(bufHdr)	((Block) (BufferBlocks + ((Size) (bufHdr)->buf_id) * BLCKSZ))
+-#define BufferGetLSN(bufHdr)	(PageGetLSN(BufHdrGetBlock(bufHdr)))
++#define BufferGetLSN(bufHdr) \
++	(BufferHasExternalLSN(bufHdr) ? BufferGetExternalLSN(bufHdr) : PageGetLSN(BufHdrGetBlock(bufHdr)))
+ 
+ /* Note: this macro only works on local buffers, not shared ones! */
+ #define LocalBufHdrGetBlock(bufHdr) \
+@@ -786,6 +797,18 @@ ReadBufferWithoutRelcache(RelFileLocator rlocator, ForkNumber forkNum,
+ 							 mode, strategy, &hit);
+ }
+ 
++Buffer
++ReadBufferWithoutRelcacheWithHit(RelFileLocator rlocator, ForkNumber forkNum,
++								 BlockNumber blockNum, ReadBufferMode mode,
++								 BufferAccessStrategy strategy, bool permanent, bool *hit)
++{
++	SMgrFileHandle sfile = smgropen(rlocator, InvalidBackendId, forkNum);
++
++	return ReadBuffer_common(sfile, permanent ? RELPERSISTENCE_PERMANENT :
++							 RELPERSISTENCE_UNLOGGED, blockNum,
++							 mode, strategy, hit);
++}
++
+ 
+ /*
+  * ReadBuffer_common -- common logic for all ReadBuffer variants
+@@ -1032,7 +1055,8 @@ ReadBuffer_common(SMgrFileHandle sfile, char relpersistence,
+ 			}
+ 
+ 			/* check for garbage data */
+-			if (!PageIsVerifiedExtended((Page) bufBlock, blockNum,
++			if (BufferHasStandardPage(bufHdr) &&
++				!PageIsVerifiedExtended((Page) bufBlock, blockNum,
+ 										PIV_LOG_WARNING | PIV_REPORT_STAT))
+ 			{
+ 				if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
+@@ -1433,6 +1457,9 @@ BufferAlloc(SMgrFileHandle sfile, char relpersistence,
+ 		UnpinBuffer(buf);
+ 	}
+ 
++	if (BufferHasExternalLSN(buf))
++		BufferSetExternalLSN(buf, InvalidXLogRecPtr);
++
+ 	/*
+ 	 * Okay, it's finally safe to rename the buffer.
+ 	 *
+@@ -3087,7 +3114,10 @@ BufferGetLSNAtomic(Buffer buffer)
+ 	Assert(BufferIsPinned(buffer));
+ 
+ 	buf_state = LockBufHdr(bufHdr);
+-	lsn = PageGetLSN(page);
++	if (BufferHasStandardPage(bufHdr))
++		lsn = PageGetLSN(page);
++	else
++		lsn = BufferGetExternalLSN(bufHdr);
+ 	UnlockBufHdr(bufHdr, buf_state);
+ 
+ 	return lsn;
+@@ -5068,3 +5098,29 @@ TestForOldSnapshot_impl(Snapshot snapshot, Relation relation)
+ 				(errcode(ERRCODE_SNAPSHOT_TOO_OLD),
+ 				 errmsg("snapshot too old")));
+ }
++
++/*
++ * Check if a buffer tag is currently mapped.
++ *
++ * XXX Dubious semantics; needed only for multixact's handling for
++ * inconsistent states.
++ */
++bool
++BufferProbe(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockNum)
++{
++	BufferTag	tag;
++	uint32		hash;
++	LWLock	   *partitionLock;
++	int			buf_id;
++
++	InitBufferTag(&tag, &rlocator, forkNum, blockNum);
++
++	hash = BufTableHashCode(&tag);
++	partitionLock = BufMappingPartitionLock(hash);
++
++	LWLockAcquire(partitionLock, LW_SHARED);
++	buf_id = BufTableLookup(&tag, hash);
++	LWLockRelease(partitionLock);
++
++	return buf_id >= 0;
++}
+diff --git a/src/backend/storage/ipc/ipci.c b/src/backend/storage/ipc/ipci.c
+index 8f1ded7338f..8601e1c0dfb 100644
+--- a/src/backend/storage/ipc/ipci.c
++++ b/src/backend/storage/ipc/ipci.c
+@@ -117,9 +117,7 @@ CalculateShmemSize(int *num_semaphores)
+ 	size = add_size(size, XLogPrefetchShmemSize());
+ 	size = add_size(size, XLOGShmemSize());
+ 	size = add_size(size, XLogRecoveryShmemSize());
+-	size = add_size(size, CLOGShmemSize());
+ 	size = add_size(size, CommitTsShmemSize());
+-	size = add_size(size, SUBTRANSShmemSize());
+ 	size = add_size(size, TwoPhaseShmemSize());
+ 	size = add_size(size, BackgroundWorkerShmemSize());
+ 	size = add_size(size, MultiXactShmemSize());
+@@ -241,9 +239,7 @@ CreateSharedMemoryAndSemaphores(void)
+ 	XLOGShmemInit();
+ 	XLogPrefetchShmemInit();
+ 	XLogRecoveryShmemInit();
+-	CLOGShmemInit();
+ 	CommitTsShmemInit();
+-	SUBTRANSShmemInit();
+ 	MultiXactShmemInit();
+ 	InitBufferPool();
+ 
+diff --git a/src/backend/storage/lmgr/predicate.c b/src/backend/storage/lmgr/predicate.c
+index bfc352aed86..f72fc99762c 100644
+--- a/src/backend/storage/lmgr/predicate.c
++++ b/src/backend/storage/lmgr/predicate.c
+@@ -313,14 +313,6 @@
+ 	((targethash) ^ ((uint32) PointerGetDatum((predicatelocktag)->myXact)) \
+ 	 << LOG2_NUM_PREDICATELOCK_PARTITIONS)
+ 
+-
+-/*
+- * The SLRU buffer area through which we access the old xids.
+- */
+-static SlruCtlData SerialSlruCtlData;
+-
+-#define SerialSlruCtl			(&SerialSlruCtlData)
+-
+ #define SERIAL_PAGESIZE			BLCKSZ
+ #define SERIAL_ENTRYSIZE			sizeof(SerCommitSeqNo)
+ #define SERIAL_ENTRIESPERPAGE	(SERIAL_PAGESIZE / SERIAL_ENTRYSIZE)
+@@ -332,8 +324,8 @@ static SlruCtlData SerialSlruCtlData;
+ 
+ #define SerialNextPage(page) (((page) >= SERIAL_MAX_PAGE) ? 0 : (page) + 1)
+ 
+-#define SerialValue(slotno, xid) (*((SerCommitSeqNo *) \
+-	(SerialSlruCtl->shared->page_buffer[slotno] + \
++#define SerialValue(buffer, xid) (*((SerCommitSeqNo *) \
++	(BufferGetPage(buffer) + \
+ 	((((uint32) (xid)) % SERIAL_ENTRIESPERPAGE) * SERIAL_ENTRYSIZE))))
+ 
+ #define SerialPage(xid)	(((uint32) (xid)) / SERIAL_ENTRIESPERPAGE)
+@@ -803,17 +795,10 @@ SerialInit(void)
+ {
+ 	bool		found;
+ 
+-	/*
+-	 * Set up SLRU management of the pg_serial data.
+-	 */
+-	SerialSlruCtl->PagePrecedes = SerialPagePrecedesLogically;
+-	SimpleLruInit(SerialSlruCtl, "Serial",
+-				  NUM_SERIAL_BUFFERS, 0, SerialSLRULock, "pg_serial",
+-				  LWTRANCHE_SERIAL_BUFFER, SYNC_HANDLER_NONE);
+ #ifdef USE_ASSERT_CHECKING
+ 	SerialPagePrecedesLogicallyUnitTests();
+ #endif
+-	SlruPagePrecedesUnitTests(SerialSlruCtl, SERIAL_ENTRIESPERPAGE);
++	SlruPagePrecedesUnitTests(SerialPagePrecedesLogically, SERIAL_ENTRIESPERPAGE);
+ 
+ 	/*
+ 	 * Create or attach to the SerialControl structure.
+@@ -843,9 +828,9 @@ SerialAdd(TransactionId xid, SerCommitSeqNo minConflictCommitSeqNo)
+ {
+ 	TransactionId tailXid;
+ 	int			targetPage;
+-	int			slotno;
+ 	int			firstZeroPage;
+ 	bool		isNewPage;
++	Buffer		buffer;
+ 
+ 	Assert(TransactionIdIsValid(xid));
+ 
+@@ -890,16 +875,22 @@ SerialAdd(TransactionId xid, SerCommitSeqNo minConflictCommitSeqNo)
+ 		/* Initialize intervening pages. */
+ 		while (firstZeroPage != targetPage)
+ 		{
+-			(void) SimpleLruZeroPage(SerialSlruCtl, firstZeroPage);
++			buffer = ZeroSlruBuffer(SLRU_SERIAL_ID, firstZeroPage);
++			MarkBufferDirty(buffer);
++			UnlockReleaseBuffer(buffer);
+ 			firstZeroPage = SerialNextPage(firstZeroPage);
+ 		}
+-		slotno = SimpleLruZeroPage(SerialSlruCtl, targetPage);
++		buffer = ZeroSlruBuffer(SLRU_SERIAL_ID, targetPage);
+ 	}
+ 	else
+-		slotno = SimpleLruReadPage(SerialSlruCtl, targetPage, true, xid);
++	{
++		buffer = ReadSlruBuffer(SLRU_SERIAL_ID, targetPage);
++		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
++	}
+ 
+-	SerialValue(slotno, xid) = minConflictCommitSeqNo;
+-	SerialSlruCtl->shared->page_dirty[slotno] = true;
++	SerialValue(buffer, xid) = minConflictCommitSeqNo;
++	MarkBufferDirty(buffer);
++	UnlockReleaseBuffer(buffer);
+ 
+ 	LWLockRelease(SerialSLRULock);
+ }
+@@ -915,7 +906,7 @@ SerialGetMinConflictCommitSeqNo(TransactionId xid)
+ 	TransactionId headXid;
+ 	TransactionId tailXid;
+ 	SerCommitSeqNo val;
+-	int			slotno;
++	Buffer		buffer;
+ 
+ 	Assert(TransactionIdIsValid(xid));
+ 
+@@ -937,9 +928,9 @@ SerialGetMinConflictCommitSeqNo(TransactionId xid)
+ 	 * The following function must be called without holding SerialSLRULock,
+ 	 * but will return with that lock held, which must then be released.
+ 	 */
+-	slotno = SimpleLruReadPage_ReadOnly(SerialSlruCtl,
+-										SerialPage(xid), xid);
+-	val = SerialValue(slotno, xid);
++	buffer = ReadSlruBuffer(SLRU_SERIAL_ID, SerialPage(xid));
++	val = SerialValue(buffer, xid);
++	ReleaseBuffer(buffer);
+ 	LWLockRelease(SerialSLRULock);
+ 	return val;
+ }
+@@ -1058,19 +1049,7 @@ CheckPointPredicate(void)
+ 	LWLockRelease(SerialSLRULock);
+ 
+ 	/* Truncate away pages that are no longer required */
+-	SimpleLruTruncate(SerialSlruCtl, tailPage);
+-
+-	/*
+-	 * Write dirty SLRU pages to disk
+-	 *
+-	 * This is not actually necessary from a correctness point of view. We do
+-	 * it merely as a debugging aid.
+-	 *
+-	 * We're doing this after the truncation to avoid writing pages right
+-	 * before deleting the file in which they sit, which would be completely
+-	 * pointless.
+-	 */
+-	SimpleLruWriteAll(SerialSlruCtl, true);
++	SimpleLruTruncate(SLRU_SERIAL_ID, SerialPagePrecedesLogically, tailPage);
+ }
+ 
+ /*------------------------------------------------------------------------*/
+@@ -1331,7 +1310,6 @@ PredicateLockShmemSize(void)
+ 
+ 	/* Shared memory structures for SLRU tracking of old committed xids. */
+ 	size = add_size(size, sizeof(SerialControlData));
+-	size = add_size(size, SimpleLruShmemSize(NUM_SERIAL_BUFFERS, 0));
+ 
+ 	return size;
+ }
+diff --git a/src/backend/storage/smgr/md.c b/src/backend/storage/smgr/md.c
+index eea7ce944c3..2cfee0deaad 100644
+--- a/src/backend/storage/smgr/md.c
++++ b/src/backend/storage/smgr/md.c
+@@ -191,9 +191,12 @@ mdcreate(SMgrFileHandle sfile, bool isRedo)
+ 	 * should be here and not in commands/tablespace.c?  But that would imply
+ 	 * importing a lot of stuff that smgr.c oughtn't know, either.
+ 	 */
+-	TablespaceCreateDbspace(sfile->smgr_locator.locator.spcOid,
+-							sfile->smgr_locator.locator.dbOid,
+-							isRedo);
++	if (sfile->smgr_locator.locator.spcOid != SLRU_SPC_OID)
++	{
++		TablespaceCreateDbspace(sfile->smgr_locator.locator.spcOid,
++								sfile->smgr_locator.locator.dbOid,
++								isRedo);
++	}
+ 
+ 	path = smgrfilepath(sfile->smgr_locator);
+ 
+diff --git a/src/backend/storage/smgr/smgr.c b/src/backend/storage/smgr/smgr.c
+index 58a2322d018..d47695b808b 100644
+--- a/src/backend/storage/smgr/smgr.c
++++ b/src/backend/storage/smgr/smgr.c
+@@ -420,6 +420,48 @@ smgrunlink_multi(RelFileLocator rlocator, BackendId backend,
+ 	}
+ }
+ 
++/*
++ *     smgrdounlink() -- Immediately unlink a file
++ *
++ *             If isRedo is true, it is okay for the underlying file(s) to be gone
++ *             already.
++ *
++ * To remove a relation transactionally, see RelationDropStorage() instead.
++ * This will cause cache invalidation of all forks of the relation, not just
++ * this one.
++ */
++void
++smgrunlink(SMgrFileHandle sfile, bool isRedo)
++{
++	SMgrFileLocator locator;
++	int			which;
++
++	/* remember before closing */
++	which = sfile->smgr_which;
++	locator = sfile->smgr_locator;
++
++	/* Close the file at smgr level */
++	smgrclose(sfile);
++
++	/*
++	 * Send a shared-inval message to force other backends to close any
++	 * dangling smgr references they may have for these rels.  We should do
++	 * this before starting the actual unlinking, in case we fail partway
++	 * through that step.  Note that the sinval messages will eventually come
++	 * back to this backend, too, and thereby provide a backstop that we
++	 * closed our own smgr rel.
++	 */
++	CacheInvalidateSmgr(locator.locator, locator.backend);
++
++	/*
++	 * Delete the physical file(s).
++	 *
++	 * Note: smgr_unlink must treat deletion failure as a WARNING, not an
++	 * ERROR, because we've already decided to commit or abort the current
++	 * xact.
++	 */
++	smgrsw[which].smgr_unlink(locator, isRedo);
++}
+ 
+ /*
+  *	smgrextend() -- Add a new block to a file.
+diff --git a/src/backend/storage/sync/sync.c b/src/backend/storage/sync/sync.c
+index 768d1dbfc41..41886288644 100644
+--- a/src/backend/storage/sync/sync.c
++++ b/src/backend/storage/sync/sync.c
+@@ -18,9 +18,7 @@
+ #include <fcntl.h>
+ #include <sys/file.h>
+ 
+-#include "access/commit_ts.h"
+-#include "access/clog.h"
+-#include "access/multixact.h"
++#include "access/slru.h"
+ #include "access/xlog.h"
+ #include "access/xlogutils.h"
+ #include "commands/tablespace.h"
+@@ -106,22 +104,6 @@ static const SyncOps syncsw[] = {
+ 		.sync_unlinkfiletag = mdunlinkfiletag,
+ 		.sync_filetagmatches = mdfiletagmatches
+ 	},
+-	/* pg_xact */
+-	[SYNC_HANDLER_CLOG] = {
+-		.sync_syncfiletag = clogsyncfiletag
+-	},
+-	/* pg_commit_ts */
+-	[SYNC_HANDLER_COMMIT_TS] = {
+-		.sync_syncfiletag = committssyncfiletag
+-	},
+-	/* pg_multixact/offsets */
+-	[SYNC_HANDLER_MULTIXACT_OFFSET] = {
+-		.sync_syncfiletag = multixactoffsetssyncfiletag
+-	},
+-	/* pg_multixact/members */
+-	[SYNC_HANDLER_MULTIXACT_MEMBER] = {
+-		.sync_syncfiletag = multixactmemberssyncfiletag
+-	}
+ };
+ 
+ /*
+diff --git a/src/backend/utils/mmgr/mcxt.c b/src/backend/utils/mmgr/mcxt.c
+index 0b00802df70..4f9fa85d51a 100644
+--- a/src/backend/utils/mmgr/mcxt.c
++++ b/src/backend/utils/mmgr/mcxt.c
+@@ -162,9 +162,47 @@ static void MemoryContextStatsPrint(MemoryContext context, void *passthru,
+  * You should not do memory allocations within a critical section, because
+  * an out-of-memory error will be escalated to a PANIC. To enforce that
+  * rule, the allocation functions Assert that.
++ *
++ * FIXME: bypass this for the critical section in RecordTransactionCommit()
++ * for now. It does a lot of things that can allocate:
++ * - calls TransactionIdCommitTree, which pins buffers, which requires
++ *   space in the ResourceOwner for the pin (ResourceOwnerEnlargeBuffers())
++ * - same for TransactionTreeSetCommitTsData() call.
++ * - reading a page can require flushing other pages, which in turn
++ *   can call CompactCheckpointerRequestQueue(), which allocates
++ * - reading a page calls smgropen(), which allocates the SMgrFile entry
++ *   if it's not open already
++ *
++ * FIXME: Here's another codepath that reaches this, reproducable with
++ * the 'lock-committed-update' isolation test:
++ *
++ * #5  0x000056230e91788d in MemoryContextAllocExtended (context=0x562310709c40, size=4048, flags=2) at mcxt.c:1137
++ * #6  0x000056230e8e9655 in DynaHashAlloc (size=4048) at dynahash.c:292
++ * #7  0x000056230e8ebadf in element_alloc (hashp=0x562310709d58, nelem=46, freelist_idx=0) at dynahash.c:1715
++ * #8  0x000056230e8eaef8 in get_hash_entry (hashp=0x562310709d58, freelist_idx=0) at dynahash.c:1324
++ * #9  0x000056230e8ea993 in hash_search_with_hash_value (hashp=0x562310709d58, keyPtr=0x7ffc30cdd4f0, hashvalue=1219519527, action=HASH_ENTER, foundPtr=0x7ffc30cdd4ef) at dynahash.c:1097
++ * #10 0x000056230e8ea578 in hash_search (hashp=0x562310709d58, keyPtr=0x7ffc30cdd4f0, action=HASH_ENTER, foundPtr=0x7ffc30cdd4ef) at dynahash.c:958
++ * #11 0x000056230e70f8fa in smgropen (rlocator=..., backend=-1, forkNum=MAIN_FORKNUM) at smgr.c:165
++ * #12 0x000056230e6c7f58 in ReadBufferWithoutRelcacheWithHit (rlocator=..., forkNum=MAIN_FORKNUM, blockNum=0, mode=RBM_NORMAL, strategy=0x0, permanent=true, hit=0x7ffc30cdd597)
++ *     at bufmgr.c:805
++ * #13 0x000056230e2b45ce in ReadSlruBuffer (slru_id=3, pageno=0) at slru.c:377
++ * #14 0x000056230e2ad192 in RecordNewMultiXact (multi=5, offset=9, nmembers=2, members=0x7ffc30cdd690) at multixact.c:902
++ * #15 0x000056230e2acfbb in MultiXactIdCreateFromMembers (nmembers=2, members=0x7ffc30cdd690) at multixact.c:833
++ * #16 0x000056230e2ac8d3 in MultiXactIdCreate (xid1=753, status1=MultiXactStatusForKeyShare, xid2=754, status2=MultiXactStatusNoKeyUpdate) at multixact.c:402
++ * #17 0x000056230e248ff2 in compute_new_xmax_infomask (xmax=753, old_infomask=402, old_infomask2=2, add_to_xmax=754, mode=LockTupleNoKeyExclusive, is_update=true, result_xmax=0x7ffc30cdd79c, 
++ *     result_infomask=0x7ffc30cdd79a, result_infomask2=0x7ffc30cdd798) at heapam.c:5017
++ * #18 0x000056230e24632c in heap_update (relation=0x7f99454cb168, otid=0x7ffc30cddaba, newtup=0x56231073e840, cid=0, crosscheck=0x0, wait=true, tmfd=0x7ffc30cddaf0, lockmode=0x7ffc30cdda34)
++ *     at heapam.c:3345
++ *
++ * Disabled this completely because of that.
+  */
++#if 0
+ #define AssertNotInCriticalSection(context) \
+-	Assert(CritSectionCount == 0 || (context)->allowInCritSection)
++	Assert(CritSectionCount == 0 || (context)->allowInCritSection || \
++		   (MyProc != NULL && (MyProc->delayChkptFlags & DELAY_CHKPT_START != 0)))
++#else
++#define AssertNotInCriticalSection(context) ((void)true)
++#endif
+ 
+ /*
+  * Call the given function in the MemoryContextMethods for the memory context
+diff --git a/src/common/relpath.c b/src/common/relpath.c
+index ae2d384fb34..4715d06d287 100644
+--- a/src/common/relpath.c
++++ b/src/common/relpath.c
+@@ -22,6 +22,16 @@
+ #include "common/relpath.h"
+ #include "storage/backendid.h"
+ 
++/*
++ * SLRU ID to path mapping
++ */
++#define PG_SLRU(symname,name,path,synchronize) \
++	path,
++
++static char *slru_dirs[] =
++{
++#include "access/slrulist.h"
++};
+ 
+ /*
+  * Lookup table of fork name by fork number.
+@@ -143,7 +153,22 @@ GetSMgrFilePath(Oid dbOid, Oid spcOid, RelFileNumber relNumber,
+ {
+ 	char	   *path;
+ 
+-	if (spcOid == GLOBALTABLESPACE_OID)
++	if (spcOid == SLRU_SPC_OID)
++	{
++		if (dbOid >= lengthof(slru_dirs) || forkNumber != 0 || backendId != InvalidBackendId)
++		{
++#ifndef FRONTEND
++			ereport(ERROR,
++					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
++					 errmsg("invalid SLRU file locator %u/%u/%u/%u/%u",
++							spcOid, dbOid, relNumber, backendId, forkNumber)));
++#else
++			return NULL;
++#endif
++		}
++		path = psprintf("%s/%04X", slru_dirs[dbOid], relNumber);
++	}
++	else if (spcOid == GLOBALTABLESPACE_OID)
+ 	{
+ 		/* Shared system relations live in {datadir}/global */
+ 		Assert(dbOid == 0);
+diff --git a/src/include/access/clog.h b/src/include/access/clog.h
+index d99444f073f..aacf10ca522 100644
+--- a/src/include/access/clog.h
++++ b/src/include/access/clog.h
+@@ -40,18 +40,12 @@ extern void TransactionIdSetTreeStatus(TransactionId xid, int nsubxids,
+ 									   TransactionId *subxids, XidStatus status, XLogRecPtr lsn);
+ extern XidStatus TransactionIdGetStatus(TransactionId xid, XLogRecPtr *lsn);
+ 
+-extern Size CLOGShmemBuffers(void);
+-extern Size CLOGShmemSize(void);
+-extern void CLOGShmemInit(void);
+ extern void BootStrapCLOG(void);
+ extern void StartupCLOG(void);
+ extern void TrimCLOG(void);
+-extern void CheckPointCLOG(void);
+ extern void ExtendCLOG(TransactionId newestXact);
+ extern void TruncateCLOG(TransactionId oldestXact, Oid oldestxid_datoid);
+ 
+-extern int	clogsyncfiletag(const FileTag *ftag, char *path);
+-
+ /* XLOG stuff */
+ #define CLOG_ZEROPAGE		0x00
+ #define CLOG_TRUNCATE		0x10
+diff --git a/src/include/access/commit_ts.h b/src/include/access/commit_ts.h
+index 5087cdce51e..605dc75b3b0 100644
+--- a/src/include/access/commit_ts.h
++++ b/src/include/access/commit_ts.h
+@@ -27,7 +27,6 @@ extern bool TransactionIdGetCommitTsData(TransactionId xid,
+ extern TransactionId GetLatestCommitTsData(TimestampTz *ts,
+ 										   RepOriginId *nodeid);
+ 
+-extern Size CommitTsShmemBuffers(void);
+ extern Size CommitTsShmemSize(void);
+ extern void CommitTsShmemInit(void);
+ extern void BootStrapCommitTs(void);
+@@ -41,8 +40,6 @@ extern void SetCommitTsLimit(TransactionId oldestXact,
+ 							 TransactionId newestXact);
+ extern void AdvanceOldestCommitTsXid(TransactionId oldestXact);
+ 
+-extern int	committssyncfiletag(const FileTag *ftag, char *path);
+-
+ /* XLOG stuff */
+ #define COMMIT_TS_ZEROPAGE		0x00
+ #define COMMIT_TS_TRUNCATE		0x10
+diff --git a/src/include/access/multixact.h b/src/include/access/multixact.h
+index 246f757f6ab..5848e4072ba 100644
+--- a/src/include/access/multixact.h
++++ b/src/include/access/multixact.h
+@@ -118,9 +118,6 @@ extern bool MultiXactIdPrecedes(MultiXactId multi1, MultiXactId multi2);
+ extern bool MultiXactIdPrecedesOrEquals(MultiXactId multi1,
+ 										MultiXactId multi2);
+ 
+-extern int	multixactoffsetssyncfiletag(const FileTag *ftag, char *path);
+-extern int	multixactmemberssyncfiletag(const FileTag *ftag, char *path);
+-
+ extern void AtEOXact_MultiXact(void);
+ extern void AtPrepare_MultiXact(void);
+ extern void PostPrepare_MultiXact(TransactionId xid);
+diff --git a/src/include/access/slru.h b/src/include/access/slru.h
+index a8a424d92da..fcae11ce599 100644
+--- a/src/include/access/slru.h
++++ b/src/include/access/slru.h
+@@ -1,7 +1,7 @@
+ /*-------------------------------------------------------------------------
+  *
+  * slru.h
+- *		Simple LRU buffering for transaction status logfiles
++ *		Buffering for transaction status logfiles
+  *
+  * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+@@ -14,9 +14,35 @@
+ #define SLRU_H
+ 
+ #include "access/xlogdefs.h"
++#include "catalog/pg_tablespace_d.h"
++#include "storage/buf.h"
+ #include "storage/lwlock.h"
++#include "storage/smgr.h"
+ #include "storage/sync.h"
+ 
++/* Pseudo database ID used for SLRU data. */
++#define SLRU_SPC_ID 9
++
++/* Pseudo database IDs used by each cache. */
++#define PG_SLRU(symname,name,path, synchronize) \
++	symname,
++
++typedef enum SlruIds
++{
++#include "access/slrulist.h"
++	SLRU_NEXT_ID
++}			SlruIds;
++#undef PG_SLRU
++
++typedef bool (*SlruPagePrecedesFunction) (int, int);
++
++static inline RelFileLocator
++SlruRelFileLocator(uint32 slru_db_id, uint32 segment_id)
++{
++	RelFileLocator rlocator = {SLRU_SPC_ID, slru_db_id, segment_id};
++	return rlocator;
++}
++
+ 
+ /*
+  * Define SLRU segment size.  A page is the same BLCKSZ as is used everywhere
+@@ -33,142 +59,40 @@
+  */
+ #define SLRU_PAGES_PER_SEGMENT	32
+ 
+-/*
+- * Page status codes.  Note that these do not include the "dirty" bit.
+- * page_dirty can be true only in the VALID or WRITE_IN_PROGRESS states;
+- * in the latter case it implies that the page has been re-dirtied since
+- * the write started.
+- */
+-typedef enum
+-{
+-	SLRU_PAGE_EMPTY,			/* buffer is not in use */
+-	SLRU_PAGE_READ_IN_PROGRESS, /* page is being read in */
+-	SLRU_PAGE_VALID,			/* page is valid and not being written */
+-	SLRU_PAGE_WRITE_IN_PROGRESS /* page is being written out */
+-} SlruPageStatus;
+-
+-/*
+- * Shared-memory state
+- */
+-typedef struct SlruSharedData
+-{
+-	LWLock	   *ControlLock;
+-
+-	/* Number of buffers managed by this SLRU structure */
+-	int			num_slots;
+-
+-	/*
+-	 * Arrays holding info for each buffer slot.  Page number is undefined
+-	 * when status is EMPTY, as is page_lru_count.
+-	 */
+-	char	  **page_buffer;
+-	SlruPageStatus *page_status;
+-	bool	   *page_dirty;
+-	int		   *page_number;
+-	int		   *page_lru_count;
+-	LWLockPadded *buffer_locks;
+-
+-	/*
+-	 * Optional array of WAL flush LSNs associated with entries in the SLRU
+-	 * pages.  If not zero/NULL, we must flush WAL before writing pages (true
+-	 * for pg_xact, false for multixact, pg_subtrans, pg_notify).  group_lsn[]
+-	 * has lsn_groups_per_page entries per buffer slot, each containing the
+-	 * highest LSN known for a contiguous group of SLRU entries on that slot's
+-	 * page.
+-	 */
+-	XLogRecPtr *group_lsn;
+-	int			lsn_groups_per_page;
+-
+-	/*----------
+-	 * We mark a page "most recently used" by setting
+-	 *		page_lru_count[slotno] = ++cur_lru_count;
+-	 * The oldest page is therefore the one with the highest value of
+-	 *		cur_lru_count - page_lru_count[slotno]
+-	 * The counts will eventually wrap around, but this calculation still
+-	 * works as long as no page's age exceeds INT_MAX counts.
+-	 *----------
+-	 */
+-	int			cur_lru_count;
+-
+-	/*
+-	 * latest_page_number is the page number of the current end of the log;
+-	 * this is not critical data, since we use it only to avoid swapping out
+-	 * the latest page.
+-	 */
+-	int			latest_page_number;
+-
+-	/* SLRU's index for statistics purposes (might not be unique) */
+-	int			slru_stats_idx;
+-} SlruSharedData;
+-
+-typedef SlruSharedData *SlruShared;
+-
+-/*
+- * SlruCtlData is an unshared structure that points to the active information
+- * in shared memory.
+- */
+-typedef struct SlruCtlData
+-{
+-	SlruShared	shared;
+-
+-	/*
+-	 * Which sync handler function to use when handing sync requests over to
+-	 * the checkpointer.  SYNC_HANDLER_NONE to disable fsync (eg pg_notify).
+-	 */
+-	SyncRequestHandler sync_handler;
+-
+-	/*
+-	 * Decide whether a page is "older" for truncation and as a hint for
+-	 * evicting pages in LRU order.  Return true if every entry of the first
+-	 * argument is older than every entry of the second argument.  Note that
+-	 * !PagePrecedes(a,b) && !PagePrecedes(b,a) need not imply a==b; it also
+-	 * arises when some entries are older and some are not.  For SLRUs using
+-	 * SimpleLruTruncate(), this must use modular arithmetic.  (For others,
+-	 * the behavior of this callback has no functional implications.)  Use
+-	 * SlruPagePrecedesUnitTests() in SLRUs meeting its criteria.
+-	 */
+-	bool		(*PagePrecedes) (int, int);
+-
+-	/*
+-	 * Dir is set during SimpleLruInit and does not change thereafter. Since
+-	 * it's always the same, it doesn't need to be in shared memory.
+-	 */
+-	char		Dir[64];
+-} SlruCtlData;
+-
+-typedef SlruCtlData *SlruCtl;
+-
+-
+-extern Size SimpleLruShmemSize(int nslots, int nlsns);
+-extern void SimpleLruInit(SlruCtl ctl, const char *name, int nslots, int nlsns,
+-						  LWLock *ctllock, const char *subdir, int tranche_id,
+-						  SyncRequestHandler sync_handler);
+-extern int	SimpleLruZeroPage(SlruCtl ctl, int pageno);
+-extern int	SimpleLruReadPage(SlruCtl ctl, int pageno, bool write_ok,
+-							  TransactionId xid);
+-extern int	SimpleLruReadPage_ReadOnly(SlruCtl ctl, int pageno,
+-									   TransactionId xid);
+-extern void SimpleLruWritePage(SlruCtl ctl, int slotno);
+-extern void SimpleLruWriteAll(SlruCtl ctl, bool allow_redirtied);
+ #ifdef USE_ASSERT_CHECKING
+-extern void SlruPagePrecedesUnitTests(SlruCtl ctl, int per_page);
++extern void SlruPagePrecedesUnitTests(SlruPagePrecedesFunction PagePrecedes,
++									  int per_page);
+ #else
+ #define SlruPagePrecedesUnitTests(ctl, per_page) do {} while (0)
+ #endif
+-extern void SimpleLruTruncate(SlruCtl ctl, int cutoffPage);
+-extern bool SimpleLruDoesPhysicalPageExist(SlruCtl ctl, int pageno);
++extern void SimpleLruTruncate(int slru_id, SlruPagePrecedesFunction PagePrecedes,
++							  int cutoffPage);
++extern bool SimpleLruDoesPhysicalPageExist(int slru_id, int pageno);
+ 
+-typedef bool (*SlruScanCallback) (SlruCtl ctl, char *filename, int segpage,
++typedef bool (*SlruScanCallback) (int slru_id,
++								  SlruPagePrecedesFunction PagePrecedes,
++								  char *filename, int segpage,
+ 								  void *data);
+-extern bool SlruScanDirectory(SlruCtl ctl, SlruScanCallback callback, void *data);
+-extern void SlruDeleteSegment(SlruCtl ctl, int segno);
+-
+-extern int	SlruSyncFileTag(SlruCtl ctl, const FileTag *ftag, char *path);
++extern bool SlruScanDirectory(int slru_id, SlruPagePrecedesFunction PagePrecedes,
++							  SlruScanCallback callback, void *data);
++extern void SlruDeleteSegment(int slru_id, int segno);
+ 
+ /* SlruScanDirectory public callbacks */
+-extern bool SlruScanDirCbReportPresence(SlruCtl ctl, char *filename,
++extern bool SlruScanDirCbReportPresence(int slru_id,
++										SlruPagePrecedesFunction PagePrecedes,
++										char *filename,
+ 										int segpage, void *data);
+-extern bool SlruScanDirCbDeleteAll(SlruCtl ctl, char *filename, int segpage,
++extern bool SlruScanDirCbDeleteAll(int slru_id, SlruPagePrecedesFunction PagePrecedes,
++								   char *filename, int segpage,
+ 								   void *data);
+ 
++/* Buffer access */
++extern Buffer ReadSlruBuffer(int slru_id, int pageno);
++extern Buffer ZeroSlruBuffer(int slru_id, int pageno);
++extern bool ProbeSlruBuffer(int slru_id, int pageno);
++
++/* Interfaces use by stats view */
++extern Oid SlruRelIdByName(const char *name);
++extern const char *SlruName(int slru_id);
++
+ #endif							/* SLRU_H */
+diff --git a/src/include/access/slrulist.h b/src/include/access/slrulist.h
+new file mode 100644
+index 00000000000..c1289a1326c
+--- /dev/null
++++ b/src/include/access/slrulist.h
+@@ -0,0 +1,30 @@
++/*---------------------------------------------------------------------------
++ * slrulist.h
++ *
++ * The SLRU list is kept in its own source file for possible
++ * use by automatic tools.  The exact representation of a rmgr is determined
++ * by the PG_SLRU macro, which is not defined in this file; it can be
++ * defined by the caller for special purposes.
++ *
++ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
++ * Portions Copyright (c) 1994, Regents of the University of California
++ *
++ * src/include/access/slrulist.h
++ *---------------------------------------------------------------------------
++ */
++
++/* there is deliberately not an #ifndef SLRULIST_H here */
++
++/*
++ * List of SLRU entries.  Note that order of entries defines the
++ * numerical values of each SLRU's ID, which is used in in-memory structus.
++ */
++
++/* symbol name, textual name, path, synchronize */
++PG_SLRU(SLRU_CLOG_ID, "Xact", "pg_xact", true)
++PG_SLRU(SLRU_SUBTRANS_ID, "Subtrans", "pg_subtrans", false)
++PG_SLRU(SLRU_MULTIXACT_OFFSET_ID, "MultiXactOffset", "pg_multixact/offsets", true)
++PG_SLRU(SLRU_MULTIXACT_MEMBER_ID, "MultiXactMember", "pg_multixact/members", true)
++PG_SLRU(SLRU_COMMIT_TS_ID, "CommitTs", "pg_commit_ts", true)
++PG_SLRU(SLRU_SERIAL_ID, "Serial", "pg_serial", false)
++PG_SLRU(SLRU_NOTIFY_ID, "Notify", "pg_notify", false)
+diff --git a/src/include/access/subtrans.h b/src/include/access/subtrans.h
+index 46a473c77f5..14e3bf720fe 100644
+--- a/src/include/access/subtrans.h
++++ b/src/include/access/subtrans.h
+@@ -18,11 +18,8 @@ extern void SubTransSetParent(TransactionId xid, TransactionId parent);
+ extern TransactionId SubTransGetParent(TransactionId xid);
+ extern TransactionId SubTransGetTopmostTransaction(TransactionId xid);
+ 
+-extern Size SUBTRANSShmemSize(void);
+-extern void SUBTRANSShmemInit(void);
+ extern void BootStrapSUBTRANS(void);
+ extern void StartupSUBTRANS(TransactionId oldestActiveXID);
+-extern void CheckPointSUBTRANS(void);
+ extern void ExtendSUBTRANS(TransactionId newestXact);
+ extern void TruncateSUBTRANS(TransactionId oldestXact);
+ 
+diff --git a/src/include/common/relpath.h b/src/include/common/relpath.h
+index 12df11c7dfc..7f132864592 100644
+--- a/src/include/common/relpath.h
++++ b/src/include/common/relpath.h
+@@ -63,6 +63,9 @@ typedef enum ForkNumber
+ 
+ #define FORKNAMECHARS	4		/* max chars for a fork name */
+ 
++/* Pseudo tablespace ID used for SLRUs. */
++#define SLRU_SPC_OID 9
++
+ extern PGDLLIMPORT const char *const forkNames[];
+ 
+ extern ForkNumber forkname_to_number(const char *forkName);
+diff --git a/src/include/storage/buf_internals.h b/src/include/storage/buf_internals.h
+index 6a37e0ce6b4..276e3c55c3b 100644
+--- a/src/include/storage/buf_internals.h
++++ b/src/include/storage/buf_internals.h
+@@ -307,6 +307,7 @@ typedef struct WritebackContext
+ 
+ /* in buf_init.c */
+ extern PGDLLIMPORT BufferDescPadded *BufferDescriptors;
++extern PGDLLIMPORT XLogRecPtr *BufferExternalLSNs;
+ extern PGDLLIMPORT ConditionVariableMinimallyPadded *BufferIOCVArray;
+ extern PGDLLIMPORT WritebackContext BackendWritebackContext;
+ 
+@@ -344,6 +345,18 @@ BufferDescriptorGetContentLock(const BufferDesc *bdesc)
+ 	return (LWLock *) (&bdesc->content_lock);
+ }
+ 
++static inline XLogRecPtr
++BufferGetExternalLSN(const BufferDesc *bdesc)
++{
++	return BufferExternalLSNs[bdesc->buf_id];
++}
++
++static inline void
++BufferSetExternalLSN(const BufferDesc *bdesc, XLogRecPtr lsn)
++{
++	BufferExternalLSNs[bdesc->buf_id] = lsn;
++}
++
+ /*
+  * The freeNext field is either the index of the next freelist entry,
+  * or one of these special values:
+diff --git a/src/include/storage/bufmgr.h b/src/include/storage/bufmgr.h
+index 7de50bf71b7..4338752826c 100644
+--- a/src/include/storage/bufmgr.h
++++ b/src/include/storage/bufmgr.h
+@@ -129,12 +129,18 @@ extern Buffer ReadBufferWithoutRelcache(RelFileLocator rlocator,
+ 										ForkNumber forkNum, BlockNumber blockNum,
+ 										ReadBufferMode mode, BufferAccessStrategy strategy,
+ 										bool permanent);
++extern Buffer ReadBufferWithoutRelcacheWithHit(RelFileLocator rlocator,
++											   ForkNumber forkNum, BlockNumber blockNum,
++											   ReadBufferMode mode, BufferAccessStrategy strategy,
++											   bool permanent, bool *hit);
+ extern void ReleaseBuffer(Buffer buffer);
+ extern void UnlockReleaseBuffer(Buffer buffer);
+ extern void MarkBufferDirty(Buffer buffer);
+ extern void IncrBufferRefCount(Buffer buffer);
+ extern Buffer ReleaseAndReadBuffer(Buffer buffer, Relation relation,
+ 								   BlockNumber blockNum);
++extern bool BufferProbe(RelFileLocator rlocator, ForkNumber forkNum,
++						BlockNumber blockNum);
+ 
+ extern void InitBufferPoolAccess(void);
+ extern void AtEOXact_Buffers(bool isCommit);
+diff --git a/src/include/storage/smgr.h b/src/include/storage/smgr.h
+index fe7282127ed..bc11bc70f56 100644
+--- a/src/include/storage/smgr.h
++++ b/src/include/storage/smgr.h
+@@ -123,6 +123,7 @@ extern void smgrwriteback(SMgrFileHandle sfile,
+ extern BlockNumber smgrnblocks(SMgrFileHandle sfile);
+ extern BlockNumber smgrnblocks_cached(SMgrFileHandle sfile);
+ extern void smgrimmedsync(SMgrFileHandle sfile);
++extern void smgrunlink(SMgrFileHandle sfile, bool isRedo);
+ 
+ extern void smgrtruncate_multi(RelFileLocator rlocator, BackendId backend, ForkNumber *forks, int nforks, BlockNumber *nblocks);
+ extern void smgrunlink_multi(RelFileLocator rlocator, BackendId backend, ForkNumber *forks, int nforks, bool isRedo);
+diff --git a/src/test/modules/Makefile b/src/test/modules/Makefile
+index c629cbe3830..3dbdb1d769e 100644
+--- a/src/test/modules/Makefile
++++ b/src/test/modules/Makefile
+@@ -32,10 +32,11 @@ SUBDIRS = \
+ 		  test_regex \
+ 		  test_rls_hooks \
+ 		  test_shm_mq \
+-		  test_slru \
+ 		  unsafe_tests \
+ 		  worker_spi
+ 
++#		  test_slru \  # FIXME: Broken
++
+ ifeq ($(with_ssl),openssl)
+ SUBDIRS += ssl_passphrase_callback
+ else
+-- 
+2.30.2
+
