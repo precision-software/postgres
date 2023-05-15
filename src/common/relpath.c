@@ -33,6 +33,8 @@ static char *slru_dirs[] =
 #include "access/slrulist.h"
 };
 
+#undef PG_SLRU  /* TODO: */
+
 /*
  * Lookup table of fork name by fork number.
  *

@@ -3107,7 +3107,7 @@ BufferGetLSNAtomic(Buffer buffer)
 	 * If we don't need locking for correctness, fastpath out.
 	 */
 	if (!XLogHintBitIsNeeded() || BufferIsLocal(buffer))
-		return PageGetLSN(page);
+		return PageGetLSN(page);  /* TODO: Is this valid for local buffers? Should simply avoid locking?  Or package test inside PageGetL=SN? */
 
 	/* Make sure we've got a real buffer, and that we hold a pin on it. */
 	Assert(BufferIsValid(buffer));
@@ -4252,7 +4252,7 @@ LockBuffer(Buffer buffer, int mode)
 	if (BufferIsLocal(buffer))
 		return;					/* local buffers need no lock */
 
-	buf = GetBufferDescriptor(buffer - 1);
+	buf = GetBufferDescriptor(buffer - 1); /* TODO: macro to get index? or pass buffer instead of index */
 
 	if (mode == BUFFER_LOCK_UNLOCK)
 		LWLockRelease(BufferDescriptorGetContentLock(buf));

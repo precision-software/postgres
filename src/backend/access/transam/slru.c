@@ -33,8 +33,10 @@
 
 static char *slru_dirs[] =
 {
-#include "access/slrulist.h"
+#include "access/slrulist.h"  /* TODO: why not a macro? */
 };
+
+#undef PG_SLRU  /* TODO: */
 
 /*
  * We'll maintain a little cache of recently seen buffers, to try to avoid the
