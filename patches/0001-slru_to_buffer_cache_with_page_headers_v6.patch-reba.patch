@@ -1,0 +1,2627 @@
+From 81eca4ed2f929e4e9c2f3de4040042fc070a1462 Mon Sep 17 00:00:00 2001
+From: Heikki Linnakangas <heikki.linnakangas@iki.fi>
+Date: Mon, 27 Feb 2023 15:46:36 +0200
+Subject: [PATCH 1/1] slru_to_buffer_cache_with_page_headers_v6.patch, rebased
+
+from https://www.postgresql.org/message-id/BBA4E674-ABCC-4788-AE1C-8EB295B217FE%40amazon.com
+---
+ src/backend/access/transam/clog.c      |  47 ++--
+ src/backend/access/transam/commit_ts.c |  53 +++-
+ src/backend/access/transam/multixact.c | 191 ++++++++-----
+ src/backend/access/transam/slru.c      |  21 +-
+ src/backend/access/transam/subtrans.c  |  14 +-
+ src/backend/commands/async.c           |  37 +--
+ src/backend/commands/dbcommands.c      |   2 +-
+ src/backend/storage/lmgr/predicate.c   |  15 +-
+ src/backend/storage/page/bufpage.c     |  21 ++
+ src/bin/pg_upgrade/file.c              | 175 +++++++++++-
+ src/bin/pg_upgrade/function.c          |  66 +++++
+ src/bin/pg_upgrade/pg_upgrade.c        |  74 ++++-
+ src/bin/pg_upgrade/pg_upgrade.h        |  19 +-
+ src/include/access/slru.h              |   3 +-
+ src/include/access/slrudefs.h          |  19 ++
+ src/include/storage/bufmgr.h           |  11 +-
+ src/include/storage/bufpage.h          |  17 ++
+ src/test/isolation/expected/stats.out  | 356 +------------------------
+ src/test/isolation/specs/stats.spec    |  60 +----
+ src/test/regress/expected/stats.out    |  38 ---
+ src/test/regress/expected/sysviews.out |   7 -
+ src/test/regress/sql/stats.sql         |  15 --
+ src/test/regress/sql/sysviews.sql      |   3 -
+ 23 files changed, 659 insertions(+), 605 deletions(-)
+ create mode 100644 src/include/access/slrudefs.h
+
+diff --git a/src/backend/access/transam/clog.c b/src/backend/access/transam/clog.c
+index b6f5ae987b1..b6c76482ccb 100644
+--- a/src/backend/access/transam/clog.c
++++ b/src/backend/access/transam/clog.c
+@@ -61,7 +61,7 @@
+ /* We need two bits per xact, so four xacts fit in a byte */
+ #define CLOG_BITS_PER_XACT	2
+ #define CLOG_XACTS_PER_BYTE 4
+-#define CLOG_XACTS_PER_PAGE (BLCKSZ * CLOG_XACTS_PER_BYTE)
++#define CLOG_XACTS_PER_PAGE ((BLCKSZ - SizeOfPageHeaderData) * CLOG_XACTS_PER_BYTE)
+ #define CLOG_XACT_BITMASK	((1 << CLOG_BITS_PER_XACT) - 1)
+ 
+ #define TransactionIdToPage(xid)	((xid) / (TransactionId) CLOG_XACTS_PER_PAGE)
+@@ -86,7 +86,7 @@
+ 
+ static Buffer ZeroCLOGPage(int pageno, bool writeXlog);
+ static bool CLOGPagePrecedes(int page1, int page2);
+-static void WriteZeroPageXlogRec(int pageno);
++static XLogRecPtr WriteZeroPageXlogRec(int pageno);
+ static void WriteTruncateXlogRec(int pageno, TransactionId oldestXact,
+ 								 Oid oldestXactDb);
+ static void TransactionIdSetPageStatus(TransactionId xid, int nsubxids,
+@@ -350,7 +350,7 @@ TransactionIdSetPageStatusInternal(TransactionId xid, int nsubxids,
+ 	 * write-busy, since we don't care if the update reaches disk sooner than
+ 	 * we think.
+ 	 */
+-	buffer = ReadSlruBuffer(SLRU_CLOG_ID, pageno);
++	buffer = ReadSlruBuffer(SLRU_CLOG_ID, pageno, RBM_NORMAL);
+ 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+ 
+ 	/*
+@@ -573,7 +573,7 @@ TransactionIdSetStatusBit(TransactionId xid, XidStatus status, XLogRecPtr lsn, B
+ 	Assert(LWLockHeldByMeInMode(BufferDescriptorGetContentLock(GetBufferDescriptor(buffer - 1)),
+ 								LW_EXCLUSIVE));
+ 
+-	byteptr = BufferGetPage(buffer) + byteno;
++	byteptr = PageGetContents(BufferGetPage(buffer)) + byteno;
+ 	curval = (*byteptr >> bshift) & CLOG_XACT_BITMASK;
+ 
+ 	/*
+@@ -611,8 +611,8 @@ TransactionIdSetStatusBit(TransactionId xid, XidStatus status, XLogRecPtr lsn, B
+ 	 */
+ 	if (!XLogRecPtrIsInvalid(lsn))
+ 	{
+-		if (BufferGetExternalLSN(GetBufferDescriptor(buffer)) < lsn)
+-			BufferSetExternalLSN(GetBufferDescriptor(buffer), lsn);
++		if (PageGetLSN(BufferGetPage(buffer)) < lsn)
++			PageSetLSN(BufferGetPage(buffer), lsn);
+ 	}
+ }
+ 
+@@ -641,12 +641,11 @@ TransactionIdGetStatus(TransactionId xid, XLogRecPtr *lsn)
+ 	XidStatus	status;
+ 	Buffer		buffer;
+ 
+-	buffer = ReadSlruBuffer(SLRU_CLOG_ID, pageno);
+-	byteptr = BufferGetPage(buffer) + byteno;
++	buffer = ReadSlruBuffer(SLRU_CLOG_ID, pageno, RBM_NORMAL);
++	byteptr = PageGetContents(BufferGetPage(buffer)) + byteno;
+ 
+ 	status = (*byteptr >> bshift) & CLOG_XACT_BITMASK;
+-
+-	*lsn = BufferGetExternalLSN(GetBufferDescriptor(buffer));
++	*lsn   = PageGetLSN(BufferGetPage(buffer));
+ 
+ 	ReleaseBuffer(buffer);
+ 
+@@ -686,12 +685,21 @@ static Buffer
+ ZeroCLOGPage(int pageno, bool writeXlog)
+ {
+ 	Buffer		buffer;
++	Page 		page;
++	XLogRecPtr  lsn;
+ 
+ 	buffer = ZeroSlruBuffer(SLRU_CLOG_ID, pageno);
+-	MarkBufferDirty(buffer);
+ 
++	page = BufferGetPage(buffer);
++
++	PageInitSLRU(page, BLCKSZ, 0);
++
++	lsn = 0;
+ 	if (writeXlog)
+-		WriteZeroPageXlogRec(pageno);
++		lsn = WriteZeroPageXlogRec(pageno);
++
++	PageSetHeaderDataNonRel(page, pageno, lsn, BLCKSZ, PG_METAPAGE_LAYOUT_VERSION);
++	MarkBufferDirty(buffer);
+ 
+ 	return buffer;
+ }
+@@ -733,14 +741,15 @@ TrimCLOG(void)
+ 		char	   *byteptr;
+ 		Buffer		buffer;
+ 
+-		buffer = ReadSlruBuffer(SLRU_CLOG_ID, pageno);
++		buffer = ReadSlruBuffer(SLRU_CLOG_ID, pageno, RBM_TRIM);
+ 		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+-		byteptr = BufferGetPage(buffer) + byteno;
++		byteptr = PageGetContents(BufferGetPage(buffer)) + byteno;
+ 
+ 		/* Zero so-far-unused positions in the current byte */
+ 		*byteptr &= (1 << bshift) - 1;
+ 		/* Zero the rest of the page */
+-		MemSet(byteptr + 1, 0, BLCKSZ - byteno - 1);
++		MemSet(byteptr + 1, 0, BLCKSZ - byteno - MAXALIGN(SizeOfPageHeaderData) - 1);
++
+ 
+ 		MarkBufferDirty(buffer);
+ 
+@@ -866,12 +875,16 @@ CLOGPagePrecedes(int page1, int page2)
+ /*
+  * Write a ZEROPAGE xlog record
+  */
+-static void
++static XLogRecPtr
+ WriteZeroPageXlogRec(int pageno)
+ {
++	XLogRecPtr lsn;
++
+ 	XLogBeginInsert();
+ 	XLogRegisterData((char *) (&pageno), sizeof(int));
+-	(void) XLogInsert(RM_CLOG_ID, CLOG_ZEROPAGE);
++	lsn = XLogInsert(RM_CLOG_ID, CLOG_ZEROPAGE);
++
++	return lsn;
+ }
+ 
+ /*
+diff --git a/src/backend/access/transam/commit_ts.c b/src/backend/access/transam/commit_ts.c
+index 69f34624b08..aba17e81c1f 100644
+--- a/src/backend/access/transam/commit_ts.c
++++ b/src/backend/access/transam/commit_ts.c
+@@ -63,7 +63,7 @@ typedef struct CommitTimestampEntry
+ 									sizeof(RepOriginId))
+ 
+ #define COMMIT_TS_XACTS_PER_PAGE \
+-	(BLCKSZ / SizeOfCommitTimestampEntry)
++	((BLCKSZ - SizeOfPageHeaderData) / SizeOfCommitTimestampEntry)
+ 
+ #define TransactionIdToCTsPage(xid) \
+ 	((xid) / (TransactionId) COMMIT_TS_XACTS_PER_PAGE)
+@@ -104,7 +104,8 @@ static Buffer ZeroCommitTsPage(int pageno, bool writeXlog);
+ static bool CommitTsPagePrecedes(int page1, int page2);
+ static void ActivateCommitTs(void);
+ static void DeactivateCommitTs(void);
+-static void WriteZeroPageXlogRec(int pageno);
++static XLogRecPtr WriteZeroPageXlogRec(int pageno);
++
+ static void WriteTruncateXlogRec(int pageno, TransactionId oldestXid);
+ 
+ /*
+@@ -212,7 +213,7 @@ SetXidCommitTsInPage(TransactionId xid, int nsubxids,
+ 	int			i;
+ 	Buffer		buffer;
+ 
+-	buffer = ReadSlruBuffer(SLRU_COMMIT_TS_ID, pageno);
++	buffer = ReadSlruBuffer(SLRU_COMMIT_TS_ID, pageno, RBM_NORMAL);
+ 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+ 
+ 	TransactionIdSetCommitTs(xid, ts, nodeid, buffer);
+@@ -232,6 +233,8 @@ TransactionIdSetCommitTs(TransactionId xid, TimestampTz ts,
+ 						 RepOriginId nodeid, Buffer buffer)
+ {
+ 	int			entryno = TransactionIdToCTsEntry(xid);
++	int 		pageno  = TransactionIdToCTsPage(xid);
++
+ 	CommitTimestampEntry entry;
+ 
+ 	Assert(TransactionIdIsNormal(xid));
+@@ -239,8 +242,12 @@ TransactionIdSetCommitTs(TransactionId xid, TimestampTz ts,
+ 	entry.time = ts;
+ 	entry.nodeid = nodeid;
+ 
+-	memcpy(BufferGetPage(buffer) + SizeOfCommitTimestampEntry * entryno,
++	Assert(xid == pageno * COMMIT_TS_XACTS_PER_PAGE + entryno);
++
++	memcpy(PageGetContents(BufferGetPage(buffer)) + \
++		   SizeOfCommitTimestampEntry * entryno,
+ 		   &entry, SizeOfCommitTimestampEntry);
++
+ }
+ 
+ /*
+@@ -314,13 +321,13 @@ TransactionIdGetCommitTsData(TransactionId xid, TimestampTz *ts,
+ 		return false;
+ 	}
+ 
+-	buffer = ReadSlruBuffer(SLRU_COMMIT_TS_ID, pageno);
++	buffer = ReadSlruBuffer(SLRU_COMMIT_TS_ID, pageno, RBM_NORMAL);
+ 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+ 
+ 	memcpy(&entry,
+-		   BufferGetPage(buffer) +
+-		   SizeOfCommitTimestampEntry * entryno,
+-		   SizeOfCommitTimestampEntry);
++			PageGetContents(BufferGetPage(buffer)) + \
++			SizeOfCommitTimestampEntry * entryno,
++			SizeOfCommitTimestampEntry);
+ 
+ 	*ts = entry.time;
+ 	if (nodeid)
+@@ -543,12 +550,20 @@ static Buffer
+ ZeroCommitTsPage(int pageno, bool writeXlog)
+ {
+ 	Buffer		buffer;
++	Page 		page;
++	XLogRecPtr  lsn;
+ 
+ 	buffer = ZeroSlruBuffer(SLRU_COMMIT_TS_ID, pageno);
+-	MarkBufferDirty(buffer);
++
++	page = BufferGetPage(buffer);
++	PageInitSLRU(page, BLCKSZ, 0);
+ 
+ 	if (writeXlog)
+-		WriteZeroPageXlogRec(pageno);
++	{
++		lsn = WriteZeroPageXlogRec(pageno);
++		PageSetHeaderDataNonRel(page, pageno, lsn, BLCKSZ, PG_METAPAGE_LAYOUT_VERSION);
++	}
++	MarkBufferDirty(buffer);
+ 
+ 	return buffer;
+ }
+@@ -673,8 +688,13 @@ ActivateCommitTs(void)
+ 	if (!SimpleLruDoesPhysicalPageExist(SLRU_COMMIT_TS_ID, pageno))
+ 	{
+ 		Buffer		buffer;
++		Page 		page;
+ 
+ 		buffer = ZeroSlruBuffer(SLRU_COMMIT_TS_ID, pageno);
++
++		page = BufferGetPage(buffer);
++		PageInitSLRU(page, BLCKSZ, 0);
++
+ 		MarkBufferDirty(buffer);
+ 		FlushOneBuffer(buffer);
+ 		UnlockReleaseBuffer(buffer);
+@@ -884,12 +904,16 @@ CommitTsPagePrecedes(int page1, int page2)
+ /*
+  * Write a ZEROPAGE xlog record
+  */
+-static void
++static XLogRecPtr
+ WriteZeroPageXlogRec(int pageno)
+ {
++	XLogRecPtr lsn;
++
+ 	XLogBeginInsert();
+ 	XLogRegisterData((char *) (&pageno), sizeof(int));
+-	(void) XLogInsert(RM_COMMIT_TS_ID, COMMIT_TS_ZEROPAGE);
++	lsn = XLogInsert(RM_COMMIT_TS_ID, COMMIT_TS_ZEROPAGE);
++
++	return lsn;
+ }
+ 
+ /*
+@@ -923,10 +947,15 @@ commit_ts_redo(XLogReaderState *record)
+ 	{
+ 		int			pageno;
+ 		Buffer		buffer;
++		Page		page;
+ 
+ 		memcpy(&pageno, XLogRecGetData(record), sizeof(int));
+ 
+ 		buffer = ZeroSlruBuffer(SLRU_COMMIT_TS_ID, pageno);
++
++		page = BufferGetPage(buffer);
++		PageInitSLRU(page, BLCKSZ, 0);
++
+ 		MarkBufferDirty(buffer);
+ 		FlushOneBuffer(buffer);
+ 		UnlockReleaseBuffer(buffer);
+diff --git a/src/backend/access/transam/multixact.c b/src/backend/access/transam/multixact.c
+index 8e06a0e9a91..8aadc33d860 100644
+--- a/src/backend/access/transam/multixact.c
++++ b/src/backend/access/transam/multixact.c
+@@ -106,7 +106,7 @@
+  */
+ 
+ /* We need four bytes per offset */
+-#define MULTIXACT_OFFSETS_PER_PAGE (BLCKSZ / sizeof(MultiXactOffset))
++#define MULTIXACT_OFFSETS_PER_PAGE ((BLCKSZ - SizeOfPageHeaderData)/ sizeof(MultiXactOffset))
+ 
+ #define MultiXactIdToOffsetPage(xid) \
+ 	((xid) / (MultiXactOffset) MULTIXACT_OFFSETS_PER_PAGE)
+@@ -138,7 +138,7 @@
+ /* size in bytes of a complete group */
+ #define MULTIXACT_MEMBERGROUP_SIZE \
+ 	(sizeof(TransactionId) * MULTIXACT_MEMBERS_PER_MEMBERGROUP + MULTIXACT_FLAGBYTES_PER_GROUP)
+-#define MULTIXACT_MEMBERGROUPS_PER_PAGE (BLCKSZ / MULTIXACT_MEMBERGROUP_SIZE)
++#define MULTIXACT_MEMBERGROUPS_PER_PAGE ((BLCKSZ - SizeOfPageHeaderData) / MULTIXACT_MEMBERGROUP_SIZE)
+ #define MULTIXACT_MEMBERS_PER_PAGE	\
+ 	(MULTIXACT_MEMBERGROUPS_PER_PAGE * MULTIXACT_MEMBERS_PER_MEMBERGROUP)
+ 
+@@ -161,9 +161,9 @@
+ 
+ /* Location (byte offset within page) of flag word for a given member */
+ #define MXOffsetToFlagsOffset(xid) \
+-	((((xid) / (TransactionId) MULTIXACT_MEMBERS_PER_MEMBERGROUP) % \
++	(((((xid) / (TransactionId) MULTIXACT_MEMBERS_PER_MEMBERGROUP) % \
+ 	  (TransactionId) MULTIXACT_MEMBERGROUPS_PER_PAGE) * \
+-	 (TransactionId) MULTIXACT_MEMBERGROUP_SIZE)
++	 (TransactionId) MULTIXACT_MEMBERGROUP_SIZE))
+ #define MXOffsetToFlagsBitShift(xid) \
+ 	(((xid) % (TransactionId) MULTIXACT_MEMBERS_PER_MEMBERGROUP) * \
+ 	 MXACT_MEMBER_BITS_PER_XACT)
+@@ -332,8 +332,8 @@ static MemoryContext MXactContext = NULL;
+ /* internal MultiXactId management */
+ static void MultiXactIdSetOldestVisible(void);
+ static void RecordNewMultiXact(MultiXactId multi, MultiXactOffset offset,
+-							   int nmembers, MultiXactMember *members);
+-static MultiXactId GetNewMultiXactId(int nmembers, MultiXactOffset *offset);
++							   int nmembers, MultiXactMember *members, Buffer * offset_buf_ptr, Buffer * member_bufs);
++static MultiXactId GetNewMultiXactId(int nmembers, MultiXactOffset *offset, Buffer * offset_buf, Buffer ** member_bufs);
+ 
+ /* MultiXact cache management */
+ static int	mxactMemberComparator(const void *arg1, const void *arg2);
+@@ -350,13 +350,13 @@ static Buffer ZeroMultiXactMemberPage(int pageno, bool writeXlog);
+ static bool MultiXactOffsetPagePrecedes(int page1, int page2);
+ static bool MultiXactOffsetPrecedes(MultiXactOffset offset1,
+ 									MultiXactOffset offset2);
+-static void ExtendMultiXactOffset(MultiXactId multi);
+-static void ExtendMultiXactMember(MultiXactOffset offset, int nmembers);
++static void ExtendMultiXactOffset(MultiXactId multi, Buffer * buffer);
++static void ExtendMultiXactMember(MultiXactOffset offset, int nmembers, Buffer ** member_buffers);
+ static bool MultiXactOffsetWouldWrap(MultiXactOffset boundary,
+ 									 MultiXactOffset start, uint32 distance);
+ static bool SetOffsetVacuumLimit(bool is_startup);
+ static bool find_multixact_start(MultiXactId multi, MultiXactOffset *result);
+-static void WriteMZeroPageXlogRec(int pageno, uint8 info);
++static XLogRecPtr WriteMZeroPageXlogRec(int pageno, uint8 info);
+ static void WriteMTruncateXlogRec(Oid oldestMultiDB,
+ 								  MultiXactId startTruncOff,
+ 								  MultiXactId endTruncOff,
+@@ -757,6 +757,9 @@ ReadMultiXactIdRange(MultiXactId *oldest, MultiXactId *next)
+ MultiXactId
+ MultiXactIdCreateFromMembers(int nmembers, MultiXactMember *members)
+ {
++	Buffer * member_bufs;
++	Buffer offset_buff;
++
+ 	MultiXactId multi;
+ 	MultiXactOffset offset;
+ 	xl_multixact_create xlrec;
+@@ -810,7 +813,8 @@ MultiXactIdCreateFromMembers(int nmembers, MultiXactMember *members)
+ 	 * in vacuum.  During vacuum, in particular, it would be unacceptable to
+ 	 * keep OldestMulti set, in case it runs for long.
+ 	 */
+-	multi = GetNewMultiXactId(nmembers, &offset);
++
++	multi = GetNewMultiXactId(nmembers, &offset, &offset_buff, &member_bufs);
+ 
+ 	/* Make an XLOG entry describing the new MXID. */
+ 	xlrec.mid = multi;
+@@ -830,7 +834,7 @@ MultiXactIdCreateFromMembers(int nmembers, MultiXactMember *members)
+ 	(void) XLogInsert(RM_MULTIXACT_ID, XLOG_MULTIXACT_CREATE_ID);
+ 
+ 	/* Now enter the information into the OFFSETs and MEMBERs logs */
+-	RecordNewMultiXact(multi, offset, nmembers, members);
++	RecordNewMultiXact(multi, offset, nmembers, members, &offset_buff, member_bufs);
+ 
+ 	/* Done with critical section */
+ 	END_CRIT_SECTION();
+@@ -852,31 +856,37 @@ MultiXactIdCreateFromMembers(int nmembers, MultiXactMember *members)
+  */
+ static void
+ RecordNewMultiXact(MultiXactId multi, MultiXactOffset offset,
+-				   int nmembers, MultiXactMember *members)
++				   int nmembers, MultiXactMember *members, Buffer * offset_buf_ptr, Buffer * member_bufs)
+ {
+ 	int			pageno;
+ 	int			prev_pageno;
++	int 		min_pageno;
+ 	int			entryno;
+ 	MultiXactOffset *offptr;
+ 	int			i;
+ 	Buffer		buffer;
++	Buffer		offset_buf;
+ 
+ 	pageno = MultiXactIdToOffsetPage(multi);
+ 	entryno = MultiXactIdToOffsetEntry(multi);
+ 
+-	/* XXX set up error context? */
+-	buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
+-	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+-	offptr = (MultiXactOffset *) BufferGetPage(buffer);
++	if (offset_buf_ptr)
++		offset_buf = *offset_buf_ptr;
++	else
++		offset_buf = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno, RBM_NORMAL);
++
++	LockBuffer(offset_buf, BUFFER_LOCK_EXCLUSIVE);
++
++	offptr = (MultiXactOffset *) PageGetContents(BufferGetPage(offset_buf));
+ 	offptr += entryno;
+ 
+ 	*offptr = offset;
+ 
+-	MarkBufferDirty(buffer);
+-
+-	UnlockReleaseBuffer(buffer);
++	MarkBufferDirty(offset_buf);
++	UnlockReleaseBuffer(offset_buf);
+ 	buffer = InvalidBuffer;
+ 
++	min_pageno = MXOffsetToMemberPage(offset);
+ 	prev_pageno = -1;
+ 
+ 	for (i = 0; i < nmembers; i++, offset++)
+@@ -899,16 +909,21 @@ RecordNewMultiXact(MultiXactId multi, MultiXactOffset offset,
+ 		{
+ 			if (BufferIsValid(buffer))
+ 				UnlockReleaseBuffer(buffer);
+-			buffer = ReadSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno);
++
++			if (member_bufs)
++				buffer = member_bufs[pageno - min_pageno];
++			else
++				buffer = ReadSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno, RBM_NORMAL);
++
+ 			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+ 			prev_pageno = pageno;
+ 		}
+ 
+-		memberptr = (TransactionId *) (BufferGetPage(buffer) + memberoff);
++		memberptr = (TransactionId *) (PageGetContents(BufferGetPage(buffer)) + memberoff);
+ 
+ 		*memberptr = members[i].xid;
+ 
+-		flagsptr = (uint32 *) (BufferGetPage(buffer) + flagsoff);
++		flagsptr = (uint32 *) (PageGetContents(BufferGetPage(buffer)) + flagsoff);
+ 
+ 		flagsval = *flagsptr;
+ 		flagsval &= ~(((1 << MXACT_MEMBER_BITS_PER_XACT) - 1) << bshift);
+@@ -919,6 +934,8 @@ RecordNewMultiXact(MultiXactId multi, MultiXactOffset offset,
+ 	}
+ 
+ 	UnlockReleaseBuffer(buffer);
++	if (member_bufs != NULL)
++		pfree(member_bufs);
+ }
+ 
+ /*
+@@ -937,8 +954,11 @@ RecordNewMultiXact(MultiXactId multi, MultiXactOffset offset,
+  * caller must end the critical section after writing SLRU data.
+  */
+ static MultiXactId
+-GetNewMultiXactId(int nmembers, MultiXactOffset *offset)
++GetNewMultiXactId(int nmembers, MultiXactOffset *offset, Buffer * offset_buf, Buffer ** member_bufs)
+ {
++	int min_pageno;
++	int max_pageno;
++
+ 	MultiXactId result;
+ 	MultiXactOffset nextOffset;
+ 
+@@ -1056,7 +1076,7 @@ GetNewMultiXactId(int nmembers, MultiXactOffset *offset)
+ 	}
+ 
+ 	/* Make sure there is room for the MXID in the file.  */
+-	ExtendMultiXactOffset(result);
++	ExtendMultiXactOffset(result, offset_buf);
+ 
+ 	/*
+ 	 * Reserve the members space, similarly to above.  Also, be careful not to
+@@ -1144,7 +1164,12 @@ GetNewMultiXactId(int nmembers, MultiXactOffset *offset)
+ 							   MultiXactState->offsetStopLimit - nextOffset + nmembers),
+ 				 errhint("Execute a database-wide VACUUM in that database with reduced vacuum_multixact_freeze_min_age and vacuum_multixact_freeze_table_age settings.")));
+ 
+-	ExtendMultiXactMember(nextOffset, nmembers);
++	min_pageno = MXOffsetToMemberPage(nextOffset);
++	max_pageno = MXOffsetToMemberPage(nextOffset + nmembers - 1);
++
++	*member_bufs = (Buffer *) palloc(sizeof(Buffer) * (max_pageno - min_pageno + 1));
++
++	ExtendMultiXactMember(nextOffset, nmembers, member_bufs);
+ 
+ 	/*
+ 	 * Critical section from here until caller has written the data into the
+@@ -1327,9 +1352,9 @@ retry:
+ 	pageno = MultiXactIdToOffsetPage(multi);
+ 	entryno = MultiXactIdToOffsetEntry(multi);
+ 
+-	buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
++	buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno, RBM_NORMAL);
+ 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+-	offptr = (MultiXactOffset *) BufferGetPage(buffer);
++	offptr = (MultiXactOffset *) (PageGetContents(BufferGetPage(buffer)));
+ 	offptr += entryno;
+ 	offset = *offptr;
+ 
+@@ -1362,11 +1387,11 @@ retry:
+ 		if (pageno != prev_pageno)
+ 		{
+ 			UnlockReleaseBuffer(buffer);
+-			buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
++			buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno, RBM_NORMAL);
+ 			LockBuffer(buffer, BUFFER_LOCK_SHARE);
+ 		}
+ 
+-		offptr = (MultiXactOffset *) BufferGetPage(buffer);
++		offptr = (MultiXactOffset *) (PageGetContents(BufferGetPage(buffer)));
+ 		offptr += entryno;
+ 		nextMXOffset = *offptr;
+ 
+@@ -1403,12 +1428,12 @@ retry:
+ 		{
+ 			if (BufferIsValid(buffer))
+ 				UnlockReleaseBuffer(buffer);
+-			buffer = ReadSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno);
++			buffer = ReadSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno, RBM_NORMAL);
+ 			LockBuffer(buffer, BUFFER_LOCK_SHARE);
+ 			prev_pageno = pageno;
+ 		}
+ 
+-		xactptr = (TransactionId *) (BufferGetPage(buffer) + memberoff);
++		xactptr = (TransactionId *) (PageGetContents((BufferGetPage(buffer)) + memberoff));
+ 
+ 		if (!TransactionIdIsValid(*xactptr))
+ 		{
+@@ -1419,7 +1444,7 @@ retry:
+ 
+ 		flagsoff = MXOffsetToFlagsOffset(offset);
+ 		bshift = MXOffsetToFlagsBitShift(offset);
+-		flagsptr = (uint32 *) (BufferGetPage(buffer) + flagsoff);
++		flagsptr = (uint32 *) (PageGetContents(BufferGetPage(buffer)) + flagsoff);
+ 
+ 		ptr[truelength].xid = *xactptr;
+ 		ptr[truelength].status = (*flagsptr >> bshift) & MXACT_MEMBER_XACT_BITMASK;
+@@ -1884,12 +1909,20 @@ static Buffer
+ ZeroMultiXactOffsetPage(int pageno, bool writeXlog)
+ {
+ 	Buffer		buffer;
++	Page		page;
++	XLogRecPtr	recptr;
+ 
+ 	buffer = ZeroSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
+-	MarkBufferDirty(buffer);
++	page = BufferGetPage(buffer);
++	PageInitSLRU(page, BLCKSZ, 0);
++
++	recptr = 0;
+ 
+ 	if (writeXlog)
+-		WriteMZeroPageXlogRec(pageno, XLOG_MULTIXACT_ZERO_OFF_PAGE);
++		recptr = WriteMZeroPageXlogRec(pageno, XLOG_MULTIXACT_ZERO_OFF_PAGE);
++
++	PageSetHeaderDataNonRel(page, pageno, recptr, BLCKSZ, PG_METAPAGE_LAYOUT_VERSION);
++	MarkBufferDirty(buffer);
+ 
+ 	return buffer;
+ }
+@@ -1901,12 +1934,19 @@ static Buffer
+ ZeroMultiXactMemberPage(int pageno, bool writeXlog)
+ {
+ 	Buffer		buffer;
++	Page 		page;
++	XLogRecPtr 	recptr;
+ 
+ 	buffer = ZeroSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno);
+-	MarkBufferDirty(buffer);
++	page = BufferGetPage(buffer);
++	PageInitSLRU(page, BLCKSZ, 0);
+ 
++	recptr = 0;
+ 	if (writeXlog)
+-		WriteMZeroPageXlogRec(pageno, XLOG_MULTIXACT_ZERO_MEM_PAGE);
++		recptr = WriteMZeroPageXlogRec(pageno, XLOG_MULTIXACT_ZERO_MEM_PAGE);
++
++	PageSetHeaderDataNonRel(page, pageno, recptr, BLCKSZ, PG_METAPAGE_LAYOUT_VERSION);
++	MarkBufferDirty(buffer);
+ 
+ 	return buffer;
+ }
+@@ -1977,7 +2017,7 @@ TrimMultiXact(void)
+ 	oldestMXactDB = MultiXactState->oldestMultiXactDB;
+ 	LWLockRelease(MultiXactGenLock);
+ 
+-	pageno = MXOffsetToMemberPage(offset);
++	pageno = MultiXactIdToOffsetPage(nextMXact);
+ 
+ 	/*
+ 	 * Zero out the remainder of the current offsets page.  See notes in
+@@ -1993,12 +2033,12 @@ TrimMultiXact(void)
+ 		MultiXactOffset *offptr;
+ 		Buffer		buffer;
+ 
+-		buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
++		buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno, RBM_TRIM);
+ 		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+-		offptr = (MultiXactOffset *) BufferGetPage(buffer);
++		offptr = (MultiXactOffset *) (PageGetContents(BufferGetPage(buffer)));
+ 		offptr += entryno;
+ 
+-		MemSet(offptr, 0, BLCKSZ - (entryno * sizeof(MultiXactOffset)));
++		MemSet(offptr, 0, BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - (entryno * sizeof(MultiXactOffset)));
+ 
+ 		MarkBufferDirty(buffer);
+ 		UnlockReleaseBuffer(buffer);
+@@ -2008,6 +2048,8 @@ TrimMultiXact(void)
+ 	 * Zero out the remainder of the current members page.  See notes in
+ 	 * TrimCLOG() for motivation.
+ 	 */
++
++	pageno = MXOffsetToMemberPage(offset);
+ 	flagsoff = MXOffsetToFlagsOffset(offset);
+ 	if (flagsoff != 0)
+ 	{
+@@ -2016,11 +2058,11 @@ TrimMultiXact(void)
+ 		Buffer		buffer;
+ 
+ 		memberoff = MXOffsetToMemberOffset(offset);
+-		buffer = ReadSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno);
++		buffer = ReadSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno, RBM_TRIM);
+ 		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+-		xidptr = (TransactionId *) (BufferGetPage(buffer) + memberoff);
++		xidptr = (TransactionId *) (PageGetContents(BufferGetPage(buffer)) + memberoff);
+ 
+-		MemSet(xidptr, 0, BLCKSZ - memberoff);
++		MemSet(xidptr, 0, BLCKSZ - memberoff - MAXALIGN(SizeOfPageHeaderData));
+ 
+ 		/*
+ 		 * Note: we don't need to zero out the flag bits in the remaining
+@@ -2297,22 +2339,30 @@ MultiXactAdvanceOldest(MultiXactId oldestMulti, Oid oldestMultiDB)
+  * room in shared memory.
+  */
+ static void
+-ExtendMultiXactOffset(MultiXactId multi)
++ExtendMultiXactOffset(MultiXactId multi, Buffer * buffer)
+ {
+ 	int			pageno;
+ 
++
+ 	/*
+-	 * No work except at first MultiXactId of a page.  But beware: just after
+-	 * wraparound, the first MultiXactId of page zero is FirstMultiXactId.
++	 * Make a ReadBuffer call for the page we need beforehand so that we don't need
++	 * to malloc later.
++	 * If we're at the first MultiXactId of a page, make sure we also zero the page
+ 	 */
++
++	pageno = MultiXactIdToOffsetPage(multi);
+ 	if (MultiXactIdToOffsetEntry(multi) != 0 &&
+ 		multi != FirstMultiXactId)
++	{
++		/* make a read buffer call to enlarge the resource owner */
++		*buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno, RBM_NORMAL);
+ 		return;
+-
+-	pageno = MultiXactIdToOffsetPage(multi);
+-
+-	/* Zero the page and make an XLOG entry about it */
+-	UnlockReleaseBuffer(ZeroMultiXactOffsetPage(pageno, true));
++	} else
++	{
++		/* Zero the page and make an XLOG entry about it */
++		*buffer = ZeroMultiXactOffsetPage(pageno, true);
++		LockBuffer(*buffer, BUFFER_LOCK_UNLOCK); /* release lock but don't unpin */
++	}
+ }
+ 
+ /*
+@@ -2323,7 +2373,7 @@ ExtendMultiXactOffset(MultiXactId multi)
+  * same comments apply.
+  */
+ static void
+-ExtendMultiXactMember(MultiXactOffset offset, int nmembers)
++ExtendMultiXactMember(MultiXactOffset offset, int nmembers, Buffer ** buffers)
+ {
+ 	/*
+ 	 * It's possible that the members span more than one page of the members
+@@ -2331,10 +2381,17 @@ ExtendMultiXactMember(MultiXactOffset offset, int nmembers)
+ 	 * optimal if the members span several pages, but that seems unusual
+ 	 * enough to not worry much about.
+ 	 */
++	int min_pageno;
++
++	min_pageno = MXOffsetToMemberPage(offset);
+ 	while (nmembers > 0)
+ 	{
++		Buffer buf;
++
+ 		int			flagsoff;
+ 		int			flagsbit;
++		int			pageno;
++
+ 		uint32		difference;
+ 
+ 		/*
+@@ -2342,16 +2399,22 @@ ExtendMultiXactMember(MultiXactOffset offset, int nmembers)
+ 		 */
+ 		flagsoff = MXOffsetToFlagsOffset(offset);
+ 		flagsbit = MXOffsetToFlagsBitShift(offset);
++		pageno = MXOffsetToMemberPage(offset);
++
+ 		if (flagsoff == 0 && flagsbit == 0)
+ 		{
+-			int			pageno;
+-
+-			pageno = MXOffsetToMemberPage(offset);
+-
+ 			/* Zero the page and make an XLOG entry about it */
+-			UnlockReleaseBuffer(ZeroMultiXactMemberPage(pageno, true));
++			buf = ZeroMultiXactMemberPage(pageno, true);
++			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
++		} else
++		{
++			/* do a read buffer call to allocate space beforehand */
++			buf = ReadSlruBuffer(SLRU_MULTIXACT_MEMBER_ID, pageno, RBM_NORMAL);
+ 		}
+ 
++		if (buffers)
++			(*buffers)[pageno - min_pageno] = buf;
++
+ 		/*
+ 		 * Compute the number of items till end of current page.  Careful: if
+ 		 * addition of unsigned ints wraps around, we're at the last page of
+@@ -2641,9 +2704,9 @@ find_multixact_start(MultiXactId multi, MultiXactOffset *result)
+ 		!SimpleLruDoesPhysicalPageExist(SLRU_MULTIXACT_OFFSET_ID, pageno))
+ 		return false;
+ 
+-	buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno);
++	buffer = ReadSlruBuffer(SLRU_MULTIXACT_OFFSET_ID, pageno, RBM_NORMAL);
+ 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+-	offptr = (MultiXactOffset *) BufferGetPage(buffer);
++	offptr = (MultiXactOffset *) (PageGetContents(BufferGetPage(buffer)));
+ 	offptr += entryno;
+ 	offset = *offptr;
+ 	UnlockReleaseBuffer(buffer);
+@@ -3063,12 +3126,16 @@ MultiXactOffsetPrecedes(MultiXactOffset offset1, MultiXactOffset offset2)
+  * Write an xlog record reflecting the zeroing of either a MEMBERs or
+  * OFFSETs page (info shows which)
+  */
+-static void
++static XLogRecPtr
+ WriteMZeroPageXlogRec(int pageno, uint8 info)
+ {
++	XLogRecPtr recptr;
++
+ 	XLogBeginInsert();
+ 	XLogRegisterData((char *) (&pageno), sizeof(int));
+-	(void) XLogInsert(RM_MULTIXACT_ID, info);
++	recptr = XLogInsert(RM_MULTIXACT_ID, info);
++
++	return recptr;
+ }
+ 
+ /*
+@@ -3135,7 +3202,7 @@ multixact_redo(XLogReaderState *record)
+ 
+ 		/* Store the data back into the SLRU files */
+ 		RecordNewMultiXact(xlrec->mid, xlrec->moff, xlrec->nmembers,
+-						   xlrec->members);
++						   xlrec->members, NULL, NULL);
+ 
+ 		/* Make sure nextMXact/nextOffset are beyond what this record has */
+ 		MultiXactAdvanceNextMXact(xlrec->mid + 1,
+diff --git a/src/backend/access/transam/slru.c b/src/backend/access/transam/slru.c
+index 1204468c039..a162d4b85f0 100644
+--- a/src/backend/access/transam/slru.c
++++ b/src/backend/access/transam/slru.c
+@@ -28,6 +28,9 @@
+ #include "storage/fd.h"
+ #include "storage/shmem.h"
+ 
++/*
++ * SLRU ID to path mapping
++ */
+ #define PG_SLRU(symname,name,path,synchronize) \
+ 	path,
+ 
+@@ -40,7 +43,7 @@ static char *slru_dirs[] =
+  * We'll maintain a little cache of recently seen buffers, to try to avoid the
+  * buffer mapping table on repeat access (ie the busy end of the CLOG).  One
+  * entry per SLRU.
+-  */
++ */
+ struct SlruRecentBuffer {
+ 	int			pageno;
+ 	Buffer		recent_buffer;
+@@ -352,7 +355,7 @@ SlruScanDirectory(int slru_id, SlruPagePrecedesFunction PagePrecedes,
+  * Read a buffer.  Buffer is pinned on return.
+  */
+ Buffer
+-ReadSlruBuffer(int slru_id, int pageno)
++ReadSlruBuffer(int slru_id, int pageno, ReadBufferMode mode)
+ {
+ 	int			segno = pageno / SLRU_PAGES_PER_SEGMENT;
+ 	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
+@@ -372,7 +375,7 @@ ReadSlruBuffer(int slru_id, int pageno)
+ 
+ 	/* Regular lookup. */
+ 	buffer = ReadBufferWithoutRelcacheWithHit(rlocator, MAIN_FORKNUM, rpageno,
+-											  RBM_NORMAL, NULL, true, &hit);
++											  mode, NULL, true, &hit);
+ 
+ 	/* Remember where this page is for next time. */
+ 	slru_recent_buffers[slru_id].pageno = pageno;
+@@ -396,15 +399,11 @@ ZeroSlruBuffer(int slru_id, int pageno)
+ 	Buffer		buffer;
+ 	SMgrFileHandle sfile;
+ 
+-	if (rpageno == 0)
+-	{
+-		sfile = smgropen(rlocator, InvalidBackendId, MAIN_FORKNUM);
+-		if (!smgrexists(sfile))
+-			smgrcreate(sfile, false);
+-	}
++	sfile = smgropen(rlocator, InvalidBackendId, MAIN_FORKNUM);
++	if (!smgrexists(sfile))
++		smgrcreate(sfile, false);
+ 
+-	buffer = ReadBufferWithoutRelcache(rlocator, MAIN_FORKNUM, rpageno,
+-									   RBM_ZERO_AND_LOCK, NULL, true);
++	buffer = ReadBufferWithoutRelcache(rlocator, MAIN_FORKNUM, rpageno, RBM_ZERO_AND_LOCK, NULL, true);
+ 
+ 	/* Remember where this page is for next time. */
+ 	slru_recent_buffers[slru_id].pageno = pageno;
+diff --git a/src/backend/access/transam/subtrans.c b/src/backend/access/transam/subtrans.c
+index 1ab4e5ae557..33ede8138d6 100644
+--- a/src/backend/access/transam/subtrans.c
++++ b/src/backend/access/transam/subtrans.c
+@@ -50,7 +50,7 @@
+  */
+ 
+ /* We need four bytes per xact */
+-#define SUBTRANS_XACTS_PER_PAGE (BLCKSZ / sizeof(TransactionId))
++#define SUBTRANS_XACTS_PER_PAGE ((BLCKSZ - SizeOfPageHeaderData) / sizeof(TransactionId))
+ 
+ #define TransactionIdToPage(xid) ((xid) / (TransactionId) SUBTRANS_XACTS_PER_PAGE)
+ #define TransactionIdToEntry(xid) ((xid) % (TransactionId) SUBTRANS_XACTS_PER_PAGE)
+@@ -74,9 +74,9 @@ SubTransSetParent(TransactionId xid, TransactionId parent)
+ 	Assert(TransactionIdIsValid(parent));
+ 	Assert(TransactionIdFollows(xid, parent));
+ 
+-	buffer = ReadSlruBuffer(SLRU_SUBTRANS_ID, pageno);
++	buffer = ReadSlruBuffer(SLRU_SUBTRANS_ID, pageno, RBM_NORMAL);
+ 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+-	ptr = (TransactionId *) BufferGetPage(buffer);
++	ptr = (TransactionId *) PageGetContents(BufferGetPage(buffer));
+ 	ptr += entryno;
+ 
+ 	/*
+@@ -113,9 +113,9 @@ SubTransGetParent(TransactionId xid)
+ 	if (!TransactionIdIsNormal(xid))
+ 		return InvalidTransactionId;
+ 
+-	buffer = ReadSlruBuffer(SLRU_SUBTRANS_ID, pageno);
++	buffer = ReadSlruBuffer(SLRU_SUBTRANS_ID, pageno, RBM_NORMAL);
+ 
+-	ptr = (TransactionId *) BufferGetPage(buffer);
++	ptr = (TransactionId *) PageGetContents(BufferGetPage(buffer));
+ 	ptr += entryno;
+ 
+ 	parent = *ptr;
+@@ -205,8 +205,12 @@ static Buffer
+ ZeroSUBTRANSPage(int pageno)
+ {
+ 	Buffer		buffer;
++	Page		page;
+ 
+ 	buffer = ZeroSlruBuffer(SLRU_SUBTRANS_ID, pageno);
++	page = BufferGetPage(buffer);
++	PageInitSLRU(page, BLCKSZ, 0);
++
+ 	MarkBufferDirty(buffer);
+ 
+ 	return buffer;
+diff --git a/src/backend/commands/async.c b/src/backend/commands/async.c
+index f944766ec2b..3c2b61592f9 100644
+--- a/src/backend/commands/async.c
++++ b/src/backend/commands/async.c
+@@ -164,7 +164,7 @@
+  * than that, so changes in that data structure won't affect user-visible
+  * restrictions.
+  */
+-#define NOTIFY_PAYLOAD_MAX_LENGTH	(BLCKSZ - NAMEDATALEN - 128)
++#define NOTIFY_PAYLOAD_MAX_LENGTH	(BLCKSZ - NAMEDATALEN - SizeOfPageHeaderData - 128)
+ 
+ /*
+  * Struct representing an entry in the global notify queue
+@@ -214,7 +214,7 @@ typedef struct QueuePosition
+ 	((x).page == (y).page && (x).offset == (y).offset)
+ 
+ #define QUEUE_POS_IS_ZERO(x) \
+-	((x).page == 0 && (x).offset == 0)
++	((x).page == 0 && (x).offset == MAXALIGN(SizeOfPageHeaderData))
+ 
+ /* choose logically smaller QueuePosition */
+ #define QUEUE_POS_MIN(x,y) \
+@@ -543,8 +543,8 @@ AsyncShmemInit(void)
+ 	if (!found)
+ 	{
+ 		/* First time through, so initialize it */
+-		SET_QUEUE_POS(QUEUE_HEAD, 0, 0);
+-		SET_QUEUE_POS(QUEUE_TAIL, 0, 0);
++		SET_QUEUE_POS(QUEUE_HEAD, 0, MAXALIGN(SizeOfPageHeaderData));
++		SET_QUEUE_POS(QUEUE_TAIL, 0, MAXALIGN(SizeOfPageHeaderData));
+ 		QUEUE_STOP_PAGE = 0;
+ 		QUEUE_FIRST_LISTENER = InvalidBackendId;
+ 		asyncQueueControl->lastQueueFillWarn = 0;
+@@ -554,7 +554,7 @@ AsyncShmemInit(void)
+ 			QUEUE_BACKEND_PID(i) = InvalidPid;
+ 			QUEUE_BACKEND_DBOID(i) = InvalidOid;
+ 			QUEUE_NEXT_LISTENER(i) = InvalidBackendId;
+-			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, 0);
++			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, MAXALIGN(SizeOfPageHeaderData));
+ 		}
+ 	}
+ 
+@@ -1331,19 +1331,19 @@ asyncQueueAdvance(volatile QueuePosition *position, int entryLength)
+ 	 * written or read.
+ 	 */
+ 	offset += entryLength;
+-	Assert(offset <= QUEUE_PAGESIZE);
++	Assert(offset <= QUEUE_PAGESIZE - MAXALIGN(SizeOfPageHeaderData));
+ 
+ 	/*
+ 	 * In a second step check if another entry can possibly be written to the
+ 	 * page. If so, stay here, we have reached the next position. If not, then
+ 	 * we need to move on to the next page.
+ 	 */
+-	if (offset + QUEUEALIGN(AsyncQueueEntryEmptySize) > QUEUE_PAGESIZE)
++	if (offset + QUEUEALIGN(AsyncQueueEntryEmptySize) > QUEUE_PAGESIZE - MAXALIGN(SizeOfPageHeaderData))
+ 	{
+ 		pageno++;
+ 		if (pageno > QUEUE_MAX_PAGE)
+ 			pageno = 0;			/* wrap around */
+-		offset = 0;
++		offset = MAXALIGN(SizeOfPageHeaderData); /* start at SizeOfPageHeaderData */
+ 		pageJump = true;
+ 	}
+ 
+@@ -1424,10 +1424,12 @@ asyncQueueAddEntries(ListCell *nextNotify)
+ 	if (QUEUE_POS_IS_ZERO(queue_head))
+ 	{
+ 		buffer = ZeroSlruBuffer(SLRU_NOTIFY_ID, pageno);
++		PageSetHeaderDataNonRel(BufferGetPage(buffer), pageno, InvalidXLogRecPtr, BLCKSZ, PG_METAPAGE_LAYOUT_VERSION);
++
+ 	}
+ 	else
+ 	{
+-		buffer = ReadSlruBuffer(SLRU_NOTIFY_ID, pageno);
++		buffer = ReadSlruBuffer(SLRU_NOTIFY_ID, pageno, RBM_NORMAL);
+ 		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+ 	}
+ 
+@@ -1444,7 +1446,7 @@ asyncQueueAddEntries(ListCell *nextNotify)
+ 		offset = QUEUE_POS_OFFSET(queue_head);
+ 
+ 		/* Check whether the entry really fits on the current page */
+-		if (offset + qe.length <= QUEUE_PAGESIZE)
++		if (offset + qe.length <= QUEUE_PAGESIZE - MAXALIGN(SizeOfPageHeaderData))
+ 		{
+ 			/* OK, so advance nextNotify past this item */
+ 			nextNotify = lnext(pendingNotifies->events, nextNotify);
+@@ -1456,17 +1458,18 @@ asyncQueueAddEntries(ListCell *nextNotify)
+ 			 * only check dboid and since it won't match any reader's database
+ 			 * OID, they will ignore this entry and move on.
+ 			 */
+-			qe.length = QUEUE_PAGESIZE - offset;
++			qe.length = QUEUE_PAGESIZE - MAXALIGN(SizeOfPageHeaderData) - offset;
+ 			qe.dboid = InvalidOid;
+ 			qe.data[0] = '\0';	/* empty channel */
+ 			qe.data[1] = '\0';	/* empty payload */
+ 		}
+ 
+ 		/* Now copy qe into the shared buffer page */
+-		memcpy(BufferGetPage(buffer) + offset,
++		memcpy(PageGetContents(BufferGetPage(buffer)) + offset,
+ 			   &qe,
+ 			   qe.length);
+ 
++
+ 		/* Advance queue_head appropriately, and detect if page is full */
+ 		if (asyncQueueAdvance(&(queue_head), qe.length))
+ 		{
+@@ -1981,7 +1984,7 @@ asyncQueueReadAllNotifications(void)
+ 			 * transmitting them to our frontend.  Copy only the part of the
+ 			 * page we will actually inspect.
+ 			 */
+-			buffer = ReadSlruBuffer(SLRU_NOTIFY_ID, curpage);
++			buffer = ReadSlruBuffer(SLRU_NOTIFY_ID, curpage, RBM_NORMAL);
+ 			if (curpage == QUEUE_POS_PAGE(head))
+ 			{
+ 				/* we only want to read as far as head */
+@@ -1992,10 +1995,10 @@ asyncQueueReadAllNotifications(void)
+ 			else
+ 			{
+ 				/* fetch all the rest of the page */
+-				copysize = QUEUE_PAGESIZE - curoffset;
++				copysize = QUEUE_PAGESIZE - MAXALIGN(SizeOfPageHeaderData) - curoffset;
+ 			}
+-			memcpy(page_buffer.buf + curoffset,
+-				   BufferGetPage(buffer) + curoffset,
++			memcpy(PageGetContents(page_buffer.buf) +  curoffset,
++				   PageGetContents(BufferGetPage(buffer)) + curoffset,
+ 				   copysize);
+ 			ReleaseBuffer(buffer);
+ 
+@@ -2065,7 +2068,7 @@ asyncQueueProcessPageEntries(volatile QueuePosition *current,
+ 		if (QUEUE_POS_EQUAL(thisentry, stop))
+ 			break;
+ 
+-		qe = (AsyncQueueEntry *) (page_buffer + QUEUE_POS_OFFSET(thisentry));
++		qe = (AsyncQueueEntry *) (PageGetContents(page_buffer) + QUEUE_POS_OFFSET(thisentry));
+ 
+ 		/*
+ 		 * Advance *current over this message, possibly to the next page. As
+diff --git a/src/backend/commands/dbcommands.c b/src/backend/commands/dbcommands.c
+index 0d9ed2e0e0c..3b027ddcd21 100644
+--- a/src/backend/commands/dbcommands.c
++++ b/src/backend/commands/dbcommands.c
+@@ -439,7 +439,7 @@ ScanSourceDatabasePgClassTuple(HeapTupleData *tuple, Oid tbid, Oid dbid,
+ 	relinfo->rlocator.relNumber = relfilenumber;
+ 	relinfo->reloid = classForm->oid;
+ 
+-	/* Temporary relations were rejected ove. */
++	/* Temporary relations were rejected above. */
+ 	Assert(classForm->relpersistence != RELPERSISTENCE_TEMP);
+ 	relinfo->permanent =
+ 		(classForm->relpersistence == RELPERSISTENCE_PERMANENT) ? true : false;
+diff --git a/src/backend/storage/lmgr/predicate.c b/src/backend/storage/lmgr/predicate.c
+index f72fc99762c..7b2ddaa8e39 100644
+--- a/src/backend/storage/lmgr/predicate.c
++++ b/src/backend/storage/lmgr/predicate.c
+@@ -315,7 +315,7 @@
+ 
+ #define SERIAL_PAGESIZE			BLCKSZ
+ #define SERIAL_ENTRYSIZE			sizeof(SerCommitSeqNo)
+-#define SERIAL_ENTRIESPERPAGE	(SERIAL_PAGESIZE / SERIAL_ENTRYSIZE)
++#define SERIAL_ENTRIESPERPAGE	((SERIAL_PAGESIZE - SizeOfPageHeaderData) / SERIAL_ENTRYSIZE)
+ 
+ /*
+  * Set maximum pages based on the number needed to track all transactions.
+@@ -325,11 +325,12 @@
+ #define SerialNextPage(page) (((page) >= SERIAL_MAX_PAGE) ? 0 : (page) + 1)
+ 
+ #define SerialValue(buffer, xid) (*((SerCommitSeqNo *) \
+-	(BufferGetPage(buffer) + \
++	(PageGetContents(BufferGetPage(buffer)) + \
+ 	((((uint32) (xid)) % SERIAL_ENTRIESPERPAGE) * SERIAL_ENTRYSIZE))))
+ 
+ #define SerialPage(xid)	(((uint32) (xid)) / SERIAL_ENTRIESPERPAGE)
+ 
++
+ typedef struct SerialControlData
+ {
+ 	int			headPage;		/* newest initialized page */
+@@ -777,10 +778,13 @@ SerialPagePrecedesLogicallyUnitTests(void)
+ 	 * requires burning ~2B XIDs in single-user mode, a negligible
+ 	 * possibility.  Moreover, if it does happen, the consequence would be
+ 	 * mild, namely a new transaction failing in SimpleLruReadPage().
++	 *
++	 * NOTE:  After adding page headers, the defect affects two pages.
++	 * We now assert correct treatment of its second to prior page.
+ 	 */
+ 	headPage = oldestPage;
+ 	targetPage = newestPage;
+-	Assert(SerialPagePrecedesLogically(headPage, targetPage - 1));
++	Assert(SerialPagePrecedesLogically(headPage, targetPage - 2));
+ #if 0
+ 	Assert(SerialPagePrecedesLogically(headPage, targetPage));
+ #endif
+@@ -876,6 +880,7 @@ SerialAdd(TransactionId xid, SerCommitSeqNo minConflictCommitSeqNo)
+ 		while (firstZeroPage != targetPage)
+ 		{
+ 			buffer = ZeroSlruBuffer(SLRU_SERIAL_ID, firstZeroPage);
++			PageSetHeaderDataNonRel(BufferGetPage(buffer), firstZeroPage, InvalidXLogRecPtr, BLCKSZ, PG_METAPAGE_LAYOUT_VERSION);
+ 			MarkBufferDirty(buffer);
+ 			UnlockReleaseBuffer(buffer);
+ 			firstZeroPage = SerialNextPage(firstZeroPage);
+@@ -884,7 +889,7 @@ SerialAdd(TransactionId xid, SerCommitSeqNo minConflictCommitSeqNo)
+ 	}
+ 	else
+ 	{
+-		buffer = ReadSlruBuffer(SLRU_SERIAL_ID, targetPage);
++		buffer = ReadSlruBuffer(SLRU_SERIAL_ID, targetPage, RBM_NORMAL);
+ 		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+ 	}
+ 
+@@ -928,7 +933,7 @@ SerialGetMinConflictCommitSeqNo(TransactionId xid)
+ 	 * The following function must be called without holding SerialSLRULock,
+ 	 * but will return with that lock held, which must then be released.
+ 	 */
+-	buffer = ReadSlruBuffer(SLRU_SERIAL_ID, SerialPage(xid));
++	buffer = ReadSlruBuffer(SLRU_SERIAL_ID, SerialPage(xid), RBM_NORMAL);
+ 	val = SerialValue(buffer, xid);
+ 	ReleaseBuffer(buffer);
+ 	LWLockRelease(SerialSLRULock);
+diff --git a/src/backend/storage/page/bufpage.c b/src/backend/storage/page/bufpage.c
+index 92994f8f395..ff8dc62e653 100644
+--- a/src/backend/storage/page/bufpage.c
++++ b/src/backend/storage/page/bufpage.c
+@@ -59,6 +59,27 @@ PageInit(Page page, Size pageSize, Size specialSize)
+ 	/* p->pd_prune_xid = InvalidTransactionId;		done by above MemSet */
+ }
+ 
++void
++PageInitSLRU(Page page, Size pageSize, Size specialSize)
++{
++	PageHeader	p = (PageHeader) page;
++
++	specialSize = MAXALIGN(specialSize);
++
++	Assert(pageSize == BLCKSZ);
++	Assert(pageSize > specialSize + SizeOfPageHeaderData);
++
++	/* Make sure all fields of page are zero, as well as unused space */
++	MemSet(p, 0, pageSize);
++
++	p->pd_flags = 0;
++	p->pd_lower = SizeOfPageHeaderData;
++	p->pd_upper = pageSize - specialSize;
++	p->pd_special = pageSize - specialSize;
++	PageSetPageSizeAndVersion(page, pageSize, PG_METAPAGE_LAYOUT_VERSION);
++	/* p->pd_prune_xid = InvalidTransactionId;		done by above MemSet */
++}
++
+ 
+ /*
+  * PageIsVerifiedExtended
+diff --git a/src/bin/pg_upgrade/file.c b/src/bin/pg_upgrade/file.c
+index ed874507ff4..27f240470ba 100644
+--- a/src/bin/pg_upgrade/file.c
++++ b/src/bin/pg_upgrade/file.c
+@@ -20,6 +20,7 @@
+ #endif
+ 
+ #include "access/visibilitymapdefs.h"
++#include "access/slrudefs.h"
+ #include "common/file_perm.h"
+ #include "pg_upgrade.h"
+ #include "storage/bufpage.h"
+@@ -139,7 +140,6 @@ copyFile(const char *src, const char *dst,
+ #endif							/* WIN32 */
+ }
+ 
+-
+ /*
+  * linkFile()
+  *
+@@ -316,6 +316,179 @@ rewriteVisibilityMap(const char *fromfile, const char *tofile,
+ 	close(src_fd);
+ }
+ 
++
++//create new file and initialize to 256K
++static int
++init_new_slru_file(FILE * fp)
++{ 
++	int fd;
++	int res;
++	
++	fd = fileno(fp);
++	res = ftruncate(fd, BLCKSZ * SLRU_PAGES_PER_SEGMENT);
++	return res;
++}
++
++int 
++copy_to_new_format(const char *old_subdir, const char *new_subdir, int element_size) 
++{
++	DIR *dr;
++	struct dirent *de;
++	
++	size_t 	read_items;
++	size_t 	n_items;
++	size_t 	to_read_items;
++	size_t 	write_items;
++	size_t 	pages_written;
++	size_t 	write_offset;
++
++	char * 	read_file;	
++	char * 	write_file;
++	
++	int 	res;
++	int 	write_file_segno;
++	int 	total_read_files;
++	
++	FILE * 	old_fd; 
++	FILE * 	new_fp;
++
++#define MAXBUFSIZE (BLCKSZ - SizeOfPageHeaderData)
++
++	char	old_path[MAXPGPATH];
++	char	new_path[MAXPGPATH];
++	PGAlignedBlock pg_buf;
++	BlockNumber blkno; //track aboslute block number
++	
++
++	struct 	dirent** all_dirents;
++
++
++	snprintf(old_path, sizeof(old_path), "%s/%s", old_cluster.pgdata, old_subdir);
++	snprintf(new_path, sizeof(new_path), "%s/%s", new_cluster.pgdata, new_subdir);
++
++	/* 
++	 * calculate the number of items that can fit 
++	 * inside BLCKSZ - SizeOfPageHeaderData
++	 */
++
++	n_items = (size_t) (MAXBUFSIZE / element_size); 
++	
++	/* number of items to read in at a time */
++	to_read_items = n_items;
++	
++	//bufsize = (size_t) (n_items * element_size); 
++	write_file_segno = 0; /* track which segment we are writing into */
++	write_offset = (size_t) (SizeOfPageHeaderData); 
++
++	dr = opendir((char *)old_path);
++	if (dr == NULL)
++		return -1;
++
++	write_file = psprintf("%s/%04X", new_path, write_file_segno);
++	
++	new_fp = fopen(write_file, "wb");
++	
++	if (new_fp == NULL)
++		return -1;
++
++	res = init_new_slru_file(new_fp);
++	if (res < 0)	
++		return -1;
++
++	if (res < 0)
++		return -1;
++
++	pages_written = 0;
++	blkno = 0; /* absolute blkno */
++
++	all_dirents = get_sorted_hex_files(old_path, &total_read_files);
++
++	write_items = 0;
++	for (int i = 0; i < total_read_files; i++)
++	{
++		de = all_dirents[i];
++		
++		if ((!strcmp((char *) de->d_name, ".")) || !strcmp((char *) de->d_name, ".."))
++	 	{
++			continue;
++	 	}
++
++		read_file = psprintf("%s/%s", (char *) old_path, (char *) de->d_name);
++		
++		old_fd = fopen(read_file, "rb");
++		read_items = 0;
++		
++		do 
++		{
++			memset(pg_buf.data, 0, BLCKSZ);		
++			read_items = fread(pg_buf.data + write_offset, element_size, to_read_items, old_fd);  /* how many items we read */
++
++			if (to_read_items == n_items) /* not finishing up a partial read */
++			{
++
++				((PageHeader) pg_buf.data)->pd_lower = SizeOfPageHeaderData;
++				((PageHeader) pg_buf.data)->pd_upper = BLCKSZ;
++				((PageHeader) pg_buf.data)->pd_special = BLCKSZ;
++				
++				((PageHeader) pg_buf.data)->pd_checksum =
++					pg_checksum_page(pg_buf.data, blkno);
++
++				fwrite(pg_buf.data, SizeOfPageHeaderData, 1, new_fp); /* write page header data */
++			}
++
++			
++			write_items += fwrite(pg_buf.data + write_offset, element_size, read_items, new_fp);  /* increment how many items written */
++						
++			if (write_items % n_items == 0 && write_items > 0 && errno == 0) /* finished writing into new page. */
++			{
++				if (write_items == n_items * SLRU_PAGES_PER_SEGMENT) /* end of segment */
++				{
++					fclose(new_fp);
++					pages_written = 0;
++					write_file_segno ++;
++					write_items = 0;
++					write_file = psprintf("%s/%04X", new_path, write_file_segno);
++					new_fp = fopen((char *)write_file, "wb");
++					res = init_new_slru_file(new_fp);
++					if (res < 0 || new_fp == NULL)
++					{
++						fclose(new_fp);
++						cleanup_dirents(all_dirents, total_read_files);
++						
++					}
++				} else { /* end of page but not segment */
++					//fflush(new_fp);
++					pages_written ++; 
++				}
++
++				blkno++; 
++
++				to_read_items = n_items; /* to_read_items = n */
++				res = fseek(new_fp, (pages_written * BLCKSZ), SEEK_SET);
++				if (res < 0)
++				{
++					fclose(new_fp);
++					cleanup_dirents(all_dirents, total_read_files);
++					return -1;
++				}
++			} else {
++				/*end of segment in source dir*/
++				if (read_items < to_read_items) 
++				{
++					to_read_items = n_items - read_items; /* read remaining items */
++				}
++			}
++		} while (!feof(old_fd));  /* until end of file */
++		fclose(old_fd);
++	}
++	fflush(new_fp);
++	
++	/* free memory malloc'd by scandir while sorting */
++	cleanup_dirents(all_dirents, total_read_files);
++
++	return 0;
++}
++
+ void
+ check_file_clone(void)
+ {
+diff --git a/src/bin/pg_upgrade/function.c b/src/bin/pg_upgrade/function.c
+index dc8800c7cde..10c7fcafbd5 100644
+--- a/src/bin/pg_upgrade/function.c
++++ b/src/bin/pg_upgrade/function.c
+@@ -7,6 +7,7 @@
+  *	src/bin/pg_upgrade/function.c
+  */
+ 
++
+ #include "postgres_fe.h"
+ 
+ #include "access/transam.h"
+@@ -42,6 +43,43 @@ library_name_compare(const void *p1, const void *p2)
+ 			((const LibraryInfo *) p2)->dbnum;
+ }
+ 
++/*
++ * qsort comparator for hex filenames
++ */
++static int
++file_name_compare(const struct dirent ** de_1, const struct dirent ** de_2)
++{
++	int n1;
++	int n2;
++
++
++	char * fname_1;
++	char * fname_2;
++
++	fname_1 = (char *) (*de_1)->d_name;
++	fname_2 = (char *) (*de_2)->d_name;
++	
++	if ((strcmp(fname_1, ".")) || strcmp(fname_1, "..")) 
++	{
++		n1 = (int) strtol(fname_1, NULL, 16);
++	} else {
++		n1 = -1;
++	}
++
++	if ((strcmp(fname_2, ".")) || strcmp(fname_2, ".."))
++	{
++		n2 = (int) strtol(fname_2, NULL, 16);
++	} else {
++		n2 = -1;
++	}
++
++	if (n1 == n2) 
++	{
++		return 1; //arbitrarily select the first input
++	} else {
++		return n1 - n2;
++	}
++}
+ 
+ /*
+  * get_loadable_libraries()
+@@ -109,6 +147,34 @@ get_loadable_libraries(void)
+ }
+ 
+ 
++/*
++ * get_sorted_hex_files()
++ * given the filepath of a directory,
++ * return array of child dirents with hex filenames e.g '000A'
++ * in sorted order
++ */
++struct dirent** 
++get_sorted_hex_files(char * dr, int * size)
++{
++	struct dirent **entry_list;
++
++	*size = scandir(dr, &entry_list, NULL, file_name_compare);
++	if (*size < 0)
++	{
++		return NULL; //error
++	}
++	return entry_list;
++}
++
++void
++cleanup_dirents(struct dirent ** all_dirents, int total_read_files)
++{	
++	for (int i = 0; i < total_read_files; i++)
++	{
++		 free((struct dirent **) all_dirents[i]);
++	}
++	free((struct dirent **) all_dirents);
++}
+ /*
+  * check_loadable_libraries()
+  *
+diff --git a/src/bin/pg_upgrade/pg_upgrade.c b/src/bin/pg_upgrade/pg_upgrade.c
+index e5597d31052..8bb07835877 100644
+--- a/src/bin/pg_upgrade/pg_upgrade.c
++++ b/src/bin/pg_upgrade/pg_upgrade.c
+@@ -38,18 +38,22 @@
+ 
+ #include "postgres_fe.h"
+ 
++#include <dirent.h>
+ #include <time.h>
++#include <unistd.h>
+ 
+ #ifdef HAVE_LANGINFO_H
+ #include <langinfo.h>
+ #endif
+ 
++#include "access/slrudefs.h"
+ #include "catalog/pg_class_d.h"
+ #include "common/file_perm.h"
+ #include "common/logging.h"
+ #include "common/restricted_token.h"
+ #include "fe_utils/string_utils.h"
+ #include "pg_upgrade.h"
++#include "storage/bufpage.h"
+ 
+ static void prepare_new_cluster(void);
+ static void prepare_new_globals(void);
+@@ -59,6 +63,10 @@ static void set_frozenxids(bool minmxid_only);
+ static void make_outputdirs(char *pgdata);
+ static void setup(char *argv0, bool *live_check);
+ 
++
++#define MAXBUFSIZE (BLCKSZ - SizeOfPageHeaderData)
++#define SLRU_PAGES_PER_SEGMENT 32
++
+ ClusterInfo old_cluster,
+ 			new_cluster;
+ OSInfo		os_info;
+@@ -573,11 +581,36 @@ copy_xact_xlog_xid(void)
+ 	 * Copy old commit logs to new data dir. pg_clog has been renamed to
+ 	 * pg_xact in post-10 clusters.
+ 	 */
+-	copy_subdir_files(GET_MAJOR_VERSION(old_cluster.major_version) <= 906 ?
+-					  "pg_clog" : "pg_xact",
+-					  GET_MAJOR_VERSION(new_cluster.major_version) <= 906 ?
+-					  "pg_clog" : "pg_xact");
++	 
++	if (old_cluster.controldata.cat_ver <= CLOG_FORMATCHANGE_CAT_VER &&
++		new_cluster.controldata.cat_ver >= CLOG_FORMATCHANGE_CAT_VER)
++	{
++			int ret;
++			ret = copy_to_new_format(GET_MAJOR_VERSION(old_cluster.major_version) <= 906 ?
++			"pg_clog" : "pg_xact", 
++			"pg_xact", 1);
++			
++			if (ret < 0)
++			{
++				pg_fatal("could not reformat clog files");
++			}
++	}
+ 
++	if (old_cluster.controldata.cat_ver >= CLOG_FORMATCHANGE_CAT_VER &&
++		new_cluster.controldata.cat_ver >= CLOG_FORMATCHANGE_CAT_VER)
++	{
++		copy_subdir_files("pg_xact", "pg_xact");
++	}
++
++	if (old_cluster.controldata.cat_ver <= CLOG_FORMATCHANGE_CAT_VER &&
++		new_cluster.controldata.cat_ver <= CLOG_FORMATCHANGE_CAT_VER)
++	{
++		copy_subdir_files(GET_MAJOR_VERSION(old_cluster.major_version) <= 906 ?
++					"pg_clog" : "pg_xact",
++					GET_MAJOR_VERSION(new_cluster.major_version) <= 906 ?
++					"pg_clog" : "pg_xact");
++	}
++	
+ 	prep_status("Setting oldest XID for new cluster");
+ 	exec_prog(UTILITY_LOG_FILE, NULL, true, true,
+ 			  "\"%s/pg_resetwal\" -f -u %u \"%s\"",
+@@ -633,23 +666,44 @@ copy_xact_xlog_xid(void)
+ 	}
+ 	else if (new_cluster.controldata.cat_ver >= MULTIXACT_FORMATCHANGE_CAT_VER)
+ 	{
++		copy_to_new_format("pg_multixact/offsets", "pg_multixact/offsets", MULTIXACT_MEMBER_ENTRY_SIZE);
++		copy_to_new_format("pg_multixact/members", "pg_multixact/members", MULTIXACT_OFFSET_ENTRY_SIZE);	 
++
++
++		prep_status("Setting next multixact ID and offset for new cluster");
++
+ 		/*
++		 * we preserve all files and contents, so we must preserve both "next"
++		 * counters here and the oldest multi present on system.
++		 */
++		exec_prog(UTILITY_LOG_FILE, NULL, true, true,
++				  "\"%s/pg_resetwal\" -O %u -m %u,%u \"%s\"",
++				  new_cluster.bindir,
++				  old_cluster.controldata.chkpnt_nxtmxoff,
++				  old_cluster.controldata.chkpnt_nxtmulti,
++				  old_cluster.controldata.chkpnt_oldstMulti,
++				  new_cluster.pgdata);
++		check_ok();
++
++	}
++	/*else if (new_cluster.controldata.cat_ver >= MULTIXACT_FORMATCHANGE_CAT_VER)
++	{
++		*
+ 		 * Remove offsets/0000 file created by initdb that no longer matches
+ 		 * the new multi-xid value.  "members" starts at zero so no need to
+ 		 * remove it.
+-		 */
++		 *
+ 		remove_new_subdir("pg_multixact/offsets", false);
+ 
+ 		prep_status("Setting oldest multixact ID in new cluster");
+-
+-		/*
++ 		*
+ 		 * We don't preserve files in this case, but it's important that the
+ 		 * oldest multi is set to the latest value used by the old system, so
+ 		 * that multixact.c returns the empty set for multis that might be
+ 		 * present on disk.  We set next multi to the value following that; it
+ 		 * might end up wrapped around (i.e. 0) if the old cluster had
+ 		 * next=MaxMultiXactId, but multixact.c can cope with that just fine.
+-		 */
++		 *
+ 		exec_prog(UTILITY_LOG_FILE, NULL, true, true,
+ 				  "\"%s/pg_resetwal\" -m %u,%u \"%s\"",
+ 				  new_cluster.bindir,
+@@ -657,7 +711,8 @@ copy_xact_xlog_xid(void)
+ 				  old_cluster.controldata.chkpnt_nxtmulti,
+ 				  new_cluster.pgdata);
+ 		check_ok();
+-	}
++		
++	}*/
+ 
+ 	/* now reset the wal archives in the new cluster */
+ 	prep_status("Resetting WAL archives");
+@@ -669,7 +724,6 @@ copy_xact_xlog_xid(void)
+ 	check_ok();
+ }
+ 
+-
+ /*
+  *	set_frozenxids()
+  *
+diff --git a/src/bin/pg_upgrade/pg_upgrade.h b/src/bin/pg_upgrade/pg_upgrade.h
+index 5f2a116f23e..19e16edcc55 100644
+--- a/src/bin/pg_upgrade/pg_upgrade.h
++++ b/src/bin/pg_upgrade/pg_upgrade.h
+@@ -7,6 +7,7 @@
+ 
+ #include <unistd.h>
+ #include <assert.h>
++#include <dirent.h>
+ #include <sys/stat.h>
+ #include <sys/time.h>
+ 
+@@ -113,7 +114,16 @@ extern char *output_files[];
+  * version to this value.  pg_upgrade behavior depends on whether old and new
+  * server versions are both newer than this, or only the new one is.
+  */
+-#define MULTIXACT_FORMATCHANGE_CAT_VER 201301231
++
++/*
++ * page header format change
++ */
++#define MULTIXACT_FORMATCHANGE_CAT_VER 202209141
++
++/* 
++ * page header format change 
++ */
++#define CLOG_FORMATCHANGE_CAT_VER 202210141
+ 
+ /*
+  * large object chunk size added to pg_controldata,
+@@ -122,7 +132,7 @@ extern char *output_files[];
+ #define LARGE_OBJECT_SIZE_PG_CONTROL_VER 942
+ 
+ /*
+- * change in JSONB format during 9.4 beta
++ * addition of page header 
+  */
+ #define JSONB_FORMAT_CHANGE_CAT_VER 201409291
+ 
+@@ -378,6 +388,9 @@ void		rewriteVisibilityMap(const char *fromfile, const char *tofile,
+ void		check_file_clone(void);
+ void		check_hard_link(void);
+ 
++
++int 	copy_to_new_format(const char *old_subdir, const char *new_subdir, int element_size);
++
+ /* fopen_priv() is no longer different from fopen() */
+ #define fopen_priv(path, mode)	fopen(path, mode)
+ 
+@@ -385,6 +398,8 @@ void		check_hard_link(void);
+ 
+ void		get_loadable_libraries(void);
+ void		check_loadable_libraries(void);
++void 		cleanup_dirents(struct dirent ** all_dirents, int total_read_files);
++struct dirent** 	get_sorted_hex_files(char * dr, int * size);
+ 
+ /* info.c */
+ 
+diff --git a/src/include/access/slru.h b/src/include/access/slru.h
+index fcae11ce599..4b3e2e4a34d 100644
+--- a/src/include/access/slru.h
++++ b/src/include/access/slru.h
+@@ -16,6 +16,7 @@
+ #include "access/xlogdefs.h"
+ #include "catalog/pg_tablespace_d.h"
+ #include "storage/buf.h"
++#include "storage/bufmgr.h"
+ #include "storage/lwlock.h"
+ #include "storage/smgr.h"
+ #include "storage/sync.h"
+@@ -87,7 +88,7 @@ extern bool SlruScanDirCbDeleteAll(int slru_id, SlruPagePrecedesFunction PagePre
+ 								   void *data);
+ 
+ /* Buffer access */
+-extern Buffer ReadSlruBuffer(int slru_id, int pageno);
++extern Buffer ReadSlruBuffer(int slru_id, int pageno, ReadBufferMode mode);
+ extern Buffer ZeroSlruBuffer(int slru_id, int pageno);
+ extern bool ProbeSlruBuffer(int slru_id, int pageno);
+ 
+diff --git a/src/include/access/slrudefs.h b/src/include/access/slrudefs.h
+new file mode 100644
+index 00000000000..49cd78d923d
+--- /dev/null
++++ b/src/include/access/slrudefs.h
+@@ -0,0 +1,19 @@
++/*-------------------------------------------------------------------------
++ *
++ * slrudefs.h
++ *		macros for accessing contents of "slru" pages 
++ *
++ *
++ * Copyright (c) 2021-2022, PostgreSQL Global Development Group
++ *
++ * src/include/access/slrudefs.h
++ *
++ *--------------------------------------------------------------------------
++ */
++
++#define SLRU_PAGES_PER_SEGMENT 32
++
++#define MULTIXACT_MEMBER_ENTRY_SIZE 20 
++
++#define MULTIXACT_OFFSET_ENTRY_SIZE 8
++
+diff --git a/src/include/storage/bufmgr.h b/src/include/storage/bufmgr.h
+index 4338752826c..792add7df99 100644
+--- a/src/include/storage/bufmgr.h
++++ b/src/include/storage/bufmgr.h
+@@ -47,8 +47,11 @@ typedef enum
+ 	RBM_ZERO_AND_CLEANUP_LOCK,	/* Like RBM_ZERO_AND_LOCK, but locks the page
+ 								 * in "cleanup" mode */
+ 	RBM_ZERO_ON_ERROR,			/* Read, but return an all-zeros page on error */
+-	RBM_NORMAL_NO_LOG			/* Don't log page as invalid during WAL
++	RBM_NORMAL_NO_LOG,			/* Don't log page as invalid during WAL
+ 								 * replay; otherwise same as RBM_NORMAL */
++
++	RBM_TRIM				/*Read for TRIM functions in CLOG / MultiXact. 
++						  Don't validate checksum  or zero. */	
+ } ReadBufferMode;
+ 
+ /*
+@@ -130,8 +133,8 @@ extern Buffer ReadBufferWithoutRelcache(RelFileLocator rlocator,
+ 										ReadBufferMode mode, BufferAccessStrategy strategy,
+ 										bool permanent);
+ extern Buffer ReadBufferWithoutRelcacheWithHit(RelFileLocator rlocator,
+-											   ForkNumber forkNum, BlockNumber blockNum,
+-											   ReadBufferMode mode, BufferAccessStrategy strategy,
++										ForkNumber forkNum, BlockNumber blockNum,
++										ReadBufferMode mode, BufferAccessStrategy strategy,
+ 											   bool permanent, bool *hit);
+ extern void ReleaseBuffer(Buffer buffer);
+ extern void UnlockReleaseBuffer(Buffer buffer);
+@@ -141,7 +144,7 @@ extern Buffer ReleaseAndReadBuffer(Buffer buffer, Relation relation,
+ 								   BlockNumber blockNum);
+ extern bool BufferProbe(RelFileLocator rlocator, ForkNumber forkNum,
+ 						BlockNumber blockNum);
+-
++ 
+ extern void InitBufferPoolAccess(void);
+ extern void AtEOXact_Buffers(bool isCommit);
+ extern void PrintBufferLeakWarning(Buffer buffer);
+diff --git a/src/include/storage/bufpage.h b/src/include/storage/bufpage.h
+index 424ecba028f..c944e3dc928 100644
+--- a/src/include/storage/bufpage.h
++++ b/src/include/storage/bufpage.h
+@@ -201,6 +201,7 @@ typedef PageHeaderData *PageHeader;
+  * handling pages.
+  */
+ #define PG_PAGE_LAYOUT_VERSION		4
++#define PG_METAPAGE_LAYOUT_VERSION  1
+ #define PG_DATA_CHECKSUM_VERSION	1
+ 
+ /* ----------------------------------------------------------------
+@@ -302,6 +303,20 @@ PageSetPageSizeAndVersion(Page page, Size size, uint8 version)
+ 	((PageHeader) page)->pd_pagesize_version = size | version;
+ }
+ 
++/*
++ * PageSetHeaderDataMinimal 
++ * Sets the LSN, page size and version, and checksum
++ */
++#define PageSetHeaderDataNonRel(page, pageno, lsn, size, version) \
++( \
++	PageSetLSN(page, lsn), \
++	PageSetPageSizeAndVersion(page, size, version), \
++	PageClearHasFreeLinePointers(page), \
++	PageSetChecksumInplace(page, pageno) \
++)
++
++
++
+ /* ----------------
+  *		page special data functions
+  * ----------------
+@@ -486,6 +501,8 @@ StaticAssertDecl(BLCKSZ == ((BLCKSZ / sizeof(size_t)) * sizeof(size_t)),
+ 				 "BLCKSZ has to be a multiple of sizeof(size_t)");
+ 
+ extern void PageInit(Page page, Size pageSize, Size specialSize);
++extern void PageInitSLRU(Page page, Size pageSize, Size specialSize);
++
+ extern bool PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags);
+ extern OffsetNumber PageAddItemExtended(Page page, Item item, Size size,
+ 										OffsetNumber offsetNumber, int flags);
+diff --git a/src/test/isolation/expected/stats.out b/src/test/isolation/expected/stats.out
+index 61b5a710ec8..0509cacfabc 100644
+--- a/src/test/isolation/expected/stats.out
++++ b/src/test/isolation/expected/stats.out
+@@ -3032,16 +3032,12 @@ seq_scan|seq_tup_read|n_tup_ins|n_tup_upd|n_tup_del|n_live_tup|n_dead_tup|vacuum
+ (1 row)
+ 
+ 
+-starting permutation: s1_slru_save_stats s1_listen s1_begin s1_big_notify s1_ff s1_slru_check_stats s1_commit s1_slru_check_stats
++starting permutation: s1_listen s1_begin s1_big_notify s1_ff s1_commit
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s1_begin: BEGIN;
+ step s1_big_notify: SELECT pg_notify('stats_test_use',
+@@ -3060,42 +3056,14 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s1_commit: COMMIT;
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-t       
+-(1 row)
+ 
+-
+-starting permutation: s1_slru_save_stats s1_listen s2_big_notify s2_ff s1_slru_check_stats
++starting permutation: s1_listen s2_big_notify s2_ff
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s2_big_notify: SELECT pg_notify('stats_test_use',
+                 repeat(i::text, current_setting('block_size')::int / 2)) FROM generate_series(1, 3) g(i);
+@@ -3113,29 +3081,13 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-t       
+-(1 row)
+-
+ 
+-starting permutation: s1_slru_save_stats s1_listen s2_begin s2_big_notify s2_ff s1_slru_check_stats s2_commit
++starting permutation: s1_listen s2_begin s2_big_notify s2_ff s2_commit
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s2_begin: BEGIN;
+ step s2_big_notify: SELECT pg_notify('stats_test_use',
+@@ -3154,45 +3106,17 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s2_commit: COMMIT;
+ 
+-starting permutation: s1_fetch_consistency_none s1_slru_save_stats s1_listen s1_begin s1_slru_check_stats s2_big_notify s2_ff s1_slru_check_stats s1_commit s1_slru_check_stats
++starting permutation: s1_fetch_consistency_none s1_listen s1_begin s2_big_notify s2_ff s1_commit
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+ step s1_fetch_consistency_none: SET stats_fetch_consistency = 'none';
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s1_begin: BEGIN;
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s2_big_notify: SELECT pg_notify('stats_test_use',
+                 repeat(i::text, current_setting('block_size')::int / 2)) FROM generate_series(1, 3) g(i);
+ 
+@@ -3209,57 +3133,17 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-t       
+-(1 row)
+-
+ step s1_commit: COMMIT;
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+ 
+-?column?
+---------
+-t       
+-(1 row)
+-
+-
+-starting permutation: s1_fetch_consistency_cache s1_slru_save_stats s1_listen s1_begin s1_slru_check_stats s2_big_notify s2_ff s1_slru_check_stats s1_commit s1_slru_check_stats
++starting permutation: s1_fetch_consistency_cache s1_listen s1_begin s2_big_notify s2_ff s1_commit
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+ step s1_fetch_consistency_cache: SET stats_fetch_consistency = 'cache';
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s1_begin: BEGIN;
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s2_big_notify: SELECT pg_notify('stats_test_use',
+                 repeat(i::text, current_setting('block_size')::int / 2)) FROM generate_series(1, 3) g(i);
+ 
+@@ -3276,57 +3160,17 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s1_commit: COMMIT;
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+ 
+-?column?
+---------
+-t       
+-(1 row)
+-
+-
+-starting permutation: s1_fetch_consistency_snapshot s1_slru_save_stats s1_listen s1_begin s1_slru_check_stats s2_big_notify s2_ff s1_slru_check_stats s1_commit s1_slru_check_stats
++starting permutation: s1_fetch_consistency_snapshot s1_listen s1_begin s2_big_notify s2_ff s1_commit
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+ step s1_fetch_consistency_snapshot: SET stats_fetch_consistency = 'snapshot';
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s1_begin: BEGIN;
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s2_big_notify: SELECT pg_notify('stats_test_use',
+                 repeat(i::text, current_setting('block_size')::int / 2)) FROM generate_series(1, 3) g(i);
+ 
+@@ -3343,57 +3187,17 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s1_commit: COMMIT;
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+ 
+-?column?
+---------
+-t       
+-(1 row)
+-
+-
+-starting permutation: s1_fetch_consistency_none s1_slru_save_stats s1_listen s1_begin s1_slru_check_stats s2_big_notify s2_ff s1_slru_check_stats s1_clear_snapshot s1_slru_check_stats s1_commit
++starting permutation: s1_fetch_consistency_none s1_listen s1_begin s2_big_notify s2_ff s1_clear_snapshot s1_commit
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+ step s1_fetch_consistency_none: SET stats_fetch_consistency = 'none';
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s1_begin: BEGIN;
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s2_big_notify: SELECT pg_notify('stats_test_use',
+                 repeat(i::text, current_setting('block_size')::int / 2)) FROM generate_series(1, 3) g(i);
+ 
+@@ -3410,63 +3214,23 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-t       
+-(1 row)
+-
+ step s1_clear_snapshot: SELECT pg_stat_clear_snapshot();
+ pg_stat_clear_snapshot
+ ----------------------
+                       
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-t       
+-(1 row)
+-
+ step s1_commit: COMMIT;
+ 
+-starting permutation: s1_fetch_consistency_cache s1_slru_save_stats s1_listen s1_begin s1_slru_check_stats s2_big_notify s2_ff s1_slru_check_stats s1_clear_snapshot s1_slru_check_stats s1_commit
++starting permutation: s1_fetch_consistency_cache s1_listen s1_begin s2_big_notify s2_ff s1_clear_snapshot s1_commit
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+ step s1_fetch_consistency_cache: SET stats_fetch_consistency = 'cache';
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s1_begin: BEGIN;
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s2_big_notify: SELECT pg_notify('stats_test_use',
+                 repeat(i::text, current_setting('block_size')::int / 2)) FROM generate_series(1, 3) g(i);
+ 
+@@ -3483,63 +3247,23 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s1_clear_snapshot: SELECT pg_stat_clear_snapshot();
+ pg_stat_clear_snapshot
+ ----------------------
+                       
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-t       
+-(1 row)
+-
+ step s1_commit: COMMIT;
+ 
+-starting permutation: s1_fetch_consistency_snapshot s1_slru_save_stats s1_listen s1_begin s1_slru_check_stats s2_big_notify s2_ff s1_slru_check_stats s1_clear_snapshot s1_slru_check_stats s1_commit
++starting permutation: s1_fetch_consistency_snapshot s1_listen s1_begin s2_big_notify s2_ff s1_clear_snapshot s1_commit
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+ step s1_fetch_consistency_snapshot: SET stats_fetch_consistency = 'snapshot';
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s1_begin: BEGIN;
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s2_big_notify: SELECT pg_notify('stats_test_use',
+                 repeat(i::text, current_setting('block_size')::int / 2)) FROM generate_series(1, 3) g(i);
+ 
+@@ -3556,49 +3280,21 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s1_clear_snapshot: SELECT pg_stat_clear_snapshot();
+ pg_stat_clear_snapshot
+ ----------------------
+                       
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-t       
+-(1 row)
+-
+ step s1_commit: COMMIT;
+ 
+-starting permutation: s1_fetch_consistency_snapshot s1_slru_save_stats s1_listen s1_begin s1_func_stats s2_big_notify s2_ff s1_slru_check_stats s1_commit
++starting permutation: s1_fetch_consistency_snapshot s1_listen s1_begin s1_func_stats s2_big_notify s2_ff s1_commit
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+ step s1_fetch_consistency_snapshot: SET stats_fetch_consistency = 'snapshot';
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s1_begin: BEGIN;
+ step s1_func_stats: 
+@@ -3631,31 +3327,15 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-f       
+-(1 row)
+-
+ step s1_commit: COMMIT;
+ 
+-starting permutation: s1_fetch_consistency_snapshot s1_slru_save_stats s1_listen s1_begin s2_big_notify s2_ff s1_slru_check_stats s2_func_call s2_ff s1_func_stats s1_clear_snapshot s1_func_stats s1_commit
++starting permutation: s1_fetch_consistency_snapshot s1_listen s1_begin s2_big_notify s2_ff s2_func_call s2_ff s1_func_stats s1_clear_snapshot s1_func_stats s1_commit
+ pg_stat_force_next_flush
+ ------------------------
+                         
+ (1 row)
+ 
+ step s1_fetch_consistency_snapshot: SET stats_fetch_consistency = 'snapshot';
+-step s1_slru_save_stats: 
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-
+ step s1_listen: LISTEN stats_test_nothing;
+ step s1_begin: BEGIN;
+ step s2_big_notify: SELECT pg_notify('stats_test_use',
+@@ -3674,18 +3354,6 @@ pg_stat_force_next_flush
+                         
+ (1 row)
+ 
+-step s1_slru_check_stats: 
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-
+-?column?
+---------
+-t       
+-(1 row)
+-
+ step s2_func_call: SELECT test_stat_func()
+ test_stat_func
+ --------------
+@@ -3709,7 +3377,7 @@ step s1_func_stats:
+ 
+ name          |pg_stat_get_function_calls|total_above_zero|self_above_zero
+ --------------+--------------------------+----------------+---------------
+-test_stat_func|                          |                |               
++test_stat_func|                         1|t               |t              
+ (1 row)
+ 
+ step s1_clear_snapshot: SELECT pg_stat_clear_snapshot();
+diff --git a/src/test/isolation/specs/stats.spec b/src/test/isolation/specs/stats.spec
+index 5b922d788cc..ca358d57b6e 100644
+--- a/src/test/isolation/specs/stats.spec
++++ b/src/test/isolation/specs/stats.spec
+@@ -12,8 +12,6 @@ setup
+     CREATE FUNCTION test_stat_func2() RETURNS VOID LANGUAGE plpgsql AS $$BEGIN END;$$;
+     INSERT INTO test_stat_oid(name, oid) VALUES('test_stat_func2', 'test_stat_func2'::regproc);
+ 
+-    CREATE TABLE test_slru_stats(slru TEXT, stat TEXT, value INT);
+-
+     -- calls test_stat_func, but hides error if it doesn't exist
+     CREATE FUNCTION test_stat_func_ifexists() RETURNS VOID LANGUAGE plpgsql AS $$
+     BEGIN
+@@ -27,7 +25,6 @@ setup
+ teardown
+ {
+     DROP TABLE test_stat_oid;
+-    DROP TABLE test_slru_stats;
+ 
+     DROP TABLE IF EXISTS test_stat_tab;
+     DROP FUNCTION IF EXISTS test_stat_func();
+@@ -105,23 +102,13 @@ step s1_table_stats {
+     WHERE tso.name = 'test_stat_tab'
+ }
+ 
+-# SLRU stats steps
+-step s1_slru_save_stats {
+-	INSERT INTO test_slru_stats VALUES('Notify', 'blks_zeroed',
+-    (SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'Notify'));
+-}
++
+ step s1_listen { LISTEN stats_test_nothing; }
+ step s1_big_notify { SELECT pg_notify('stats_test_use',
+                 repeat(i::text, current_setting('block_size')::int / 2)) FROM generate_series(1, 3) g(i);
+                 }
+ 
+-step s1_slru_check_stats {
+-	SELECT current.blks_zeroed > before.value
+-  FROM test_slru_stats before
+-  INNER JOIN pg_stat_slru current
+-  ON before.slru = current.name
+-  WHERE before.stat = 'blks_zeroed';
+-	}
++
+ 
+ 
+ session s2
+@@ -637,31 +624,24 @@ permutation
+ 
+ # Verify SLRU stats generated in own transaction
+ permutation
+-  s1_slru_save_stats
+   s1_listen
+   s1_begin
+   s1_big_notify
+   s1_ff
+-  s1_slru_check_stats
+   s1_commit
+-  s1_slru_check_stats
+ 
+ # Verify SLRU stats generated in separate transaction
+ permutation
+-  s1_slru_save_stats
+   s1_listen
+   s2_big_notify
+   s2_ff
+-  s1_slru_check_stats
+ 
+ # shouldn't see stats yet, not committed
+ permutation
+-  s1_slru_save_stats
+   s1_listen
+   s2_begin
+   s2_big_notify
+   s2_ff
+-  s1_slru_check_stats
+   s2_commit
+ 
+ 
+@@ -669,89 +649,69 @@ permutation
+ 
+ permutation
+   s1_fetch_consistency_none
+-  s1_slru_save_stats s1_listen
++  s1_listen
+   s1_begin
+-  s1_slru_check_stats
+   s2_big_notify
+   s2_ff
+-  s1_slru_check_stats
+   s1_commit
+-  s1_slru_check_stats
+ permutation
+   s1_fetch_consistency_cache
+-  s1_slru_save_stats s1_listen
++  s1_listen
+   s1_begin
+-  s1_slru_check_stats
+   s2_big_notify
+   s2_ff
+-  s1_slru_check_stats
+   s1_commit
+-  s1_slru_check_stats
+ permutation
+   s1_fetch_consistency_snapshot
+-  s1_slru_save_stats s1_listen
++  s1_listen
+   s1_begin
+-  s1_slru_check_stats
+   s2_big_notify
+   s2_ff
+-  s1_slru_check_stats
+   s1_commit
+-  s1_slru_check_stats
+ 
+ # check that pg_stat_clear_snapshot(), well ...
+ permutation
+   s1_fetch_consistency_none
+-  s1_slru_save_stats s1_listen
++  s1_listen
+   s1_begin
+-  s1_slru_check_stats
+   s2_big_notify
+   s2_ff
+-  s1_slru_check_stats
+   s1_clear_snapshot
+-  s1_slru_check_stats
+   s1_commit
+ permutation
+   s1_fetch_consistency_cache
+-  s1_slru_save_stats s1_listen
++  s1_listen
+   s1_begin
+-  s1_slru_check_stats
+   s2_big_notify
+   s2_ff
+-  s1_slru_check_stats
+   s1_clear_snapshot
+-  s1_slru_check_stats
+   s1_commit
+ permutation
+   s1_fetch_consistency_snapshot
+-  s1_slru_save_stats s1_listen
++  s1_listen
+   s1_begin
+-  s1_slru_check_stats
+   s2_big_notify
+   s2_ff
+-  s1_slru_check_stats
+   s1_clear_snapshot
+-  s1_slru_check_stats
+   s1_commit
+ 
+ # check that a variable-amount stats access caches fixed-amount stat too
+ permutation
+   s1_fetch_consistency_snapshot
+-  s1_slru_save_stats s1_listen
++  s1_listen
+   s1_begin
+   s1_func_stats
+   s2_big_notify
+   s2_ff
+-  s1_slru_check_stats
+   s1_commit
+ 
+ # and the other way round
+ permutation
+   s1_fetch_consistency_snapshot
+-  s1_slru_save_stats s1_listen
++  s1_listen
+   s1_begin
+   s2_big_notify
+   s2_ff
+-  s1_slru_check_stats
+   s2_func_call
+   s2_ff
+   s1_func_stats
+diff --git a/src/test/regress/expected/stats.out b/src/test/regress/expected/stats.out
+index 937b2101b33..13954671488 100644
+--- a/src/test/regress/expected/stats.out
++++ b/src/test/regress/expected/stats.out
+@@ -816,44 +816,6 @@ WHERE pg_stat_get_backend_pid(beid) = pg_backend_pid();
+  t
+ (1 row)
+ 
+------
+--- Test that resetting stats works for reset timestamp
+------
+--- Test that reset_slru with a specified SLRU works.
+-SELECT stats_reset AS slru_commit_ts_reset_ts FROM pg_stat_slru WHERE name = 'CommitTs' \gset
+-SELECT stats_reset AS slru_notify_reset_ts FROM pg_stat_slru WHERE name = 'Notify' \gset
+-SELECT pg_stat_reset_slru('CommitTs');
+- pg_stat_reset_slru 
+---------------------
+- 
+-(1 row)
+-
+-SELECT stats_reset > :'slru_commit_ts_reset_ts'::timestamptz FROM pg_stat_slru WHERE name = 'CommitTs';
+- ?column? 
+-----------
+- t
+-(1 row)
+-
+-SELECT stats_reset AS slru_commit_ts_reset_ts FROM pg_stat_slru WHERE name = 'CommitTs' \gset
+--- Test that multiple SLRUs are reset when no specific SLRU provided to reset function
+-SELECT pg_stat_reset_slru(NULL);
+- pg_stat_reset_slru 
+---------------------
+- 
+-(1 row)
+-
+-SELECT stats_reset > :'slru_commit_ts_reset_ts'::timestamptz FROM pg_stat_slru WHERE name = 'CommitTs';
+- ?column? 
+-----------
+- t
+-(1 row)
+-
+-SELECT stats_reset > :'slru_notify_reset_ts'::timestamptz FROM pg_stat_slru WHERE name = 'Notify';
+- ?column? 
+-----------
+- t
+-(1 row)
+-
+ -- Test that reset_shared with archiver specified as the stats type works
+ SELECT stats_reset AS archiver_reset_ts FROM pg_stat_archiver \gset
+ SELECT pg_stat_reset_shared('archiver');
+diff --git a/src/test/regress/expected/sysviews.out b/src/test/regress/expected/sysviews.out
+index 001c6e7eb9d..64feb9bbc78 100644
+--- a/src/test/regress/expected/sysviews.out
++++ b/src/test/regress/expected/sysviews.out
+@@ -85,13 +85,6 @@ select count(*) >= 0 as ok from pg_prepared_xacts;
+  t
+ (1 row)
+ 
+--- There will surely be at least one SLRU cache
+-select count(*) > 0 as ok from pg_stat_slru;
+- ok 
+-----
+- t
+-(1 row)
+-
+ -- There must be only one record
+ select count(*) = 1 as ok from pg_stat_wal;
+  ok 
+diff --git a/src/test/regress/sql/stats.sql b/src/test/regress/sql/stats.sql
+index 74e592aa8af..d5cef65656c 100644
+--- a/src/test/regress/sql/stats.sql
++++ b/src/test/regress/sql/stats.sql
+@@ -412,21 +412,6 @@ SELECT (current_schemas(true))[1] = ('pg_temp_' || beid::text) AS match
+ FROM pg_stat_get_backend_idset() beid
+ WHERE pg_stat_get_backend_pid(beid) = pg_backend_pid();
+ 
+------
+--- Test that resetting stats works for reset timestamp
+------
+-
+--- Test that reset_slru with a specified SLRU works.
+-SELECT stats_reset AS slru_commit_ts_reset_ts FROM pg_stat_slru WHERE name = 'CommitTs' \gset
+-SELECT stats_reset AS slru_notify_reset_ts FROM pg_stat_slru WHERE name = 'Notify' \gset
+-SELECT pg_stat_reset_slru('CommitTs');
+-SELECT stats_reset > :'slru_commit_ts_reset_ts'::timestamptz FROM pg_stat_slru WHERE name = 'CommitTs';
+-SELECT stats_reset AS slru_commit_ts_reset_ts FROM pg_stat_slru WHERE name = 'CommitTs' \gset
+-
+--- Test that multiple SLRUs are reset when no specific SLRU provided to reset function
+-SELECT pg_stat_reset_slru(NULL);
+-SELECT stats_reset > :'slru_commit_ts_reset_ts'::timestamptz FROM pg_stat_slru WHERE name = 'CommitTs';
+-SELECT stats_reset > :'slru_notify_reset_ts'::timestamptz FROM pg_stat_slru WHERE name = 'Notify';
+ 
+ -- Test that reset_shared with archiver specified as the stats type works
+ SELECT stats_reset AS archiver_reset_ts FROM pg_stat_archiver \gset
+diff --git a/src/test/regress/sql/sysviews.sql b/src/test/regress/sql/sysviews.sql
+index 351e469c77b..53bb5cef03d 100644
+--- a/src/test/regress/sql/sysviews.sql
++++ b/src/test/regress/sql/sysviews.sql
+@@ -42,9 +42,6 @@ select count(*) = 0 as ok from pg_prepared_statements;
+ -- See also prepared_xacts.sql
+ select count(*) >= 0 as ok from pg_prepared_xacts;
+ 
+--- There will surely be at least one SLRU cache
+-select count(*) > 0 as ok from pg_stat_slru;
+-
+ -- There must be only one record
+ select count(*) = 1 as ok from pg_stat_wal;
+ 
+-- 
+2.30.2
+

@@ -47,8 +47,11 @@ typedef enum
 	RBM_ZERO_AND_CLEANUP_LOCK,	/* Like RBM_ZERO_AND_LOCK, but locks the page
 								 * in "cleanup" mode */
 	RBM_ZERO_ON_ERROR,			/* Read, but return an all-zeros page on error */
-	RBM_NORMAL_NO_LOG			/* Don't log page as invalid during WAL
+	RBM_NORMAL_NO_LOG,			/* Don't log page as invalid during WAL
 								 * replay; otherwise same as RBM_NORMAL */
+
+	RBM_TRIM				/*Read for TRIM functions in CLOG / MultiXact. 
+						  Don't validate checksum  or zero. */	
 } ReadBufferMode;
 
 /*
@@ -130,8 +133,8 @@ extern Buffer ReadBufferWithoutRelcache(RelFileLocator rlocator,
 										ReadBufferMode mode, BufferAccessStrategy strategy,
 										bool permanent);
 extern Buffer ReadBufferWithoutRelcacheWithHit(RelFileLocator rlocator,
-											   ForkNumber forkNum, BlockNumber blockNum,
-											   ReadBufferMode mode, BufferAccessStrategy strategy,
+										ForkNumber forkNum, BlockNumber blockNum,
+										ReadBufferMode mode, BufferAccessStrategy strategy,
 											   bool permanent, bool *hit);
 extern void ReleaseBuffer(Buffer buffer);
 extern void UnlockReleaseBuffer(Buffer buffer);
@@ -141,7 +144,7 @@ extern Buffer ReleaseAndReadBuffer(Buffer buffer, Relation relation,
 								   BlockNumber blockNum);
 extern bool BufferProbe(RelFileLocator rlocator, ForkNumber forkNum,
 						BlockNumber blockNum);
-
+ 
 extern void InitBufferPoolAccess(void);
 extern void AtEOXact_Buffers(bool isCommit);
 extern void PrintBufferLeakWarning(Buffer buffer);

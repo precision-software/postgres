@@ -439,7 +439,7 @@ ScanSourceDatabasePgClassTuple(HeapTupleData *tuple, Oid tbid, Oid dbid,
 	relinfo->rlocator.relNumber = relfilenumber;
 	relinfo->reloid = classForm->oid;
 
-	/* Temporary relations were rejected ove. */
+	/* Temporary relations were rejected above. */
 	Assert(classForm->relpersistence != RELPERSISTENCE_TEMP);
 	relinfo->permanent =
 		(classForm->relpersistence == RELPERSISTENCE_PERMANENT) ? true : false;

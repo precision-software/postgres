@@ -85,13 +85,6 @@ select count(*) >= 0 as ok from pg_prepared_xacts;
  t
 (1 row)
 
--- There will surely be at least one SLRU cache
-select count(*) > 0 as ok from pg_stat_slru;
- ok 
-----
- t
-(1 row)
-
 -- There must be only one record
 select count(*) = 1 as ok from pg_stat_wal;
  ok 
@@ -166,4 +159,3 @@ select count(distinct utc_offset) >= 24 as ok from pg_timezone_abbrevs;
 ----
  t
 (1 row)
-

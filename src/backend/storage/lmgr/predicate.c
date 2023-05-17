@@ -315,7 +315,7 @@
 
 #define SERIAL_PAGESIZE			BLCKSZ
 #define SERIAL_ENTRYSIZE			sizeof(SerCommitSeqNo)
-#define SERIAL_ENTRIESPERPAGE	(SERIAL_PAGESIZE / SERIAL_ENTRYSIZE)
+#define SERIAL_ENTRIESPERPAGE	((SERIAL_PAGESIZE - SizeOfPageHeaderData) / SERIAL_ENTRYSIZE)
 
 /*
  * Set maximum pages based on the number needed to track all transactions.
@@ -325,10 +325,11 @@
 #define SerialNextPage(page) (((page) >= SERIAL_MAX_PAGE) ? 0 : (page) + 1)
 
 #define SerialValue(buffer, xid) (*((SerCommitSeqNo *) \
-	(BufferGetPage(buffer) + \
+	(PageGetContents(BufferGetPage(buffer)) + \
 	((((uint32) (xid)) % SERIAL_ENTRIESPERPAGE) * SERIAL_ENTRYSIZE))))
 
 #define SerialPage(xid)	(((uint32) (xid)) / SERIAL_ENTRIESPERPAGE)
+
 
 typedef struct SerialControlData
 {
@@ -777,10 +778,13 @@ SerialPagePrecedesLogicallyUnitTests(void)
 	 * requires burning ~2B XIDs in single-user mode, a negligible
 	 * possibility.  Moreover, if it does happen, the consequence would be
 	 * mild, namely a new transaction failing in SimpleLruReadPage().
+	 *
+	 * NOTE:  After adding page headers, the defect affects two pages.
+	 * We now assert correct treatment of its second to prior page.
 	 */
 	headPage = oldestPage;
 	targetPage = newestPage;
-	Assert(SerialPagePrecedesLogically(headPage, targetPage - 1));
+	Assert(SerialPagePrecedesLogically(headPage, targetPage - 2));
 #if 0
 	Assert(SerialPagePrecedesLogically(headPage, targetPage));
 #endif
@@ -876,6 +880,7 @@ SerialAdd(TransactionId xid, SerCommitSeqNo minConflictCommitSeqNo)
 		while (firstZeroPage != targetPage)
 		{
 			buffer = ZeroSlruBuffer(SLRU_SERIAL_ID, firstZeroPage);
+			PageSetHeaderDataNonRel(BufferGetPage(buffer), firstZeroPage, InvalidXLogRecPtr, BLCKSZ, PG_METAPAGE_LAYOUT_VERSION);
 			MarkBufferDirty(buffer);
 			UnlockReleaseBuffer(buffer);
 			firstZeroPage = SerialNextPage(firstZeroPage);
@@ -884,7 +889,7 @@ SerialAdd(TransactionId xid, SerCommitSeqNo minConflictCommitSeqNo)
 	}
 	else
 	{
-		buffer = ReadSlruBuffer(SLRU_SERIAL_ID, targetPage);
+		buffer = ReadSlruBuffer(SLRU_SERIAL_ID, targetPage, RBM_NORMAL);
 		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 	}
 
@@ -928,7 +933,7 @@ SerialGetMinConflictCommitSeqNo(TransactionId xid)
 	 * The following function must be called without holding SerialSLRULock,
 	 * but will return with that lock held, which must then be released.
 	 */
-	buffer = ReadSlruBuffer(SLRU_SERIAL_ID, SerialPage(xid));
+	buffer = ReadSlruBuffer(SLRU_SERIAL_ID, SerialPage(xid), RBM_NORMAL);
 	val = SerialValue(buffer, xid);
 	ReleaseBuffer(buffer);
 	LWLockRelease(SerialSLRULock);

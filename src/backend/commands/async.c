@@ -164,7 +164,7 @@
  * than that, so changes in that data structure won't affect user-visible
  * restrictions.
  */
-#define NOTIFY_PAYLOAD_MAX_LENGTH	(BLCKSZ - NAMEDATALEN - 128)
+#define NOTIFY_PAYLOAD_MAX_LENGTH	(BLCKSZ - NAMEDATALEN - SizeOfPageHeaderData - 128)
 
 /*
  * Struct representing an entry in the global notify queue
@@ -214,7 +214,7 @@ typedef struct QueuePosition
 	((x).page == (y).page && (x).offset == (y).offset)
 
 #define QUEUE_POS_IS_ZERO(x) \
-	((x).page == 0 && (x).offset == 0)
+	((x).page == 0 && (x).offset == MAXALIGN(SizeOfPageHeaderData))
 
 /* choose logically smaller QueuePosition */
 #define QUEUE_POS_MIN(x,y) \
@@ -543,8 +543,8 @@ AsyncShmemInit(void)
 	if (!found)
 	{
 		/* First time through, so initialize it */
-		SET_QUEUE_POS(QUEUE_HEAD, 0, 0);
-		SET_QUEUE_POS(QUEUE_TAIL, 0, 0);
+		SET_QUEUE_POS(QUEUE_HEAD, 0, MAXALIGN(SizeOfPageHeaderData));
+		SET_QUEUE_POS(QUEUE_TAIL, 0, MAXALIGN(SizeOfPageHeaderData));
 		QUEUE_STOP_PAGE = 0;
 		QUEUE_FIRST_LISTENER = InvalidBackendId;
 		asyncQueueControl->lastQueueFillWarn = 0;
@@ -554,7 +554,7 @@ AsyncShmemInit(void)
 			QUEUE_BACKEND_PID(i) = InvalidPid;
 			QUEUE_BACKEND_DBOID(i) = InvalidOid;
 			QUEUE_NEXT_LISTENER(i) = InvalidBackendId;
-			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, 0);
+			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, MAXALIGN(SizeOfPageHeaderData));
 		}
 	}
 
@@ -1331,19 +1331,19 @@ asyncQueueAdvance(volatile QueuePosition *position, int entryLength)
 	 * written or read.
 	 */
 	offset += entryLength;
-	Assert(offset <= QUEUE_PAGESIZE);
+	Assert(offset <= QUEUE_PAGESIZE - MAXALIGN(SizeOfPageHeaderData));
 
 	/*
 	 * In a second step check if another entry can possibly be written to the
 	 * page. If so, stay here, we have reached the next position. If not, then
 	 * we need to move on to the next page.
 	 */
-	if (offset + QUEUEALIGN(AsyncQueueEntryEmptySize) > QUEUE_PAGESIZE)
+	if (offset + QUEUEALIGN(AsyncQueueEntryEmptySize) > QUEUE_PAGESIZE - MAXALIGN(SizeOfPageHeaderData))
 	{
 		pageno++;
 		if (pageno > QUEUE_MAX_PAGE)
 			pageno = 0;			/* wrap around */
-		offset = 0;
+		offset = MAXALIGN(SizeOfPageHeaderData); /* start at SizeOfPageHeaderData */
 		pageJump = true;
 	}
 
@@ -1424,10 +1424,12 @@ asyncQueueAddEntries(ListCell *nextNotify)
 	if (QUEUE_POS_IS_ZERO(queue_head))
 	{
 		buffer = ZeroSlruBuffer(SLRU_NOTIFY_ID, pageno);
+		PageSetHeaderDataNonRel(BufferGetPage(buffer), pageno, InvalidXLogRecPtr, BLCKSZ, PG_METAPAGE_LAYOUT_VERSION);
+
 	}
 	else
 	{
-		buffer = ReadSlruBuffer(SLRU_NOTIFY_ID, pageno);
+		buffer = ReadSlruBuffer(SLRU_NOTIFY_ID, pageno, RBM_NORMAL);
 		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 	}
 
@@ -1444,7 +1446,7 @@ asyncQueueAddEntries(ListCell *nextNotify)
 		offset = QUEUE_POS_OFFSET(queue_head);
 
 		/* Check whether the entry really fits on the current page */
-		if (offset + qe.length <= QUEUE_PAGESIZE)
+		if (offset + qe.length <= QUEUE_PAGESIZE - MAXALIGN(SizeOfPageHeaderData))
 		{
 			/* OK, so advance nextNotify past this item */
 			nextNotify = lnext(pendingNotifies->events, nextNotify);
@@ -1456,16 +1458,17 @@ asyncQueueAddEntries(ListCell *nextNotify)
 			 * only check dboid and since it won't match any reader's database
 			 * OID, they will ignore this entry and move on.
 			 */
-			qe.length = QUEUE_PAGESIZE - offset;
+			qe.length = QUEUE_PAGESIZE - MAXALIGN(SizeOfPageHeaderData) - offset;
 			qe.dboid = InvalidOid;
 			qe.data[0] = '\0';	/* empty channel */
 			qe.data[1] = '\0';	/* empty payload */
 		}
 
 		/* Now copy qe into the shared buffer page */
-		memcpy(BufferGetPage(buffer) + offset,
+		memcpy(PageGetContents(BufferGetPage(buffer)) + offset,
 			   &qe,
 			   qe.length);
+
 
 		/* Advance queue_head appropriately, and detect if page is full */
 		if (asyncQueueAdvance(&(queue_head), qe.length))
@@ -1981,7 +1984,7 @@ asyncQueueReadAllNotifications(void)
 			 * transmitting them to our frontend.  Copy only the part of the
 			 * page we will actually inspect.
 			 */
-			buffer = ReadSlruBuffer(SLRU_NOTIFY_ID, curpage);
+			buffer = ReadSlruBuffer(SLRU_NOTIFY_ID, curpage, RBM_NORMAL);
 			if (curpage == QUEUE_POS_PAGE(head))
 			{
 				/* we only want to read as far as head */
@@ -1992,10 +1995,10 @@ asyncQueueReadAllNotifications(void)
 			else
 			{
 				/* fetch all the rest of the page */
-				copysize = QUEUE_PAGESIZE - curoffset;
+				copysize = QUEUE_PAGESIZE - MAXALIGN(SizeOfPageHeaderData) - curoffset;
 			}
-			memcpy(page_buffer.buf + curoffset,
-				   BufferGetPage(buffer) + curoffset,
+			memcpy(PageGetContents(page_buffer.buf) +  curoffset,
+				   PageGetContents(BufferGetPage(buffer)) + curoffset,
 				   copysize);
 			ReleaseBuffer(buffer);
 
@@ -2065,7 +2068,7 @@ asyncQueueProcessPageEntries(volatile QueuePosition *current,
 		if (QUEUE_POS_EQUAL(thisentry, stop))
 			break;
 
-		qe = (AsyncQueueEntry *) (page_buffer + QUEUE_POS_OFFSET(thisentry));
+		qe = (AsyncQueueEntry *) (PageGetContents(page_buffer) + QUEUE_POS_OFFSET(thisentry));
 
 		/*
 		 * Advance *current over this message, possibly to the next page. As

@@ -16,6 +16,7 @@
 #include "access/xlogdefs.h"
 #include "catalog/pg_tablespace_d.h"
 #include "storage/buf.h"
+#include "storage/bufmgr.h"
 #include "storage/lwlock.h"
 #include "storage/smgr.h"
 #include "storage/sync.h"
@@ -87,7 +88,7 @@ extern bool SlruScanDirCbDeleteAll(int slru_id, SlruPagePrecedesFunction PagePre
 								   void *data);
 
 /* Buffer access */
-extern Buffer ReadSlruBuffer(int slru_id, int pageno);
+extern Buffer ReadSlruBuffer(int slru_id, int pageno, ReadBufferMode mode);
 extern Buffer ZeroSlruBuffer(int slru_id, int pageno);
 extern bool ProbeSlruBuffer(int slru_id, int pageno);
 

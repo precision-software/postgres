@@ -28,6 +28,9 @@
 #include "storage/fd.h"
 #include "storage/shmem.h"
 
+/*
+ * SLRU ID to path mapping
+ */
 #define PG_SLRU(symname,name,path,synchronize) \
 	path,
 
@@ -42,7 +45,7 @@ static char *slru_dirs[] =
  * We'll maintain a little cache of recently seen buffers, to try to avoid the
  * buffer mapping table on repeat access (ie the busy end of the CLOG).  One
  * entry per SLRU.
-  */
+ */
 struct SlruRecentBuffer {
 	int			pageno;
 	Buffer		recent_buffer;
@@ -354,7 +357,7 @@ SlruScanDirectory(int slru_id, SlruPagePrecedesFunction PagePrecedes,
  * Read a buffer.  Buffer is pinned on return.
  */
 Buffer
-ReadSlruBuffer(int slru_id, int pageno)
+ReadSlruBuffer(int slru_id, int pageno, ReadBufferMode mode)
 {
 	int			segno = pageno / SLRU_PAGES_PER_SEGMENT;
 	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
@@ -374,7 +377,7 @@ ReadSlruBuffer(int slru_id, int pageno)
 
 	/* Regular lookup. */
 	buffer = ReadBufferWithoutRelcacheWithHit(rlocator, MAIN_FORKNUM, rpageno,
-											  RBM_NORMAL, NULL, true, &hit);
+											  mode, NULL, true, &hit);
 
 	/* Remember where this page is for next time. */
 	slru_recent_buffers[slru_id].pageno = pageno;
@@ -398,15 +401,11 @@ ZeroSlruBuffer(int slru_id, int pageno)
 	Buffer		buffer;
 	SMgrFileHandle sfile;
 
-	if (rpageno == 0)
-	{
-		sfile = smgropen(rlocator, InvalidBackendId, MAIN_FORKNUM);
-		if (!smgrexists(sfile))
-			smgrcreate(sfile, false);
-	}
+	sfile = smgropen(rlocator, InvalidBackendId, MAIN_FORKNUM);
+	if (!smgrexists(sfile))
+		smgrcreate(sfile, false);
 
-	buffer = ReadBufferWithoutRelcache(rlocator, MAIN_FORKNUM, rpageno,
-									   RBM_ZERO_AND_LOCK, NULL, true);
+	buffer = ReadBufferWithoutRelcache(rlocator, MAIN_FORKNUM, rpageno, RBM_ZERO_AND_LOCK, NULL, true);
 
 	/* Remember where this page is for next time. */
 	slru_recent_buffers[slru_id].pageno = pageno;

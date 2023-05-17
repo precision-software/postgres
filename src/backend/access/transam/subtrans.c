@@ -50,7 +50,7 @@
  */
 
 /* We need four bytes per xact */
-#define SUBTRANS_XACTS_PER_PAGE (BLCKSZ / sizeof(TransactionId))
+#define SUBTRANS_XACTS_PER_PAGE ((BLCKSZ - SizeOfPageHeaderData) / sizeof(TransactionId))
 
 #define TransactionIdToPage(xid) ((xid) / (TransactionId) SUBTRANS_XACTS_PER_PAGE)
 #define TransactionIdToEntry(xid) ((xid) % (TransactionId) SUBTRANS_XACTS_PER_PAGE)
@@ -74,9 +74,9 @@ SubTransSetParent(TransactionId xid, TransactionId parent)
 	Assert(TransactionIdIsValid(parent));
 	Assert(TransactionIdFollows(xid, parent));
 
-	buffer = ReadSlruBuffer(SLRU_SUBTRANS_ID, pageno);
+	buffer = ReadSlruBuffer(SLRU_SUBTRANS_ID, pageno, RBM_NORMAL);
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-	ptr = (TransactionId *) BufferGetPage(buffer);
+	ptr = (TransactionId *) PageGetContents(BufferGetPage(buffer));
 	ptr += entryno;
 
 	/*
@@ -113,9 +113,9 @@ SubTransGetParent(TransactionId xid)
 	if (!TransactionIdIsNormal(xid))
 		return InvalidTransactionId;
 
-	buffer = ReadSlruBuffer(SLRU_SUBTRANS_ID, pageno);
+	buffer = ReadSlruBuffer(SLRU_SUBTRANS_ID, pageno, RBM_NORMAL);
 
-	ptr = (TransactionId *) BufferGetPage(buffer);
+	ptr = (TransactionId *) PageGetContents(BufferGetPage(buffer));
 	ptr += entryno;
 
 	parent = *ptr;
@@ -205,8 +205,12 @@ static Buffer
 ZeroSUBTRANSPage(int pageno)
 {
 	Buffer		buffer;
+	Page		page;
 
 	buffer = ZeroSlruBuffer(SLRU_SUBTRANS_ID, pageno);
+	page = BufferGetPage(buffer);
+	PageInitSLRU(page, BLCKSZ, 0);
+
 	MarkBufferDirty(buffer);
 
 	return buffer;
