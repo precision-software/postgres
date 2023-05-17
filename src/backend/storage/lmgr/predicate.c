@@ -879,7 +879,7 @@ SerialAdd(TransactionId xid, SerCommitSeqNo minConflictCommitSeqNo)
 		/* Initialize intervening pages. */
 		while (firstZeroPage != targetPage)
 		{
-			buffer = ZeroSlruBuffer(SLRU_SERIAL_ID, firstZeroPage);
+			buffer = ZeroSlruBuffer(SLRU_SERIAL_ID, firstZeroPage);  /* TODO: should fill in header and mark dirty */
 			PageSetHeaderDataNonRel(BufferGetPage(buffer), firstZeroPage, InvalidXLogRecPtr, BLCKSZ, PG_METAPAGE_LAYOUT_VERSION);
 			MarkBufferDirty(buffer);
 			UnlockReleaseBuffer(buffer);

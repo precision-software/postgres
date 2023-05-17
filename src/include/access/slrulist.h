@@ -20,6 +20,8 @@
  * numerical values of each SLRU's ID, which is used in in-memory structus.
  */
 
+/* TODO: add field describing encryption or not (amount of special data?) (amount of normal daa?) */
+/* TODO: this could be a define rather than an include */
 /* symbol name, textual name, path, synchronize */
 PG_SLRU(SLRU_CLOG_ID, "Xact", "pg_xact", true)
 PG_SLRU(SLRU_SUBTRANS_ID, "Subtrans", "pg_subtrans", false)

@@ -692,7 +692,7 @@ ZeroCLOGPage(int pageno, bool writeXlog)
 
 	page = BufferGetPage(buffer);
 
-	PageInitSLRU(page, BLCKSZ, 0);
+	PageInitSLRU(page, BLCKSZ, 0);  /* TODO: set page header info here instead, and mark dirty? Where do we get specialsize? Depends on which slru type? */
 
 	lsn = 0;
 	if (writeXlog)
