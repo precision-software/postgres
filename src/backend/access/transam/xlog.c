@@ -4210,7 +4210,9 @@ bool
 DataChecksumsEnabled(void)
 {
 	Assert(ControlFile != NULL);
-	return (ControlFile->data_checksum_version > 0);
+	return (ControlFile->data_checksum_version > 0) || \
+		PageFeatureSetHasFeature(ControlFile->page_features, PF_EXT_CHECKSUMS);
+
 }
 
 /*

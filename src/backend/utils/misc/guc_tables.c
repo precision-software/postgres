@@ -1876,6 +1876,17 @@ struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"extended_checksums", PGC_INTERNAL, PRESET_OPTIONS,
+			gettext_noop("Shows whether extended checksums are turned on for this cluster."),
+			NULL,
+			GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE | GUC_RUNTIME_COMPUTED
+		},
+		&page_feature_extended_checksums,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"syslog_sequence_numbers", PGC_SIGHUP, LOGGING_WHERE,
 			gettext_noop("Add sequence number to syslog messages to avoid duplicate suppression."),
 			NULL
