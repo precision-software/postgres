@@ -1,0 +1,1620 @@
+From 965309ea3517fa734c4bc89c144e2031cdf6c0c3 Mon Sep 17 00:00:00 2001
+From: David Christensen <david@pgguru.net>
+Date: Tue, 9 May 2023 16:56:15 -0500
+Subject: [PATCH v4 1/3] Add reserved_page_space to Page structure
+
+This space is reserved for extended data on the Page structure which will be ultimately used for
+encrypted data, extended checksums, and potentially other things.  This data appears at the end of
+the Page, after any `pd_special` area, and will be calculated at runtime based on specific
+ControlFile features.
+
+No effort is made to ensure this is backwards-compatible with existing clusters for `pg_upgrade`, as
+we will require logical replication to move data into a cluster with different settings here.
+---
+ contrib/amcheck/verify_nbtree.c               |  4 +-
+ contrib/bloom/bloom.h                         |  3 +-
+ contrib/bloom/blutils.c                       |  4 +-
+ contrib/bloom/blvacuum.c                      |  2 +-
+ contrib/pg_surgery/heap_surgery.c             |  4 +-
+ src/backend/access/brin/brin_bloom.c          |  8 ++--
+ src/backend/access/brin/brin_minmax_multi.c   |  8 ++--
+ src/backend/access/brin/brin_tuple.c          |  2 +-
+ src/backend/access/common/indextuple.c        |  2 +-
+ src/backend/access/gin/gindatapage.c          | 20 +++++-----
+ src/backend/access/gin/ginentrypage.c         |  4 +-
+ src/backend/access/gin/ginfast.c              | 10 ++---
+ src/backend/access/gin/gininsert.c            |  4 +-
+ src/backend/access/gin/ginpostinglist.c       |  6 +--
+ src/backend/access/gin/ginvacuum.c            |  2 +-
+ src/backend/access/heap/README.HOT            |  2 +-
+ src/backend/access/heap/heapam.c              | 18 ++++-----
+ src/backend/access/heap/heapam_handler.c      |  8 ++--
+ src/backend/access/heap/hio.c                 |  8 ++--
+ src/backend/access/heap/pruneheap.c           | 24 +++++------
+ src/backend/access/heap/rewriteheap.c         |  4 +-
+ src/backend/access/heap/vacuumlazy.c          | 22 +++++-----
+ src/backend/access/nbtree/nbtdedup.c          |  6 +--
+ src/backend/access/nbtree/nbtinsert.c         |  4 +-
+ src/backend/access/nbtree/nbtree.c            |  4 +-
+ src/backend/access/nbtree/nbtsearch.c         |  8 ++--
+ src/backend/access/nbtree/nbtsplitloc.c       |  2 +-
+ src/backend/nodes/tidbitmap.c                 |  2 +-
+ .../replication/logical/reorderbuffer.c       |  2 +-
+ src/backend/storage/freespace/freespace.c     | 30 +++++++-------
+ src/backend/storage/page/bufpage.c            | 36 +++++++++--------
+ src/backend/utils/adt/tsgistidx.c             |  2 +-
+ src/backend/utils/init/globals.c              |  1 +
+ src/backend/utils/misc/guc_tables.c           | 13 ++++++
+ src/include/access/ginblock.h                 | 27 +++++++++----
+ src/include/access/hash.h                     |  5 ++-
+ src/include/access/heapam.h                   |  2 +-
+ src/include/access/heaptoast.h                |  4 +-
+ src/include/access/htup_details.h             | 40 ++++++++++++++-----
+ src/include/access/nbtree.h                   | 32 ++++++++++-----
+ src/include/access/spgist_private.h           |  1 +
+ src/include/storage/bufpage.h                 | 22 +++++++---
+ .../test_ginpostinglist/test_ginpostinglist.c |  6 +--
+ src/test/regress/expected/insert.out          |  4 +-
+ src/test/regress/expected/vacuum.out          |  4 +-
+ src/test/regress/sql/insert.sql               |  4 +-
+ src/test/regress/sql/vacuum.sql               |  4 +-
+ 47 files changed, 256 insertions(+), 178 deletions(-)
+
+diff --git a/contrib/amcheck/verify_nbtree.c b/contrib/amcheck/verify_nbtree.c
+index 6979aff727..060c4ab3e3 100644
+--- a/contrib/amcheck/verify_nbtree.c
++++ b/contrib/amcheck/verify_nbtree.c
+@@ -489,12 +489,12 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
+ 		/*
+ 		 * Size Bloom filter based on estimated number of tuples in index,
+ 		 * while conservatively assuming that each block must contain at least
+-		 * MaxTIDsPerBTreePage / 3 "plain" tuples -- see
++		 * MaxTIDsPerBTreePage() / 3 "plain" tuples -- see
+ 		 * bt_posting_plain_tuple() for definition, and details of how posting
+ 		 * list tuples are handled.
+ 		 */
+ 		total_pages = RelationGetNumberOfBlocks(rel);
+-		total_elems = Max(total_pages * (MaxTIDsPerBTreePage / 3),
++		total_elems = Max(total_pages * (MaxTIDsPerBTreePage() / 3),
+ 						  (int64) state->rel->rd_rel->reltuples);
+ 		/* Generate a random seed to avoid repetition */
+ 		seed = pg_prng_uint64(&pg_global_prng_state);
+diff --git a/contrib/bloom/bloom.h b/contrib/bloom/bloom.h
+index efdf9415d1..8ebabdd7ee 100644
+--- a/contrib/bloom/bloom.h
++++ b/contrib/bloom/bloom.h
+@@ -131,7 +131,7 @@ typedef struct BloomMetaPageData
+ #define BLOOM_MAGICK_NUMBER (0xDBAC0DED)
+ 
+ /* Number of blocks numbers fit in BloomMetaPageData */
+-#define BloomMetaBlockN		(sizeof(FreeBlockNumberArray) / sizeof(BlockNumber))
++#define BloomMetaBlockN()		((sizeof(FreeBlockNumberArray) - SizeOfPageReservedSpace())/ sizeof(BlockNumber))
+ 
+ #define BloomPageGetMeta(page)	((BloomMetaPageData *) PageGetContents(page))
+ 
+@@ -151,6 +151,7 @@ typedef struct BloomState
+ 
+ #define BloomPageGetFreeSpace(state, page) \
+ 	(BLCKSZ - MAXALIGN(SizeOfPageHeaderData) \
++		- SizeOfPageReservedSpace()								  \
+ 		- BloomPageGetMaxOffset(page) * (state)->sizeOfBloomTuple \
+ 		- MAXALIGN(sizeof(BloomPageOpaqueData)))
+ 
+diff --git a/contrib/bloom/blutils.c b/contrib/bloom/blutils.c
+index d935ed8fbd..d3d74a9d28 100644
+--- a/contrib/bloom/blutils.c
++++ b/contrib/bloom/blutils.c
+@@ -430,10 +430,10 @@ BloomFillMetapage(Relation index, Page metaPage)
+ 	 */
+ 	BloomInitPage(metaPage, BLOOM_META);
+ 	metadata = BloomPageGetMeta(metaPage);
+-	memset(metadata, 0, sizeof(BloomMetaPageData));
++	memset(metadata, 0, sizeof(BloomMetaPageData) - SizeOfPageReservedSpace());
+ 	metadata->magickNumber = BLOOM_MAGICK_NUMBER;
+ 	metadata->opts = *opts;
+-	((PageHeader) metaPage)->pd_lower += sizeof(BloomMetaPageData);
++	((PageHeader) metaPage)->pd_lower += sizeof(BloomMetaPageData) - SizeOfPageReservedSpace();
+ 
+ 	/* If this fails, probably FreeBlockNumberArray size calc is wrong: */
+ 	Assert(((PageHeader) metaPage)->pd_lower <= ((PageHeader) metaPage)->pd_upper);
+diff --git a/contrib/bloom/blvacuum.c b/contrib/bloom/blvacuum.c
+index 2340d49e00..652dc9e586 100644
+--- a/contrib/bloom/blvacuum.c
++++ b/contrib/bloom/blvacuum.c
+@@ -116,7 +116,7 @@ blbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
+ 		 */
+ 		if (BloomPageGetMaxOffset(page) != 0 &&
+ 			BloomPageGetFreeSpace(&state, page) >= state.sizeOfBloomTuple &&
+-			countPage < BloomMetaBlockN)
++			countPage < BloomMetaBlockN())
+ 			notFullPage[countPage++] = blkno;
+ 
+ 		/* Did we delete something? */
+diff --git a/contrib/pg_surgery/heap_surgery.c b/contrib/pg_surgery/heap_surgery.c
+index 88a40ab7d3..d4e9748095 100644
+--- a/contrib/pg_surgery/heap_surgery.c
++++ b/contrib/pg_surgery/heap_surgery.c
+@@ -89,7 +89,7 @@ heap_force_common(FunctionCallInfo fcinfo, HeapTupleForceOption heap_force_opt)
+ 	Relation	rel;
+ 	OffsetNumber curr_start_ptr,
+ 				next_start_ptr;
+-	bool		include_this_tid[MaxHeapTuplesPerPage];
++	bool		include_this_tid[MaxHeapTuplesPerPageLimit];
+ 
+ 	if (RecoveryInProgress())
+ 		ereport(ERROR,
+@@ -225,7 +225,7 @@ heap_force_common(FunctionCallInfo fcinfo, HeapTupleForceOption heap_force_opt)
+ 			}
+ 
+ 			/* Mark it for processing. */
+-			Assert(offno < MaxHeapTuplesPerPage);
++			Assert(offno < MaxHeapTuplesPerPage());
+ 			include_this_tid[offno] = true;
+ 		}
+ 
+diff --git a/src/backend/access/brin/brin_bloom.c b/src/backend/access/brin/brin_bloom.c
+index e4953a9d37..5bc0166fb8 100644
+--- a/src/backend/access/brin/brin_bloom.c
++++ b/src/backend/access/brin/brin_bloom.c
+@@ -166,7 +166,7 @@ typedef struct BloomOptions
+  * on the fact that the filter header is ~20B alone, which is about
+  * the same as the filter bitmap for 16 distinct items with 1% false
+  * positive rate. So by allowing lower values we'd not gain much. In
+- * any case, the min should not be larger than MaxHeapTuplesPerPage
++ * any case, the min should not be larger than MaxHeapTuplesPerPage()
+  * (~290), which is the theoretical maximum for single-page ranges.
+  */
+ #define		BLOOM_MIN_NDISTINCT_PER_RANGE		16
+@@ -448,7 +448,7 @@ brin_bloom_opcinfo(PG_FUNCTION_ARGS)
+  *
+  * Adjust the ndistinct value based on the pagesPerRange value. First,
+  * if it's negative, it's assumed to be relative to maximum number of
+- * tuples in the range (assuming each page gets MaxHeapTuplesPerPage
++ * tuples in the range (assuming each page gets MaxHeapTuplesPerPage()
+  * tuples, which is likely a significant over-estimate). We also clamp
+  * the value, not to over-size the bloom filter unnecessarily.
+  *
+@@ -463,7 +463,7 @@ brin_bloom_opcinfo(PG_FUNCTION_ARGS)
+  * seems better to rely on the upper estimate.
+  *
+  * XXX We might also calculate a better estimate of rows per BRIN range,
+- * instead of using MaxHeapTuplesPerPage (which probably produces values
++ * instead of using MaxHeapTuplesPerPage() (which probably produces values
+  * much higher than reality).
+  */
+ static int
+@@ -478,7 +478,7 @@ brin_bloom_get_ndistinct(BrinDesc *bdesc, BloomOptions *opts)
+ 
+ 	Assert(BlockNumberIsValid(pagesPerRange));
+ 
+-	maxtuples = MaxHeapTuplesPerPage * pagesPerRange;
++	maxtuples = MaxHeapTuplesPerPage() * pagesPerRange;
+ 
+ 	/*
+ 	 * Similarly to n_distinct, negative values are relative - in this case to
+diff --git a/src/backend/access/brin/brin_minmax_multi.c b/src/backend/access/brin/brin_minmax_multi.c
+index 8e4e6c2fc8..28fc1f3ebe 100644
+--- a/src/backend/access/brin/brin_minmax_multi.c
++++ b/src/backend/access/brin/brin_minmax_multi.c
+@@ -2001,10 +2001,10 @@ brin_minmax_multi_distance_tid(PG_FUNCTION_ARGS)
+ 	 * We use the no-check variants here, because user-supplied values may
+ 	 * have (ip_posid == 0). See ItemPointerCompare.
+ 	 */
+-	da1 = ItemPointerGetBlockNumberNoCheck(pa1) * MaxHeapTuplesPerPage +
++	da1 = ItemPointerGetBlockNumberNoCheck(pa1) * MaxHeapTuplesPerPage() +
+ 		ItemPointerGetOffsetNumberNoCheck(pa1);
+ 
+-	da2 = ItemPointerGetBlockNumberNoCheck(pa2) * MaxHeapTuplesPerPage +
++	da2 = ItemPointerGetBlockNumberNoCheck(pa2) * MaxHeapTuplesPerPage() +
+ 		ItemPointerGetOffsetNumberNoCheck(pa2);
+ 
+ 	PG_RETURN_FLOAT8(da2 - da1);
+@@ -2481,7 +2481,7 @@ brin_minmax_multi_add_value(PG_FUNCTION_ARGS)
+ 		 * much lower, but meh.
+ 		 */
+ 		maxvalues = Min(target_maxvalues * MINMAX_BUFFER_FACTOR,
+-						MaxHeapTuplesPerPage * pagesPerRange);
++						MaxHeapTuplesPerPage() * pagesPerRange);
+ 
+ 		/* but always at least the original value */
+ 		maxvalues = Max(maxvalues, target_maxvalues);
+@@ -2527,7 +2527,7 @@ brin_minmax_multi_add_value(PG_FUNCTION_ARGS)
+ 		 * much lower, but meh.
+ 		 */
+ 		maxvalues = Min(serialized->maxvalues * MINMAX_BUFFER_FACTOR,
+-						MaxHeapTuplesPerPage * pagesPerRange);
++						MaxHeapTuplesPerPage() * pagesPerRange);
+ 
+ 		/* but always at least the original value */
+ 		maxvalues = Max(maxvalues, serialized->maxvalues);
+diff --git a/src/backend/access/brin/brin_tuple.c b/src/backend/access/brin/brin_tuple.c
+index 84b79dbfc0..3908a59f66 100644
+--- a/src/backend/access/brin/brin_tuple.c
++++ b/src/backend/access/brin/brin_tuple.c
+@@ -217,7 +217,7 @@ brin_form_tuple(BrinDesc *brdesc, BlockNumber blkno, BrinMemTuple *tuple,
+ 			 * datatype, try to compress it in-line.
+ 			 */
+ 			if (!VARATT_IS_EXTENDED(DatumGetPointer(value)) &&
+-				VARSIZE(DatumGetPointer(value)) > TOAST_INDEX_TARGET &&
++				VARSIZE(DatumGetPointer(value)) > TOAST_INDEX_TARGET() &&
+ 				(atttype->typstorage == TYPSTORAGE_EXTENDED ||
+ 				 atttype->typstorage == TYPSTORAGE_MAIN))
+ 			{
+diff --git a/src/backend/access/common/indextuple.c b/src/backend/access/common/indextuple.c
+index 8b178f94c1..51dd6e467f 100644
+--- a/src/backend/access/common/indextuple.c
++++ b/src/backend/access/common/indextuple.c
+@@ -118,7 +118,7 @@ index_form_tuple_context(TupleDesc tupleDescriptor,
+ 		 * try to compress it in-line.
+ 		 */
+ 		if (!VARATT_IS_EXTENDED(DatumGetPointer(untoasted_values[i])) &&
+-			VARSIZE(DatumGetPointer(untoasted_values[i])) > TOAST_INDEX_TARGET &&
++			VARSIZE(DatumGetPointer(untoasted_values[i])) > TOAST_INDEX_TARGET() &&
+ 			(att->attstorage == TYPSTORAGE_EXTENDED ||
+ 			 att->attstorage == TYPSTORAGE_MAIN))
+ 		{
+diff --git a/src/backend/access/gin/gindatapage.c b/src/backend/access/gin/gindatapage.c
+index 9caeac164a..a0ac29cdbe 100644
+--- a/src/backend/access/gin/gindatapage.c
++++ b/src/backend/access/gin/gindatapage.c
+@@ -535,7 +535,7 @@ dataBeginPlaceToPageLeaf(GinBtree btree, Buffer buf, GinBtreeStack *stack,
+ 		 * a single byte, and we can use all the free space on the old page as
+ 		 * well as the new page. For simplicity, ignore segment overhead etc.
+ 		 */
+-		maxitems = Min(maxitems, freespace + GinDataPageMaxDataSize);
++		maxitems = Min(maxitems, freespace + GinDataPageMaxDataSize());
+ 	}
+ 	else
+ 	{
+@@ -550,7 +550,7 @@ dataBeginPlaceToPageLeaf(GinBtree btree, Buffer buf, GinBtreeStack *stack,
+ 		int			nnewsegments;
+ 
+ 		nnewsegments = freespace / GinPostingListSegmentMaxSize;
+-		nnewsegments += GinDataPageMaxDataSize / GinPostingListSegmentMaxSize;
++		nnewsegments += GinDataPageMaxDataSize() / GinPostingListSegmentMaxSize;
+ 		maxitems = Min(maxitems, nnewsegments * MinTuplesPerSegment);
+ 	}
+ 
+@@ -665,8 +665,8 @@ dataBeginPlaceToPageLeaf(GinBtree btree, Buffer buf, GinBtreeStack *stack,
+ 				leaf->lastleft = dlist_prev_node(&leaf->segments, leaf->lastleft);
+ 			}
+ 		}
+-		Assert(leaf->lsize <= GinDataPageMaxDataSize);
+-		Assert(leaf->rsize <= GinDataPageMaxDataSize);
++		Assert(leaf->lsize <= GinDataPageMaxDataSize());
++		Assert(leaf->rsize <= GinDataPageMaxDataSize());
+ 
+ 		/*
+ 		 * Fetch the max item in the left page's last segment; it becomes the
+@@ -755,7 +755,7 @@ ginVacuumPostingTreeLeaf(Relation indexrel, Buffer buffer, GinVacuumState *gvs)
+ 		if (seginfo->seg)
+ 			oldsegsize = SizeOfGinPostingList(seginfo->seg);
+ 		else
+-			oldsegsize = GinDataPageMaxDataSize;
++			oldsegsize = GinDataPageMaxDataSize();
+ 
+ 		cleaned = ginVacuumItemPointers(gvs,
+ 										seginfo->items,
+@@ -1015,7 +1015,7 @@ dataPlaceToPageLeafRecompress(Buffer buf, disassembledLeaf *leaf)
+ 		}
+ 	}
+ 
+-	Assert(newsize <= GinDataPageMaxDataSize);
++	Assert(newsize <= GinDataPageMaxDataSize());
+ 	GinDataPageSetDataSize(page, newsize);
+ }
+ 
+@@ -1684,7 +1684,7 @@ leafRepackItems(disassembledLeaf *leaf, ItemPointer remaining)
+ 		 * copying to the page. Did we exceed the size that fits on one page?
+ 		 */
+ 		segsize = SizeOfGinPostingList(seginfo->seg);
+-		if (pgused + segsize > GinDataPageMaxDataSize)
++		if (pgused + segsize > GinDataPageMaxDataSize())
+ 		{
+ 			if (!needsplit)
+ 			{
+@@ -1724,8 +1724,8 @@ leafRepackItems(disassembledLeaf *leaf, ItemPointer remaining)
+ 	else
+ 		leaf->rsize = pgused;
+ 
+-	Assert(leaf->lsize <= GinDataPageMaxDataSize);
+-	Assert(leaf->rsize <= GinDataPageMaxDataSize);
++	Assert(leaf->lsize <= GinDataPageMaxDataSize());
++	Assert(leaf->rsize <= GinDataPageMaxDataSize());
+ 
+ 	/*
+ 	 * Make a palloc'd copy of every segment after the first modified one,
+@@ -1801,7 +1801,7 @@ createPostingTree(Relation index, ItemPointerData *items, uint32 nitems,
+ 										 GinPostingListSegmentMaxSize,
+ 										 &npacked);
+ 		segsize = SizeOfGinPostingList(segment);
+-		if (rootsize + segsize > GinDataPageMaxDataSize)
++		if (rootsize + segsize > GinDataPageMaxDataSize())
+ 			break;
+ 
+ 		memcpy(ptr, segment, segsize);
+diff --git a/src/backend/access/gin/ginentrypage.c b/src/backend/access/gin/ginentrypage.c
+index 5a8c0eb98d..26d292921a 100644
+--- a/src/backend/access/gin/ginentrypage.c
++++ b/src/backend/access/gin/ginentrypage.c
+@@ -102,13 +102,13 @@ GinFormTuple(GinState *ginstate,
+ 
+ 	newsize = MAXALIGN(newsize);
+ 
+-	if (newsize > GinMaxItemSize)
++	if (newsize > GinMaxItemSize())
+ 	{
+ 		if (errorTooBig)
+ 			ereport(ERROR,
+ 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+ 					 errmsg("index row size %zu exceeds maximum %zu for index \"%s\"",
+-							(Size) newsize, (Size) GinMaxItemSize,
++							(Size) newsize, (Size) GinMaxItemSize(),
+ 							RelationGetRelationName(ginstate->index))));
+ 		pfree(itup);
+ 		return NULL;
+diff --git a/src/backend/access/gin/ginfast.c b/src/backend/access/gin/ginfast.c
+index ca7d770d86..eedd2d35ba 100644
+--- a/src/backend/access/gin/ginfast.c
++++ b/src/backend/access/gin/ginfast.c
+@@ -38,8 +38,8 @@
+ /* GUC parameter */
+ int			gin_pending_list_limit = 0;
+ 
+-#define GIN_PAGE_FREESIZE \
+-	( BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(GinPageOpaqueData)) )
++#define GIN_PAGE_FREESIZE() \
++	( BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(GinPageOpaqueData)) - SizeOfPageReservedSpace() )
+ 
+ typedef struct KeyArray
+ {
+@@ -183,7 +183,7 @@ makeSublist(Relation index, IndexTuple *tuples, int32 ntuples,
+ 
+ 		tupsize = MAXALIGN(IndexTupleSize(tuples[i])) + sizeof(ItemIdData);
+ 
+-		if (size + tupsize > GinListPageSize)
++		if (size + tupsize > GinListPageSize())
+ 		{
+ 			/* won't fit, force a new page and reprocess */
+ 			i--;
+@@ -249,7 +249,7 @@ ginHeapTupleFastInsert(GinState *ginstate, GinTupleCollector *collector)
+ 	 */
+ 	CheckForSerializableConflictIn(index, NULL, GIN_METAPAGE_BLKNO);
+ 
+-	if (collector->sumsize + collector->ntuples * sizeof(ItemIdData) > GinListPageSize)
++	if (collector->sumsize + collector->ntuples * sizeof(ItemIdData) > GinListPageSize())
+ 	{
+ 		/*
+ 		 * Total size is greater than one page => make sublist
+@@ -450,7 +450,7 @@ ginHeapTupleFastInsert(GinState *ginstate, GinTupleCollector *collector)
+ 	 * ginInsertCleanup() should not be called inside our CRIT_SECTION.
+ 	 */
+ 	cleanupSize = GinGetPendingListCleanupSize(index);
+-	if (metadata->nPendingPages * GIN_PAGE_FREESIZE > cleanupSize * 1024L)
++	if (metadata->nPendingPages * GIN_PAGE_FREESIZE() > cleanupSize * 1024L)
+ 		needCleanup = true;
+ 
+ 	UnlockReleaseBuffer(metabuffer);
+diff --git a/src/backend/access/gin/gininsert.c b/src/backend/access/gin/gininsert.c
+index be1841de7b..eae27c66e9 100644
+--- a/src/backend/access/gin/gininsert.c
++++ b/src/backend/access/gin/gininsert.c
+@@ -75,7 +75,7 @@ addItemPointersToLeafTuple(GinState *ginstate,
+ 
+ 	/* Compress the posting list, and try to a build tuple with room for it */
+ 	res = NULL;
+-	compressedList = ginCompressPostingList(newItems, newNPosting, GinMaxItemSize,
++	compressedList = ginCompressPostingList(newItems, newNPosting, GinMaxItemSize(),
+ 											NULL);
+ 	pfree(newItems);
+ 	if (compressedList)
+@@ -135,7 +135,7 @@ buildFreshLeafTuple(GinState *ginstate,
+ 	GinPostingList *compressedList;
+ 
+ 	/* try to build a posting list tuple with all the items */
+-	compressedList = ginCompressPostingList(items, nitem, GinMaxItemSize, NULL);
++	compressedList = ginCompressPostingList(items, nitem, GinMaxItemSize(), NULL);
+ 	if (compressedList)
+ 	{
+ 		res = GinFormTuple(ginstate, attnum, key, category,
+diff --git a/src/backend/access/gin/ginpostinglist.c b/src/backend/access/gin/ginpostinglist.c
+index 66a89837e6..65f683ce02 100644
+--- a/src/backend/access/gin/ginpostinglist.c
++++ b/src/backend/access/gin/ginpostinglist.c
+@@ -26,7 +26,7 @@
+  * lowest 32 bits are the block number. That leaves 21 bits unused, i.e.
+  * only 43 low bits are used.
+  *
+- * 11 bits is enough for the offset number, because MaxHeapTuplesPerPage <
++ * 11 bits is enough for the offset number, because MaxHeapTuplesPerPage() <
+  * 2^11 on all supported block sizes. We are frugal with the bits, because
+  * smaller integers use fewer bytes in the varbyte encoding, saving disk
+  * space. (If we get a new table AM in the future that wants to use the full
+@@ -74,9 +74,9 @@
+ /*
+  * How many bits do you need to encode offset number? OffsetNumber is a 16-bit
+  * integer, but you can't fit that many items on a page. 11 ought to be more
+- * than enough. It's tempting to derive this from MaxHeapTuplesPerPage, and
++ * than enough. It's tempting to derive this from MaxHeapTuplesPerPage(), and
+  * use the minimum number of bits, but that would require changing the on-disk
+- * format if MaxHeapTuplesPerPage changes. Better to leave some slack.
++ * format if MaxHeapTuplesPerPage() changes. Better to leave some slack.
+  */
+ #define MaxHeapTuplesPerPageBits		11
+ 
+diff --git a/src/backend/access/gin/ginvacuum.c b/src/backend/access/gin/ginvacuum.c
+index e5d310d836..5e001893cc 100644
+--- a/src/backend/access/gin/ginvacuum.c
++++ b/src/backend/access/gin/ginvacuum.c
+@@ -514,7 +514,7 @@ ginVacuumEntryPage(GinVacuumState *gvs, Buffer buffer, BlockNumber *roots, uint3
+ 
+ 				if (nitems > 0)
+ 				{
+-					plist = ginCompressPostingList(items, nitems, GinMaxItemSize, NULL);
++					plist = ginCompressPostingList(items, nitems, GinMaxItemSize(), NULL);
+ 					plistsize = SizeOfGinPostingList(plist);
+ 				}
+ 				else
+diff --git a/src/backend/access/heap/README.HOT b/src/backend/access/heap/README.HOT
+index 6fd1767f70..6c9fd4fd52 100644
+--- a/src/backend/access/heap/README.HOT
++++ b/src/backend/access/heap/README.HOT
+@@ -243,7 +243,7 @@ of line pointer bloat: we might end up with huge numbers of line pointers
+ and just a few actual tuples on a page.  To limit the damage in the worst
+ case, and to keep various work arrays as well as the bitmaps in bitmap
+ scans reasonably sized, the maximum number of line pointers per page
+-is arbitrarily capped at MaxHeapTuplesPerPage (the most tuples that
++is arbitrarily capped at MaxHeapTuplesPerPage() (the most tuples that
+ could fit without HOT pruning).
+ 
+ Effectively, space reclamation happens during tuple retrieval when the
+diff --git a/src/backend/access/heap/heapam.c b/src/backend/access/heap/heapam.c
+index 0124f37911..12e8baf93c 100644
+--- a/src/backend/access/heap/heapam.c
++++ b/src/backend/access/heap/heapam.c
+@@ -479,7 +479,7 @@ heapgetpage(TableScanDesc sscan, BlockNumber block)
+ 
+ 	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+ 
+-	Assert(ntup <= MaxHeapTuplesPerPage);
++	Assert(ntup <= MaxHeapTuplesPerPage());
+ 	scan->rs_ntuples = ntup;
+ }
+ 
+@@ -6740,8 +6740,8 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
+ 	/* Now WAL-log freezing if necessary */
+ 	if (RelationNeedsWAL(rel))
+ 	{
+-		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
+-		OffsetNumber offsets[MaxHeapTuplesPerPage];
++		xl_heap_freeze_plan plans[MaxHeapTuplesPerPageLimit];
++		OffsetNumber offsets[MaxHeapTuplesPerPageLimit];
+ 		int			nplans;
+ 		xl_heap_freeze_page xlrec;
+ 		XLogRecPtr	recptr;
+@@ -9221,7 +9221,7 @@ heap_xlog_insert(XLogReaderState *record)
+ 	union
+ 	{
+ 		HeapTupleHeaderData hdr;
+-		char		data[MaxHeapTupleSize];
++		char		data[MaxHeapTupleSizeLimit];
+ 	}			tbuf;
+ 	HeapTupleHeader htup;
+ 	xl_heap_header xlhdr;
+@@ -9277,7 +9277,7 @@ heap_xlog_insert(XLogReaderState *record)
+ 		data = XLogRecGetBlockData(record, 0, &datalen);
+ 
+ 		newlen = datalen - SizeOfHeapHeader;
+-		Assert(datalen > SizeOfHeapHeader && newlen <= MaxHeapTupleSize);
++		Assert(datalen > SizeOfHeapHeader && newlen <= MaxHeapTupleSize());
+ 		memcpy((char *) &xlhdr, data, SizeOfHeapHeader);
+ 		data += SizeOfHeapHeader;
+ 
+@@ -9343,7 +9343,7 @@ heap_xlog_multi_insert(XLogReaderState *record)
+ 	union
+ 	{
+ 		HeapTupleHeaderData hdr;
+-		char		data[MaxHeapTupleSize];
++		char		data[MaxHeapTupleSizeLimit];
+ 	}			tbuf;
+ 	HeapTupleHeader htup;
+ 	uint32		newlen;
+@@ -9421,7 +9421,7 @@ heap_xlog_multi_insert(XLogReaderState *record)
+ 			tupdata = ((char *) xlhdr) + SizeOfMultiInsertTuple;
+ 
+ 			newlen = xlhdr->datalen;
+-			Assert(newlen <= MaxHeapTupleSize);
++			Assert(newlen <= MaxHeapTupleSize());
+ 			htup = &tbuf.hdr;
+ 			MemSet((char *) htup, 0, SizeofHeapTupleHeader);
+ 			/* PG73FORMAT: get bitmap [+ padding] [+ oid] + data */
+@@ -9500,7 +9500,7 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
+ 	union
+ 	{
+ 		HeapTupleHeaderData hdr;
+-		char		data[MaxHeapTupleSize];
++		char		data[MaxHeapTupleSizeLimit];
+ 	}			tbuf;
+ 	xl_heap_header xlhdr;
+ 	uint32		newlen;
+@@ -9656,7 +9656,7 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
+ 		recdata += SizeOfHeapHeader;
+ 
+ 		tuplen = recdata_end - recdata;
+-		Assert(tuplen <= MaxHeapTupleSize);
++		Assert(tuplen <= MaxHeapTupleSize());
+ 
+ 		htup = &tbuf.hdr;
+ 		MemSet((char *) htup, 0, SizeofHeapTupleHeader);
+diff --git a/src/backend/access/heap/heapam_handler.c b/src/backend/access/heap/heapam_handler.c
+index cbb35aa73d..bef452fdfe 100644
+--- a/src/backend/access/heap/heapam_handler.c
++++ b/src/backend/access/heap/heapam_handler.c
+@@ -1200,7 +1200,7 @@ heapam_index_build_range_scan(Relation heapRelation,
+ 	TransactionId OldestXmin;
+ 	BlockNumber previous_blkno = InvalidBlockNumber;
+ 	BlockNumber root_blkno = InvalidBlockNumber;
+-	OffsetNumber root_offsets[MaxHeapTuplesPerPage];
++	OffsetNumber root_offsets[MaxHeapTuplesPerPageLimit];
+ 
+ 	/*
+ 	 * sanity checks
+@@ -1763,8 +1763,8 @@ heapam_index_validate_scan(Relation heapRelation,
+ 	EState	   *estate;
+ 	ExprContext *econtext;
+ 	BlockNumber root_blkno = InvalidBlockNumber;
+-	OffsetNumber root_offsets[MaxHeapTuplesPerPage];
+-	bool		in_index[MaxHeapTuplesPerPage];
++	OffsetNumber root_offsets[MaxHeapTuplesPerPageLimit];
++	bool		in_index[MaxHeapTuplesPerPageLimit];
+ 	BlockNumber previous_blkno = InvalidBlockNumber;
+ 
+ 	/* state variables for the merge */
+@@ -2227,7 +2227,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
+ 
+ 	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+ 
+-	Assert(ntup <= MaxHeapTuplesPerPage);
++	Assert(ntup <= MaxHeapTuplesPerPage());
+ 	hscan->rs_ntuples = ntup;
+ 
+ 	return ntup > 0;
+diff --git a/src/backend/access/heap/hio.c b/src/backend/access/heap/hio.c
+index fb95c19e90..3ce357897c 100644
+--- a/src/backend/access/heap/hio.c
++++ b/src/backend/access/heap/hio.c
+@@ -511,11 +511,11 @@ RelationGetBufferForTuple(Relation relation, Size len,
+ 	/*
+ 	 * If we're gonna fail for oversize tuple, do it right away
+ 	 */
+-	if (len > MaxHeapTupleSize)
++	if (len > MaxHeapTupleSize())
+ 		ereport(ERROR,
+ 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+ 				 errmsg("row is too big: size %zu, maximum size %zu",
+-						len, MaxHeapTupleSize)));
++						len, MaxHeapTupleSize())));
+ 
+ 	/* Compute desired extra freespace due to fillfactor option */
+ 	saveFreeSpace = RelationGetTargetPageFreeSpace(relation,
+@@ -527,8 +527,8 @@ RelationGetBufferForTuple(Relation relation, Size len,
+ 	 * somewhat arbitrary, but it should prevent most unnecessary relation
+ 	 * extensions while inserting large tuples into low-fillfactor tables.
+ 	 */
+-	nearlyEmptyFreeSpace = MaxHeapTupleSize -
+-		(MaxHeapTuplesPerPage / 8 * sizeof(ItemIdData));
++	nearlyEmptyFreeSpace = MaxHeapTupleSize() -
++		(MaxHeapTuplesPerPage() / 8 * sizeof(ItemIdData));
+ 	if (len + saveFreeSpace > nearlyEmptyFreeSpace)
+ 		targetFreeSpace = Max(len, nearlyEmptyFreeSpace);
+ 	else
+diff --git a/src/backend/access/heap/pruneheap.c b/src/backend/access/heap/pruneheap.c
+index 20df39c149..487da95ada 100644
+--- a/src/backend/access/heap/pruneheap.c
++++ b/src/backend/access/heap/pruneheap.c
+@@ -54,17 +54,17 @@ typedef struct
+ 	int			ndead;
+ 	int			nunused;
+ 	/* arrays that accumulate indexes of items to be changed */
+-	OffsetNumber redirected[MaxHeapTuplesPerPage * 2];
+-	OffsetNumber nowdead[MaxHeapTuplesPerPage];
+-	OffsetNumber nowunused[MaxHeapTuplesPerPage];
++	OffsetNumber redirected[MaxHeapTuplesPerPageLimit * 2];
++	OffsetNumber nowdead[MaxHeapTuplesPerPageLimit];
++	OffsetNumber nowunused[MaxHeapTuplesPerPageLimit];
+ 
+ 	/*
+ 	 * marked[i] is true if item i is entered in one of the above arrays.
+ 	 *
+-	 * This needs to be MaxHeapTuplesPerPage + 1 long as FirstOffsetNumber is
++	 * This needs to be MaxHeapTuplesPerPage() + 1 long as FirstOffsetNumber is
+ 	 * 1. Otherwise every access would need to subtract 1.
+ 	 */
+-	bool		marked[MaxHeapTuplesPerPage + 1];
++	bool		marked[MaxHeapTuplesPerPageLimit + 1];
+ 
+ 	/*
+ 	 * Tuple visibility is only computed once for each tuple, for correctness
+@@ -74,7 +74,7 @@ typedef struct
+ 	 *
+ 	 * Same indexing as ->marked.
+ 	 */
+-	int8		htsv[MaxHeapTuplesPerPage + 1];
++	int8		htsv[MaxHeapTuplesPerPageLimit + 1];
+ } PruneState;
+ 
+ /* Local functions */
+@@ -598,7 +598,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum, PruneState *prstate)
+ 	OffsetNumber latestdead = InvalidOffsetNumber,
+ 				maxoff = PageGetMaxOffsetNumber(dp),
+ 				offnum;
+-	OffsetNumber chainitems[MaxHeapTuplesPerPage];
++	OffsetNumber chainitems[MaxHeapTuplesPerPageLimit];
+ 	int			nchain = 0,
+ 				i;
+ 
+@@ -870,7 +870,7 @@ static void
+ heap_prune_record_redirect(PruneState *prstate,
+ 						   OffsetNumber offnum, OffsetNumber rdoffnum)
+ {
+-	Assert(prstate->nredirected < MaxHeapTuplesPerPage);
++	Assert(prstate->nredirected < MaxHeapTuplesPerPage());
+ 	prstate->redirected[prstate->nredirected * 2] = offnum;
+ 	prstate->redirected[prstate->nredirected * 2 + 1] = rdoffnum;
+ 	prstate->nredirected++;
+@@ -884,7 +884,7 @@ heap_prune_record_redirect(PruneState *prstate,
+ static void
+ heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum)
+ {
+-	Assert(prstate->ndead < MaxHeapTuplesPerPage);
++	Assert(prstate->ndead < MaxHeapTuplesPerPage());
+ 	prstate->nowdead[prstate->ndead] = offnum;
+ 	prstate->ndead++;
+ 	Assert(!prstate->marked[offnum]);
+@@ -895,7 +895,7 @@ heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum)
+ static void
+ heap_prune_record_unused(PruneState *prstate, OffsetNumber offnum)
+ {
+-	Assert(prstate->nunused < MaxHeapTuplesPerPage);
++	Assert(prstate->nunused < MaxHeapTuplesPerPage());
+ 	prstate->nowunused[prstate->nunused] = offnum;
+ 	prstate->nunused++;
+ 	Assert(!prstate->marked[offnum]);
+@@ -1097,7 +1097,7 @@ page_verify_redirects(Page page)
+  * If item k is part of a HOT-chain with root at item j, then we set
+  * root_offsets[k - 1] = j.
+  *
+- * The passed-in root_offsets array must have MaxHeapTuplesPerPage entries.
++ * The passed-in root_offsets array must have MaxHeapTuplesPerPage() entries.
+  * Unused entries are filled with InvalidOffsetNumber (zero).
+  *
+  * The function must be called with at least share lock on the buffer, to
+@@ -1114,7 +1114,7 @@ heap_get_root_tuples(Page page, OffsetNumber *root_offsets)
+ 				maxoff;
+ 
+ 	MemSet(root_offsets, InvalidOffsetNumber,
+-		   MaxHeapTuplesPerPage * sizeof(OffsetNumber));
++		   MaxHeapTuplesPerPage() * sizeof(OffsetNumber));
+ 
+ 	maxoff = PageGetMaxOffsetNumber(page);
+ 	for (offnum = FirstOffsetNumber; offnum <= maxoff; offnum = OffsetNumberNext(offnum))
+diff --git a/src/backend/access/heap/rewriteheap.c b/src/backend/access/heap/rewriteheap.c
+index 424958912c..adc4cf9af7 100644
+--- a/src/backend/access/heap/rewriteheap.c
++++ b/src/backend/access/heap/rewriteheap.c
+@@ -653,11 +653,11 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
+ 	/*
+ 	 * If we're gonna fail for oversize tuple, do it right away
+ 	 */
+-	if (len > MaxHeapTupleSize)
++	if (len > MaxHeapTupleSize())
+ 		ereport(ERROR,
+ 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+ 				 errmsg("row is too big: size %zu, maximum size %zu",
+-						len, MaxHeapTupleSize)));
++						len, MaxHeapTupleSize())));
+ 
+ 	/* Compute desired extra freespace due to fillfactor option */
+ 	saveFreeSpace = RelationGetTargetPageFreeSpace(state->rs_new_rel,
+diff --git a/src/backend/access/heap/vacuumlazy.c b/src/backend/access/heap/vacuumlazy.c
+index cda8889f5e..79a56cf837 100644
+--- a/src/backend/access/heap/vacuumlazy.c
++++ b/src/backend/access/heap/vacuumlazy.c
+@@ -908,8 +908,8 @@ lazy_scan_heap(LVRelState *vacrel)
+ 		 * dead_items TIDs, pause and do a cycle of vacuuming before we tackle
+ 		 * this page.
+ 		 */
+-		Assert(dead_items->max_items >= MaxHeapTuplesPerPage);
+-		if (dead_items->max_items - dead_items->num_items < MaxHeapTuplesPerPage)
++		Assert(dead_items->max_items >= MaxHeapTuplesPerPage());
++		if (dead_items->max_items - dead_items->num_items < MaxHeapTuplesPerPage())
+ 		{
+ 			/*
+ 			 * Before beginning index vacuuming, we release any pin we may
+@@ -1551,8 +1551,8 @@ lazy_scan_prune(LVRelState *vacrel,
+ 	int			nnewlpdead;
+ 	HeapPageFreeze pagefrz;
+ 	int64		fpi_before = pgWalUsage.wal_fpi;
+-	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
+-	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
++	OffsetNumber deadoffsets[MaxHeapTuplesPerPageLimit];
++	HeapTupleFreeze frozen[MaxHeapTuplesPerPageLimit];
+ 
+ 	Assert(BufferGetBlockNumber(buf) == blkno);
+ 
+@@ -1971,7 +1971,7 @@ lazy_scan_noprune(LVRelState *vacrel,
+ 	HeapTupleHeader tupleheader;
+ 	TransactionId NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
+ 	MultiXactId NoFreezePageRelminMxid = vacrel->NewRelminMxid;
+-	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
++	OffsetNumber deadoffsets[MaxHeapTuplesPerPageLimit];
+ 
+ 	Assert(BufferGetBlockNumber(buf) == blkno);
+ 
+@@ -2503,7 +2503,7 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
+ {
+ 	VacDeadItems *dead_items = vacrel->dead_items;
+ 	Page		page = BufferGetPage(buffer);
+-	OffsetNumber unused[MaxHeapTuplesPerPage];
++	OffsetNumber unused[MaxHeapTuplesPerPageLimit];
+ 	int			nunused = 0;
+ 	TransactionId visibility_cutoff_xid;
+ 	bool		all_frozen;
+@@ -3129,16 +3129,16 @@ dead_items_max_items(LVRelState *vacrel)
+ 		max_items = Min(max_items, MAXDEADITEMS(MaxAllocSize));
+ 
+ 		/* curious coding here to ensure the multiplication can't overflow */
+-		if ((BlockNumber) (max_items / MaxHeapTuplesPerPage) > rel_pages)
+-			max_items = rel_pages * MaxHeapTuplesPerPage;
++		if ((BlockNumber) (max_items / MaxHeapTuplesPerPage()) > rel_pages)
++			max_items = rel_pages * MaxHeapTuplesPerPage();
+ 
+ 		/* stay sane if small maintenance_work_mem */
+-		max_items = Max(max_items, MaxHeapTuplesPerPage);
++		max_items = Max(max_items, MaxHeapTuplesPerPage());
+ 	}
+ 	else
+ 	{
+ 		/* One-pass case only stores a single heap page's TIDs at a time */
+-		max_items = MaxHeapTuplesPerPage;
++		max_items = MaxHeapTuplesPerPage();
+ 	}
+ 
+ 	return (int) max_items;
+@@ -3158,7 +3158,7 @@ dead_items_alloc(LVRelState *vacrel, int nworkers)
+ 	int			max_items;
+ 
+ 	max_items = dead_items_max_items(vacrel);
+-	Assert(max_items >= MaxHeapTuplesPerPage);
++	Assert(max_items >= MaxHeapTuplesPerPage());
+ 
+ 	/*
+ 	 * Initialize state for a parallel vacuum.  As of now, only one worker can
+diff --git a/src/backend/access/nbtree/nbtdedup.c b/src/backend/access/nbtree/nbtdedup.c
+index d4db0b28f2..f4b9531bf2 100644
+--- a/src/backend/access/nbtree/nbtdedup.c
++++ b/src/backend/access/nbtree/nbtdedup.c
+@@ -355,8 +355,8 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
+ 	delstate.bottomup = true;
+ 	delstate.bottomupfreespace = Max(BLCKSZ / 16, newitemsz);
+ 	delstate.ndeltids = 0;
+-	delstate.deltids = palloc(MaxTIDsPerBTreePage * sizeof(TM_IndexDelete));
+-	delstate.status = palloc(MaxTIDsPerBTreePage * sizeof(TM_IndexStatus));
++	delstate.deltids = palloc(MaxTIDsPerBTreePage() * sizeof(TM_IndexDelete));
++	delstate.status = palloc(MaxTIDsPerBTreePage() * sizeof(TM_IndexStatus));
+ 
+ 	minoff = P_FIRSTDATAKEY(opaque);
+ 	maxoff = PageGetMaxOffsetNumber(page);
+@@ -826,7 +826,7 @@ _bt_singleval_fillfactor(Page page, BTDedupState state, Size newitemsz)
+ 
+ 	/* This calculation needs to match nbtsplitloc.c */
+ 	leftfree = PageGetPageSize(page) - SizeOfPageHeaderData -
+-		MAXALIGN(sizeof(BTPageOpaqueData));
++		MAXALIGN(sizeof(BTPageOpaqueData)) - SizeOfPageReservedSpace();
+ 	/* Subtract size of new high key (includes pivot heap TID space) */
+ 	leftfree -= newitemsz + MAXALIGN(sizeof(ItemPointerData));
+ 
+diff --git a/src/backend/access/nbtree/nbtinsert.c b/src/backend/access/nbtree/nbtinsert.c
+index 84bbd78d59..00b2689a8a 100644
+--- a/src/backend/access/nbtree/nbtinsert.c
++++ b/src/backend/access/nbtree/nbtinsert.c
+@@ -2821,8 +2821,8 @@ _bt_simpledel_pass(Relation rel, Buffer buffer, Relation heapRel,
+ 	delstate.bottomup = false;
+ 	delstate.bottomupfreespace = 0;
+ 	delstate.ndeltids = 0;
+-	delstate.deltids = palloc(MaxTIDsPerBTreePage * sizeof(TM_IndexDelete));
+-	delstate.status = palloc(MaxTIDsPerBTreePage * sizeof(TM_IndexStatus));
++	delstate.deltids = palloc(MaxTIDsPerBTreePage() * sizeof(TM_IndexDelete));
++	delstate.status = palloc(MaxTIDsPerBTreePage() * sizeof(TM_IndexStatus));
+ 
+ 	for (offnum = minoff;
+ 		 offnum <= maxoff;
+diff --git a/src/backend/access/nbtree/nbtree.c b/src/backend/access/nbtree/nbtree.c
+index 2df8849858..926fe588c9 100644
+--- a/src/backend/access/nbtree/nbtree.c
++++ b/src/backend/access/nbtree/nbtree.c
+@@ -259,8 +259,8 @@ btgettuple(IndexScanDesc scan, ScanDirection dir)
+ 				 */
+ 				if (so->killedItems == NULL)
+ 					so->killedItems = (int *)
+-						palloc(MaxTIDsPerBTreePage * sizeof(int));
+-				if (so->numKilled < MaxTIDsPerBTreePage)
++						palloc(MaxTIDsPerBTreePage() * sizeof(int));
++				if (so->numKilled < MaxTIDsPerBTreePage())
+ 					so->killedItems[so->numKilled++] = so->currPos.itemIndex;
+ 			}
+ 
+diff --git a/src/backend/access/nbtree/nbtsearch.c b/src/backend/access/nbtree/nbtsearch.c
+index 263f75fce9..c922617297 100644
+--- a/src/backend/access/nbtree/nbtsearch.c
++++ b/src/backend/access/nbtree/nbtsearch.c
+@@ -1671,7 +1671,7 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum)
+ 		if (!continuescan)
+ 			so->currPos.moreRight = false;
+ 
+-		Assert(itemIndex <= MaxTIDsPerBTreePage);
++		Assert(itemIndex <= MaxTIDsPerBTreePage());
+ 		so->currPos.firstItem = 0;
+ 		so->currPos.lastItem = itemIndex - 1;
+ 		so->currPos.itemIndex = 0;
+@@ -1679,7 +1679,7 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum)
+ 	else
+ 	{
+ 		/* load items[] in descending order */
+-		itemIndex = MaxTIDsPerBTreePage;
++		itemIndex = MaxTIDsPerBTreePage();
+ 
+ 		offnum = Min(offnum, maxoff);
+ 
+@@ -1768,8 +1768,8 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum)
+ 
+ 		Assert(itemIndex >= 0);
+ 		so->currPos.firstItem = itemIndex;
+-		so->currPos.lastItem = MaxTIDsPerBTreePage - 1;
+-		so->currPos.itemIndex = MaxTIDsPerBTreePage - 1;
++		so->currPos.lastItem = MaxTIDsPerBTreePage() - 1;
++		so->currPos.itemIndex = MaxTIDsPerBTreePage() - 1;
+ 	}
+ 
+ 	return (so->currPos.firstItem <= so->currPos.lastItem);
+diff --git a/src/backend/access/nbtree/nbtsplitloc.c b/src/backend/access/nbtree/nbtsplitloc.c
+index 43b67893d9..5babbb457a 100644
+--- a/src/backend/access/nbtree/nbtsplitloc.c
++++ b/src/backend/access/nbtree/nbtsplitloc.c
+@@ -156,7 +156,7 @@ _bt_findsplitloc(Relation rel,
+ 
+ 	/* Total free space available on a btree page, after fixed overhead */
+ 	leftspace = rightspace =
+-		PageGetPageSize(origpage) - SizeOfPageHeaderData -
++		PageGetPageSize(origpage) - SizeOfPageHeaderData - SizeOfPageReservedSpace() -
+ 		MAXALIGN(sizeof(BTPageOpaqueData));
+ 
+ 	/* The right page will have the same high key as the old page */
+diff --git a/src/backend/nodes/tidbitmap.c b/src/backend/nodes/tidbitmap.c
+index 29a1858441..d572932856 100644
+--- a/src/backend/nodes/tidbitmap.c
++++ b/src/backend/nodes/tidbitmap.c
+@@ -53,7 +53,7 @@
+  * the per-page bitmaps variable size.  We just legislate that the size
+  * is this:
+  */
+-#define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPage
++#define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPageLimit
+ 
+ /*
+  * When we have to switch over to lossy storage, we use a data structure
+diff --git a/src/backend/replication/logical/reorderbuffer.c b/src/backend/replication/logical/reorderbuffer.c
+index b85b890010..f6f3fc2966 100644
+--- a/src/backend/replication/logical/reorderbuffer.c
++++ b/src/backend/replication/logical/reorderbuffer.c
+@@ -4882,7 +4882,7 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
+ 	 * the tuplebuf because attrs[] will point back into the current content.
+ 	 */
+ 	tmphtup = heap_form_tuple(desc, attrs, isnull);
+-	Assert(newtup->tuple.t_len <= MaxHeapTupleSize);
++	Assert(newtup->tuple.t_len <= MaxHeapTupleSize());
+ 	Assert(ReorderBufferTupleBufData(newtup) == newtup->tuple.t_data);
+ 
+ 	memcpy(newtup->tuple.t_data, tmphtup->t_data, tmphtup->t_len);
+diff --git a/src/backend/storage/freespace/freespace.c b/src/backend/storage/freespace/freespace.c
+index 2face615d0..2260532fbb 100644
+--- a/src/backend/storage/freespace/freespace.c
++++ b/src/backend/storage/freespace/freespace.c
+@@ -37,12 +37,12 @@
+  * We use just one byte to store the amount of free space on a page, so we
+  * divide the amount of free space a page can have into 256 different
+  * categories. The highest category, 255, represents a page with at least
+- * MaxFSMRequestSize bytes of free space, and the second highest category
++ * MaxFSMRequestSize() bytes of free space, and the second highest category
+  * represents the range from 254 * FSM_CAT_STEP, inclusive, to
+- * MaxFSMRequestSize, exclusive.
++ * MaxFSMRequestSize(), exclusive.
+  *
+- * MaxFSMRequestSize depends on the architecture and BLCKSZ, but assuming
+- * default 8k BLCKSZ, and that MaxFSMRequestSize is 8164 bytes, the
++ * MaxFSMRequestSize() depends on the architecture and BLCKSZ, but assuming
++ * default 8k BLCKSZ, and that MaxFSMRequestSize() is 8164 bytes, the
+  * categories look like this:
+  *
+  *
+@@ -54,16 +54,16 @@
+  * 8128 - 8163 254
+  * 8164 - 8192 255
+  *
+- * The reason that MaxFSMRequestSize is special is that if MaxFSMRequestSize
+- * isn't equal to a range boundary, a page with exactly MaxFSMRequestSize
+- * bytes of free space wouldn't satisfy a request for MaxFSMRequestSize
+- * bytes. If there isn't more than MaxFSMRequestSize bytes of free space on a
++ * The reason that MaxFSMRequestSize() is special is that if MaxFSMRequestSize()
++ * isn't equal to a range boundary, a page with exactly MaxFSMRequestSize()
++ * bytes of free space wouldn't satisfy a request for MaxFSMRequestSize()
++ * bytes. If there isn't more than MaxFSMRequestSize() bytes of free space on a
+  * completely empty page, that would mean that we could never satisfy a
+- * request of exactly MaxFSMRequestSize bytes.
++ * request of exactly MaxFSMRequestSize() bytes.
+  */
+ #define FSM_CATEGORIES	256
+ #define FSM_CAT_STEP	(BLCKSZ / FSM_CATEGORIES)
+-#define MaxFSMRequestSize	MaxHeapTupleSize
++#define MaxFSMRequestSize()	MaxHeapTupleSize()
+ 
+ /*
+  * Depth of the on-disk tree. We need to be able to address 2^32-1 blocks,
+@@ -372,13 +372,13 @@ fsm_space_avail_to_cat(Size avail)
+ 
+ 	Assert(avail < BLCKSZ);
+ 
+-	if (avail >= MaxFSMRequestSize)
++	if (avail >= MaxFSMRequestSize())
+ 		return 255;
+ 
+ 	cat = avail / FSM_CAT_STEP;
+ 
+ 	/*
+-	 * The highest category, 255, is reserved for MaxFSMRequestSize bytes or
++	 * The highest category, 255, is reserved for MaxFSMRequestSize() bytes or
+ 	 * more.
+ 	 */
+ 	if (cat > 254)
+@@ -394,9 +394,9 @@ fsm_space_avail_to_cat(Size avail)
+ static Size
+ fsm_space_cat_to_avail(uint8 cat)
+ {
+-	/* The highest category represents exactly MaxFSMRequestSize bytes. */
++	/* The highest category represents exactly MaxFSMRequestSize() bytes. */
+ 	if (cat == 255)
+-		return MaxFSMRequestSize;
++		return MaxFSMRequestSize();
+ 	else
+ 		return cat * FSM_CAT_STEP;
+ }
+@@ -411,7 +411,7 @@ fsm_space_needed_to_cat(Size needed)
+ 	int			cat;
+ 
+ 	/* Can't ask for more space than the highest category represents */
+-	if (needed > MaxFSMRequestSize)
++	if (needed > MaxFSMRequestSize())
+ 		elog(ERROR, "invalid FSM request size %zu", needed);
+ 
+ 	if (needed == 0)
+diff --git a/src/backend/storage/page/bufpage.c b/src/backend/storage/page/bufpage.c
+index 9a302ddc30..a93cd9df9f 100644
+--- a/src/backend/storage/page/bufpage.c
++++ b/src/backend/storage/page/bufpage.c
+@@ -26,6 +26,8 @@
+ /* GUC variable */
+ bool		ignore_checksum_failure = false;
+ 
++int			reserved_page_size = 0; /* how much page space to reserve for extended unencrypted metadata */
++
+ 
+ /* ----------------------------------------------------------------
+  *						Page support functions
+@@ -43,7 +45,7 @@ PageInit(Page page, Size pageSize, Size specialSize)
+ {
+ 	PageHeader	p = (PageHeader) page;
+ 
+-	specialSize = MAXALIGN(specialSize);
++	specialSize = MAXALIGN(specialSize) + reserved_page_size;
+ 
+ 	Assert(pageSize == BLCKSZ);
+ 	Assert(pageSize > specialSize + SizeOfPageHeaderData);
+@@ -117,7 +119,7 @@ PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags)
+ 		if ((p->pd_flags & ~PD_VALID_FLAG_BITS) == 0 &&
+ 			p->pd_lower <= p->pd_upper &&
+ 			p->pd_upper <= p->pd_special &&
+-			p->pd_special <= BLCKSZ &&
++			p->pd_special + reserved_page_size <= BLCKSZ &&
+ 			p->pd_special == MAXALIGN(p->pd_special))
+ 			header_sane = true;
+ 
+@@ -186,7 +188,7 @@ PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags)
+  *	one that is both unused and deallocated.
+  *
+  *	If flag PAI_IS_HEAP is set, we enforce that there can't be more than
+- *	MaxHeapTuplesPerPage line pointers on the page.
++ *	MaxHeapTuplesPerPage() line pointers on the page.
+  *
+  *	!!! EREPORT(ERROR) IS DISALLOWED HERE !!!
+  */
+@@ -211,7 +213,7 @@ PageAddItemExtended(Page page,
+ 	if (phdr->pd_lower < SizeOfPageHeaderData ||
+ 		phdr->pd_lower > phdr->pd_upper ||
+ 		phdr->pd_upper > phdr->pd_special ||
+-		phdr->pd_special > BLCKSZ)
++		phdr->pd_special + reserved_page_size > BLCKSZ)
+ 		ereport(PANIC,
+ 				(errcode(ERRCODE_DATA_CORRUPTED),
+ 				 errmsg("corrupted page pointers: lower = %u, upper = %u, special = %u",
+@@ -295,9 +297,9 @@ PageAddItemExtended(Page page,
+ 	}
+ 
+ 	/* Reject placing items beyond heap boundary, if heap */
+-	if ((flags & PAI_IS_HEAP) != 0 && offsetNumber > MaxHeapTuplesPerPage)
++	if ((flags & PAI_IS_HEAP) != 0 && offsetNumber > MaxHeapTuplesPerPage())
+ 	{
+-		elog(WARNING, "can't put more than MaxHeapTuplesPerPage items in a heap page");
++		elog(WARNING, "can't put more than MaxHeapTuplesPerPage() items in a heap page");
+ 		return InvalidOffsetNumber;
+ 	}
+ 
+@@ -702,7 +704,7 @@ PageRepairFragmentation(Page page)
+ 	Offset		pd_upper = ((PageHeader) page)->pd_upper;
+ 	Offset		pd_special = ((PageHeader) page)->pd_special;
+ 	Offset		last_offset;
+-	itemIdCompactData itemidbase[MaxHeapTuplesPerPage];
++	itemIdCompactData itemidbase[MaxHeapTuplesPerPageLimit];
+ 	itemIdCompact itemidptr;
+ 	ItemId		lp;
+ 	int			nline,
+@@ -723,7 +725,7 @@ PageRepairFragmentation(Page page)
+ 	if (pd_lower < SizeOfPageHeaderData ||
+ 		pd_lower > pd_upper ||
+ 		pd_upper > pd_special ||
+-		pd_special > BLCKSZ ||
++		pd_special + reserved_page_size > BLCKSZ ||
+ 		pd_special != MAXALIGN(pd_special))
+ 		ereport(ERROR,
+ 				(errcode(ERRCODE_DATA_CORRUPTED),
+@@ -979,12 +981,12 @@ PageGetExactFreeSpace(Page page)
+  *		reduced by the space needed for a new line pointer.
+  *
+  * The difference between this and PageGetFreeSpace is that this will return
+- * zero if there are already MaxHeapTuplesPerPage line pointers in the page
++ * zero if there are already MaxHeapTuplesPerPage() line pointers in the page
+  * and none are free.  We use this to enforce that no more than
+- * MaxHeapTuplesPerPage line pointers are created on a heap page.  (Although
++ * MaxHeapTuplesPerPage() line pointers are created on a heap page.  (Although
+  * no more tuples than that could fit anyway, in the presence of redirected
+  * or dead line pointers it'd be possible to have too many line pointers.
+- * To avoid breaking code that assumes MaxHeapTuplesPerPage is a hard limit
++ * To avoid breaking code that assumes MaxHeapTuplesPerPage() is a hard limit
+  * on the number of line pointers, we make this extra check.)
+  */
+ Size
+@@ -999,10 +1001,10 @@ PageGetHeapFreeSpace(Page page)
+ 					nline;
+ 
+ 		/*
+-		 * Are there already MaxHeapTuplesPerPage line pointers in the page?
++		 * Are there already MaxHeapTuplesPerPage() line pointers in the page?
+ 		 */
+ 		nline = PageGetMaxOffsetNumber(page);
+-		if (nline >= MaxHeapTuplesPerPage)
++		if (nline >= MaxHeapTuplesPerPage())
+ 		{
+ 			if (PageHasFreeLinePointers(page))
+ 			{
+@@ -1066,7 +1068,7 @@ PageIndexTupleDelete(Page page, OffsetNumber offnum)
+ 	if (phdr->pd_lower < SizeOfPageHeaderData ||
+ 		phdr->pd_lower > phdr->pd_upper ||
+ 		phdr->pd_upper > phdr->pd_special ||
+-		phdr->pd_special > BLCKSZ ||
++		phdr->pd_special + reserved_page_size > BLCKSZ ||
+ 		phdr->pd_special != MAXALIGN(phdr->pd_special))
+ 		ereport(ERROR,
+ 				(errcode(ERRCODE_DATA_CORRUPTED),
+@@ -1201,7 +1203,7 @@ PageIndexMultiDelete(Page page, OffsetNumber *itemnos, int nitems)
+ 	if (pd_lower < SizeOfPageHeaderData ||
+ 		pd_lower > pd_upper ||
+ 		pd_upper > pd_special ||
+-		pd_special > BLCKSZ ||
++		pd_special + reserved_page_size > BLCKSZ ||
+ 		pd_special != MAXALIGN(pd_special))
+ 		ereport(ERROR,
+ 				(errcode(ERRCODE_DATA_CORRUPTED),
+@@ -1307,7 +1309,7 @@ PageIndexTupleDeleteNoCompact(Page page, OffsetNumber offnum)
+ 	if (phdr->pd_lower < SizeOfPageHeaderData ||
+ 		phdr->pd_lower > phdr->pd_upper ||
+ 		phdr->pd_upper > phdr->pd_special ||
+-		phdr->pd_special > BLCKSZ ||
++		phdr->pd_special + reserved_page_size > BLCKSZ ||
+ 		phdr->pd_special != MAXALIGN(phdr->pd_special))
+ 		ereport(ERROR,
+ 				(errcode(ERRCODE_DATA_CORRUPTED),
+@@ -1419,7 +1421,7 @@ PageIndexTupleOverwrite(Page page, OffsetNumber offnum,
+ 	if (phdr->pd_lower < SizeOfPageHeaderData ||
+ 		phdr->pd_lower > phdr->pd_upper ||
+ 		phdr->pd_upper > phdr->pd_special ||
+-		phdr->pd_special > BLCKSZ ||
++		phdr->pd_special + reserved_page_size > BLCKSZ ||
+ 		phdr->pd_special != MAXALIGN(phdr->pd_special))
+ 		ereport(ERROR,
+ 				(errcode(ERRCODE_DATA_CORRUPTED),
+diff --git a/src/backend/utils/adt/tsgistidx.c b/src/backend/utils/adt/tsgistidx.c
+index f0cd2866ff..44e5a87595 100644
+--- a/src/backend/utils/adt/tsgistidx.c
++++ b/src/backend/utils/adt/tsgistidx.c
+@@ -209,7 +209,7 @@ gtsvector_compress(PG_FUNCTION_ARGS)
+ 		}
+ 
+ 		/* make signature, if array is too long */
+-		if (VARSIZE(res) > TOAST_INDEX_TARGET)
++		if (VARSIZE(res) > TOAST_INDEX_TARGET())
+ 		{
+ 			SignTSVector *ressign = gtsvector_alloc(SIGNKEY, siglen, NULL);
+ 
+diff --git a/src/backend/utils/init/globals.c b/src/backend/utils/init/globals.c
+index 011ec18015..022b5eee4e 100644
+--- a/src/backend/utils/init/globals.c
++++ b/src/backend/utils/init/globals.c
+@@ -154,3 +154,4 @@ int64		VacuumPageDirty = 0;
+ 
+ int			VacuumCostBalance = 0;	/* working state for vacuum */
+ bool		VacuumCostActive = false;
++
+diff --git a/src/backend/utils/misc/guc_tables.c b/src/backend/utils/misc/guc_tables.c
+index 2f42cebaf6..f3d5a73adc 100644
+--- a/src/backend/utils/misc/guc_tables.c
++++ b/src/backend/utils/misc/guc_tables.c
+@@ -2714,6 +2714,19 @@ struct config_int ConfigureNamesInt[] =
+ 		NULL, assign_max_wal_size, NULL
+ 	},
+ 
++	{
++		{"reserved_page_size", PGC_INTERNAL, PRESET_OPTIONS,
++			gettext_noop("Shows the size of reserved space for extended pages."),
++			NULL,
++			GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE
++			},
++		&reserved_page_size,
++		0,
++		0,
++		PG_UINT8_MAX,
++		NULL, NULL, NULL
++		},
++
+ 	{
+ 		{"checkpoint_timeout", PGC_SIGHUP, WAL_CHECKPOINTS,
+ 			gettext_noop("Sets the maximum time between automatic WAL checkpoints."),
+diff --git a/src/include/access/ginblock.h b/src/include/access/ginblock.h
+index c59790ec5a..5f6c375068 100644
+--- a/src/include/access/ginblock.h
++++ b/src/include/access/ginblock.h
+@@ -162,7 +162,7 @@ extern bool GinPageIsRecyclable(Page page);
+  *				pointers for that page
+  * Note that these are all distinguishable from an "invalid" item pointer
+  * (which is InvalidBlockNumber/0) as well as from all normal item
+- * pointers (which have item numbers in the range 1..MaxHeapTuplesPerPage).
++ * pointers (which have item numbers in the range 1..MaxHeapTuplesPerPage()).
+  */
+ #define ItemPointerSetMin(p)  \
+ 	ItemPointerSet((p), (BlockNumber)0, (OffsetNumber)0)
+@@ -246,7 +246,13 @@ typedef signed char GinNullCategory;
+  * currently store the high key explicitly, we just use the rightmost item on
+  * the page, so it would actually be enough to fit two items.)
+  */
+-#define GinMaxItemSize \
++#define GinMaxItemSize() \
++	Min(INDEX_SIZE_MASK, \
++		MAXALIGN_DOWN(((BLCKSZ - \
++						SizeOfPageReservedSpace() - \
++						MAXALIGN(SizeOfPageHeaderData + 3 * sizeof(ItemIdData)) - \
++						MAXALIGN(sizeof(GinPageOpaqueData))) / 3)))
++#define GinMaxItemSizeLimit \
+ 	Min(INDEX_SIZE_MASK, \
+ 		MAXALIGN_DOWN(((BLCKSZ - \
+ 						MAXALIGN(SizeOfPageHeaderData + 3 * sizeof(ItemIdData)) - \
+@@ -309,15 +315,20 @@ typedef signed char GinNullCategory;
+  */
+ #define GinDataPageSetDataSize(page, size) \
+ 	{ \
+-		Assert(size <= GinDataPageMaxDataSize); \
++		Assert(size <= GinDataPageMaxDataSize()); \
+ 		((PageHeader) page)->pd_lower = (size) + MAXALIGN(SizeOfPageHeaderData) + MAXALIGN(sizeof(ItemPointerData)); \
+ 	}
+ 
+ #define GinNonLeafDataPageGetFreeSpace(page)	\
+-	(GinDataPageMaxDataSize - \
++	(GinDataPageMaxDataSize() - \
+ 	 GinPageGetOpaque(page)->maxoff * sizeof(PostingItem))
+ 
+-#define GinDataPageMaxDataSize	\
++#define GinDataPageMaxDataSize()	\
++	(BLCKSZ - MAXALIGN(SizeOfPageHeaderData) \
++	 - SizeOfPageReservedSpace() \
++	 - MAXALIGN(sizeof(ItemPointerData)) \
++	 - MAXALIGN(sizeof(GinPageOpaqueData)))
++#define GinDataPageMaxDataSizeLimit	\
+ 	(BLCKSZ - MAXALIGN(SizeOfPageHeaderData) \
+ 	 - MAXALIGN(sizeof(ItemPointerData)) \
+ 	 - MAXALIGN(sizeof(GinPageOpaqueData)))
+@@ -325,8 +336,10 @@ typedef signed char GinNullCategory;
+ /*
+  * List pages
+  */
+-#define GinListPageSize  \
+-	( BLCKSZ - SizeOfPageHeaderData - MAXALIGN(sizeof(GinPageOpaqueData)) )
++#define GinListPageSize()  \
++	( BLCKSZ - SizeOfPageHeaderData - MAXALIGN(sizeof(GinPageOpaqueData)) - SizeOfPageReservedSpace())
++#define GinListPageSizeLimit  \
++	( BLCKSZ - SizeOfPageHeaderData - MAXALIGN(sizeof(GinPageOpaqueData)))
+ 
+ /*
+  * A compressed posting list.
+diff --git a/src/include/access/hash.h b/src/include/access/hash.h
+index 9e035270a1..32fef1fa56 100644
+--- a/src/include/access/hash.h
++++ b/src/include/access/hash.h
+@@ -287,6 +287,7 @@ typedef struct HashOptions
+ #define HashMaxItemSize(page) \
+ 	MAXALIGN_DOWN(PageGetPageSize(page) - \
+ 				  SizeOfPageHeaderData - \
++				  SizeOfPageReservedSpace() - \
+ 				  sizeof(ItemIdData) - \
+ 				  MAXALIGN(sizeof(HashPageOpaqueData)))
+ 
+@@ -318,7 +319,9 @@ typedef struct HashOptions
+ 
+ #define HashGetMaxBitmapSize(page) \
+ 	(PageGetPageSize((Page) page) - \
+-	 (MAXALIGN(SizeOfPageHeaderData) + MAXALIGN(sizeof(HashPageOpaqueData))))
++	 (MAXALIGN(SizeOfPageHeaderData) + \
++	  SizeOfPageReservedSpace() + \
++	  MAXALIGN(sizeof(HashPageOpaqueData))))
+ 
+ #define HashPageGetMeta(page) \
+ 	((HashMetaPage) PageGetContents(page))
+diff --git a/src/include/access/heapam.h b/src/include/access/heapam.h
+index faf5026519..644c03145b 100644
+--- a/src/include/access/heapam.h
++++ b/src/include/access/heapam.h
+@@ -75,7 +75,7 @@ typedef struct HeapScanDescData
+ 	/* these fields only used in page-at-a-time mode and for bitmap scans */
+ 	int			rs_cindex;		/* current tuple's index in vistuples */
+ 	int			rs_ntuples;		/* number of visible tuples on page */
+-	OffsetNumber rs_vistuples[MaxHeapTuplesPerPage];	/* their offsets */
++	OffsetNumber rs_vistuples[MaxHeapTuplesPerPageLimit];	/* their offsets */
+ }			HeapScanDescData;
+ typedef struct HeapScanDescData *HeapScanDesc;
+ 
+diff --git a/src/include/access/heaptoast.h b/src/include/access/heaptoast.h
+index 5c0a796f66..bad9ecb085 100644
+--- a/src/include/access/heaptoast.h
++++ b/src/include/access/heaptoast.h
+@@ -61,11 +61,11 @@
+ #define TOAST_TUPLE_TARGET_MAIN MaximumBytesPerTuple(TOAST_TUPLES_PER_PAGE_MAIN)
+ 
+ /*
+- * If an index value is larger than TOAST_INDEX_TARGET, we will try to
++ * If an index value is larger than TOAST_INDEX_TARGET(), we will try to
+  * compress it (we can't move it out-of-line, however).  Note that this
+  * number is per-datum, not per-tuple, for simplicity in index_form_tuple().
+  */
+-#define TOAST_INDEX_TARGET		(MaxHeapTupleSize / 16)
++#define TOAST_INDEX_TARGET()		(MaxHeapTupleSize() / 16)
+ 
+ /*
+  * When we store an oversize datum externally, we divide it into chunks
+diff --git a/src/include/access/htup_details.h b/src/include/access/htup_details.h
+index e01f4f35c8..01362da297 100644
+--- a/src/include/access/htup_details.h
++++ b/src/include/access/htup_details.h
+@@ -550,31 +550,51 @@ StaticAssertDecl(MaxOffsetNumber < SpecTokenOffsetNumber,
+ #define BITMAPLEN(NATTS)	(((int)(NATTS) + 7) / 8)
+ 
+ /*
+- * MaxHeapTupleSize is the maximum allowed size of a heap tuple, including
++ * MaxHeapTupleSize() is the maximum allowed size of a heap tuple, including
+  * header and MAXALIGN alignment padding.  Basically it's BLCKSZ minus the
+- * other stuff that has to be on a disk page.  Since heap pages use no
+- * "special space", there's no deduction for that.
++ * other stuff that has to be on a disk page.  We also include
++ * SizeOfPageReservedSpace() bytes in this calculation to account for page
++ * trailers.
++ *
++ * MaxHeapTupleSizeLimit is the maximum buffer-size required for any cluster,
++ * explicitly excluding the PageReservedSpace.  This is needed for any data
++ * structure which uses a fixed-size buffer, since compilers do not want a
++ * variable-sized array, and MaxHeapTupleSize() is now variable.
+  *
+  * NOTE: we allow for the ItemId that must point to the tuple, ensuring that
+  * an otherwise-empty page can indeed hold a tuple of this size.  Because
+  * ItemIds and tuples have different alignment requirements, don't assume that
+- * you can, say, fit 2 tuples of size MaxHeapTupleSize/2 on the same page.
++ * you can, say, fit 2 tuples of size MaxHeapTupleSize()/2 on the same page.
+  */
+-#define MaxHeapTupleSize  (BLCKSZ - MAXALIGN(SizeOfPageHeaderData + sizeof(ItemIdData)))
++#define MaxHeapTupleSize()  (BLCKSZ - MAXALIGN(SizeOfPageHeaderData + sizeof(ItemIdData) + SizeOfPageReservedSpace()))
++#define MaxHeapTupleSizeLimit  (BLCKSZ - MAXALIGN(SizeOfPageHeaderData + sizeof(ItemIdData)))
+ #define MinHeapTupleSize  MAXALIGN(SizeofHeapTupleHeader)
+ 
+ /*
+- * MaxHeapTuplesPerPage is an upper bound on the number of tuples that can
+- * fit on one heap page.  (Note that indexes could have more, because they
+- * use a smaller tuple header.)  We arrive at the divisor because each tuple
+- * must be maxaligned, and it must have an associated line pointer.
++ * MaxHeapTuplesPerPage() is an upper bound on the number of tuples that can fit
++ * on one heap page.  (Note that indexes could have more, because they use a
++ * smaller tuple header.)  We arrive at the divisor because each tuple must be
++ * maxaligned, and it must have an associated line pointer.  This is a dynamic
++ * value, accounting for PageReservedSpace on the end.
++ *
++ * MaxHeapTuplesPerPageLimit is this same limit, but discounting
++ * PageReservedSpace (which can be zero), so is appropriate for defining data
++ * structures which require fixed-size buffers.  Code should not assume
++ * MaxHeapTuplesPerPage() == MaxHeapTuplesPerPageLimit, so if iterating over
++ * such a structure, the *size* of the buffer should be
++ * MaxHeapTuplesPerPageLimit, but the limits of iteration should be
++ * MaxHeapTuplesPerPage(), implying that MaxHeapTuplesPerPage() <=
++ * MaxHeapTuplesPerPageLimit.
+  *
+  * Note: with HOT, there could theoretically be more line pointers (not actual
+  * tuples) than this on a heap page.  However we constrain the number of line
+  * pointers to this anyway, to avoid excessive line-pointer bloat and not
+  * require increases in the size of work arrays.
+  */
+-#define MaxHeapTuplesPerPage	\
++#define MaxHeapTuplesPerPage()	\
++	((int) ((BLCKSZ - SizeOfPageHeaderData - SizeOfPageReservedSpace()) / \
++			(MAXALIGN(SizeofHeapTupleHeader) + sizeof(ItemIdData))))
++#define MaxHeapTuplesPerPageLimit	\
+ 	((int) ((BLCKSZ - SizeOfPageHeaderData) / \
+ 			(MAXALIGN(SizeofHeapTupleHeader) + sizeof(ItemIdData))))
+ 
+diff --git a/src/include/access/nbtree.h b/src/include/access/nbtree.h
+index d684786095..3ccc3014b3 100644
+--- a/src/include/access/nbtree.h
++++ b/src/include/access/nbtree.h
+@@ -162,29 +162,43 @@ typedef struct BTMetaPageData
+  * attribute, which we account for here.
+  */
+ #define BTMaxItemSize(page) \
+-	(MAXALIGN_DOWN((PageGetPageSize(page) - \
++	(MAXALIGN_DOWN((PageGetPageSize(page) - SizeOfPageReservedSpace() - \
+ 					MAXALIGN(SizeOfPageHeaderData + 3*sizeof(ItemIdData)) - \
+ 					MAXALIGN(sizeof(BTPageOpaqueData))) / 3) - \
+ 					MAXALIGN(sizeof(ItemPointerData)))
+ #define BTMaxItemSizeNoHeapTid(page) \
+-	MAXALIGN_DOWN((PageGetPageSize(page) - \
++	MAXALIGN_DOWN((PageGetPageSize(page) - SizeOfPageReservedSpace() - \
+ 				   MAXALIGN(SizeOfPageHeaderData + 3*sizeof(ItemIdData)) - \
+ 				   MAXALIGN(sizeof(BTPageOpaqueData))) / 3)
+ 
+ /*
+- * MaxTIDsPerBTreePage is an upper bound on the number of heap TIDs tuples
+- * that may be stored on a btree leaf page.  It is used to size the
+- * per-page temporary buffers.
++ * MaxTIDsPerBTreePage() is an upper bound on the number of heap TIDs tuples
++ * that may be stored on a btree leaf page.  It is used to size the per-page
++ * temporary buffers.  This accounts for PageReservedSpace limit as well, so
++ * is a dynamic value depending on cluster settings.
++ *
++ * MaxTIDsPerBTreePageLimit is the same value without considering
++ * PageReservedSpace limit as well, so is used for fixed-size buffers, however
++ * code accessing these buffers should consider only MaxTIDsPerBTreePage() when
++ * iterating over then.
+  *
+  * Note: we don't bother considering per-tuple overheads here to keep
+  * things simple (value is based on how many elements a single array of
+  * heap TIDs must have to fill the space between the page header and
+  * special area).  The value is slightly higher (i.e. more conservative)
+  * than necessary as a result, which is considered acceptable.
++ *
++ * Since this is a fixed-size upper limit we restrict to the max size of page
++ * reserved space; this does mean that we pay a cost of
++ * (MaxSizeOfPageReservedSpace / sizeof(ItemPointerData)) less tuples stored
++ * on a page.
+  */
+-#define MaxTIDsPerBTreePage \
+-	(int) ((BLCKSZ - SizeOfPageHeaderData - sizeof(BTPageOpaqueData)) / \
+-		   sizeof(ItemPointerData))
++#define MaxTIDsPerBTreePage() \
++	(int) ((BLCKSZ - SizeOfPageHeaderData - SizeOfPageReservedSpace() - \
++			sizeof(BTPageOpaqueData)) / sizeof(ItemPointerData))
++#define MaxTIDsPerBTreePageLimit \
++	(int) ((BLCKSZ - SizeOfPageHeaderData - \
++			sizeof(BTPageOpaqueData)) / sizeof(ItemPointerData))
+ 
+ /*
+  * The leaf-page fillfactor defaults to 90% but is user-adjustable.
+@@ -984,7 +998,7 @@ typedef struct BTScanPosData
+ 	int			lastItem;		/* last valid index in items[] */
+ 	int			itemIndex;		/* current index in items[] */
+ 
+-	BTScanPosItem items[MaxTIDsPerBTreePage];	/* MUST BE LAST */
++	BTScanPosItem items[MaxTIDsPerBTreePageLimit];	/* MUST BE LAST */
+ } BTScanPosData;
+ 
+ typedef BTScanPosData *BTScanPos;
+diff --git a/src/include/access/spgist_private.h b/src/include/access/spgist_private.h
+index c6ef46fc20..22599d8d94 100644
+--- a/src/include/access/spgist_private.h
++++ b/src/include/access/spgist_private.h
+@@ -447,6 +447,7 @@ typedef SpGistDeadTupleData *SpGistDeadTuple;
+ #define SPGIST_PAGE_CAPACITY  \
+ 	MAXALIGN_DOWN(BLCKSZ - \
+ 				  SizeOfPageHeaderData - \
++				  SizeOfPageReservedSpace() - \
+ 				  MAXALIGN(sizeof(SpGistPageOpaqueData)))
+ 
+ /*
+diff --git a/src/include/storage/bufpage.h b/src/include/storage/bufpage.h
+index 424ecba028..18ebd3b3c7 100644
+--- a/src/include/storage/bufpage.h
++++ b/src/include/storage/bufpage.h
+@@ -19,6 +19,14 @@
+ #include "storage/item.h"
+ #include "storage/off.h"
+ 
++extern PGDLLIMPORT int reserved_page_size;
++
++#define SizeOfPageReservedSpace() reserved_page_size
++#define MaxSizeOfPageReservedSpace 0
++
++/* strict upper bound on the amount of space occupied we have reserved on
++ * pages in this cluster */
++
+ /*
+  * A postgres disk page is an abstraction layered on top of a postgres
+  * disk block (which is simply a unit of i/o, see block.h).
+@@ -36,10 +44,10 @@
+  * |			 v pd_upper							  |
+  * +-------------+------------------------------------+
+  * |			 | tupleN ...                         |
+- * +-------------+------------------+-----------------+
+- * |	   ... tuple3 tuple2 tuple1 | "special space" |
+- * +--------------------------------+-----------------+
+- *									^ pd_special
++ * +-------------+-----+------------+----+------------+
++ * | ... tuple2 tuple1 | "special space" | "reserved" |
++ * +-------------------+------------+----+------------+
++ *					   ^ pd_special      ^ reserved_page_space
+  *
+  * a page is full when nothing can be added between pd_lower and
+  * pd_upper.
+@@ -73,6 +81,8 @@
+  * stored as the page trailer.  an access method should always
+  * initialize its pages with PageInit and then set its own opaque
+  * fields.
++ *
++ * XXX - update more comments here about reserved_page_space
+  */
+ 
+ typedef Pointer Page;
+@@ -313,7 +323,7 @@ PageSetPageSizeAndVersion(Page page, Size size, uint8 version)
+ static inline uint16
+ PageGetSpecialSize(Page page)
+ {
+-	return (PageGetPageSize(page) - ((PageHeader) page)->pd_special);
++	return (PageGetPageSize(page) - ((PageHeader) page)->pd_special - reserved_page_size);
+ }
+ 
+ /*
+@@ -325,7 +335,7 @@ static inline void
+ PageValidateSpecialPointer(Page page)
+ {
+ 	Assert(page);
+-	Assert(((PageHeader) page)->pd_special <= BLCKSZ);
++	Assert((((PageHeader) page)->pd_special + reserved_page_size) <= BLCKSZ);
+ 	Assert(((PageHeader) page)->pd_special >= SizeOfPageHeaderData);
+ }
+ 
+diff --git a/src/test/modules/test_ginpostinglist/test_ginpostinglist.c b/src/test/modules/test_ginpostinglist/test_ginpostinglist.c
+index 80cee65684..6a6fdb40fd 100644
+--- a/src/test/modules/test_ginpostinglist/test_ginpostinglist.c
++++ b/src/test/modules/test_ginpostinglist/test_ginpostinglist.c
+@@ -88,9 +88,9 @@ Datum
+ test_ginpostinglist(PG_FUNCTION_ARGS)
+ {
+ 	test_itemptr_pair(0, 2, 14);
+-	test_itemptr_pair(0, MaxHeapTuplesPerPage, 14);
+-	test_itemptr_pair(MaxBlockNumber, MaxHeapTuplesPerPage, 14);
+-	test_itemptr_pair(MaxBlockNumber, MaxHeapTuplesPerPage, 16);
++	test_itemptr_pair(0, MaxHeapTuplesPerPage(), 14);
++	test_itemptr_pair(MaxBlockNumber, MaxHeapTuplesPerPage(), 14);
++	test_itemptr_pair(MaxBlockNumber, MaxHeapTuplesPerPage(), 16);
+ 
+ 	PG_RETURN_VOID();
+ }
+diff --git a/src/test/regress/expected/insert.out b/src/test/regress/expected/insert.out
+index dd4354fc7d..b530ac0038 100644
+--- a/src/test/regress/expected/insert.out
++++ b/src/test/regress/expected/insert.out
+@@ -86,7 +86,7 @@ drop table inserttest;
+ --
+ CREATE TABLE large_tuple_test (a int, b text) WITH (fillfactor = 10);
+ ALTER TABLE large_tuple_test ALTER COLUMN b SET STORAGE plain;
+--- create page w/ free space in range [nearlyEmptyFreeSpace, MaxHeapTupleSize)
++-- create page w/ free space in range [nearlyEmptyFreeSpace, MaxHeapTupleSize())
+ INSERT INTO large_tuple_test (select 1, NULL);
+ -- should still fit on the page
+ INSERT INTO large_tuple_test (select 2, repeat('a', 1000));
+@@ -100,7 +100,7 @@ SELECT pg_size_pretty(pg_relation_size('large_tuple_test'::regclass, 'main'));
+ INSERT INTO large_tuple_test (select 3, NULL);
+ -- now this tuple won't fit on the second page, but the insert should
+ -- still succeed by extending the relation
+-INSERT INTO large_tuple_test (select 4, repeat('a', 8126));
++INSERT INTO large_tuple_test (select 4, repeat('a', 8062));
+ DROP TABLE large_tuple_test;
+ --
+ -- check indirection (field/array assignment), cf bug #14265
+diff --git a/src/test/regress/expected/vacuum.out b/src/test/regress/expected/vacuum.out
+index 41e020cf20..7cd7761367 100644
+--- a/src/test/regress/expected/vacuum.out
++++ b/src/test/regress/expected/vacuum.out
+@@ -134,7 +134,7 @@ CREATE TABLE no_index_cleanup (i INT PRIMARY KEY, t TEXT);
+ CREATE INDEX no_index_cleanup_idx ON no_index_cleanup(t);
+ ALTER TABLE no_index_cleanup ALTER COLUMN t SET STORAGE EXTERNAL;
+ INSERT INTO no_index_cleanup(i, t) VALUES (generate_series(1,30),
+-    repeat('1234567890',269));
++    repeat('1234567890',266));
+ -- index cleanup option is ignored if VACUUM FULL
+ VACUUM (INDEX_CLEANUP TRUE, FULL TRUE) no_index_cleanup;
+ VACUUM (FULL TRUE) no_index_cleanup;
+@@ -150,7 +150,7 @@ ALTER TABLE no_index_cleanup SET (vacuum_index_cleanup = auto);
+ VACUUM no_index_cleanup;
+ -- Parameter is set for both the parent table and its toast relation.
+ INSERT INTO no_index_cleanup(i, t) VALUES (generate_series(31,60),
+-    repeat('1234567890',269));
++    repeat('1234567890',266));
+ DELETE FROM no_index_cleanup WHERE i < 45;
+ -- Only toast index is cleaned up.
+ ALTER TABLE no_index_cleanup SET (vacuum_index_cleanup = off,
+diff --git a/src/test/regress/sql/insert.sql b/src/test/regress/sql/insert.sql
+index bdcffd0314..0e31dcd1f8 100644
+--- a/src/test/regress/sql/insert.sql
++++ b/src/test/regress/sql/insert.sql
+@@ -43,7 +43,7 @@ drop table inserttest;
+ CREATE TABLE large_tuple_test (a int, b text) WITH (fillfactor = 10);
+ ALTER TABLE large_tuple_test ALTER COLUMN b SET STORAGE plain;
+ 
+--- create page w/ free space in range [nearlyEmptyFreeSpace, MaxHeapTupleSize)
++-- create page w/ free space in range [nearlyEmptyFreeSpace, MaxHeapTupleSize())
+ INSERT INTO large_tuple_test (select 1, NULL);
+ 
+ -- should still fit on the page
+@@ -55,7 +55,7 @@ INSERT INTO large_tuple_test (select 3, NULL);
+ 
+ -- now this tuple won't fit on the second page, but the insert should
+ -- still succeed by extending the relation
+-INSERT INTO large_tuple_test (select 4, repeat('a', 8126));
++INSERT INTO large_tuple_test (select 4, repeat('a', 8062));
+ 
+ DROP TABLE large_tuple_test;
+ 
+diff --git a/src/test/regress/sql/vacuum.sql b/src/test/regress/sql/vacuum.sql
+index 51d7b1fecc..391b2d70d0 100644
+--- a/src/test/regress/sql/vacuum.sql
++++ b/src/test/regress/sql/vacuum.sql
+@@ -115,7 +115,7 @@ CREATE TABLE no_index_cleanup (i INT PRIMARY KEY, t TEXT);
+ CREATE INDEX no_index_cleanup_idx ON no_index_cleanup(t);
+ ALTER TABLE no_index_cleanup ALTER COLUMN t SET STORAGE EXTERNAL;
+ INSERT INTO no_index_cleanup(i, t) VALUES (generate_series(1,30),
+-    repeat('1234567890',269));
++    repeat('1234567890',266));
+ -- index cleanup option is ignored if VACUUM FULL
+ VACUUM (INDEX_CLEANUP TRUE, FULL TRUE) no_index_cleanup;
+ VACUUM (FULL TRUE) no_index_cleanup;
+@@ -131,7 +131,7 @@ ALTER TABLE no_index_cleanup SET (vacuum_index_cleanup = auto);
+ VACUUM no_index_cleanup;
+ -- Parameter is set for both the parent table and its toast relation.
+ INSERT INTO no_index_cleanup(i, t) VALUES (generate_series(31,60),
+-    repeat('1234567890',269));
++    repeat('1234567890',266));
+ DELETE FROM no_index_cleanup WHERE i < 45;
+ -- Only toast index is cleaned up.
+ ALTER TABLE no_index_cleanup SET (vacuum_index_cleanup = off,
+-- 
+2.39.2
+

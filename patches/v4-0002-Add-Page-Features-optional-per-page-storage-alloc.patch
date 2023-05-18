@@ -1,0 +1,1356 @@
+From 09c8091c493e1f11d345ade5edeff2bf6fbf2483 Mon Sep 17 00:00:00 2001
+From: David Christensen <david@pgguru.net>
+Date: Tue, 9 May 2023 16:56:15 -0500
+Subject: [PATCH v4 2/3] Add Page Features: optional per-page storage
+ allocations
+
+Page Features are optional sets of storage allocated from the trailer of a disk
+page.  While the current approach is handled at a cluster level, using a Page
+Feature Set defined at bootstrap time, the design is granular enough that
+specific features could be used on given classes of relations or even specific
+relations.
+
+The API design merges the test for a given feature with the return of the
+address of the feature's storage on the page, which simplifies code that tests
+and then does something with the resulting space on the page.  For instance,
+with a page feature that stores 8 bytes as a page checksum, the test for such a
+feature might be implemented as:
+
+    char *extended_checksum_loc = NULL;
+
+    /* are we using extended checksums? */
+    if ((extended_checksum_loc = PageGetFeatureOffset(page, PF_EXT_CHECKSUMS)))
+    {
+        /* 64-bit checksum */
+        page_checksum = pg_get_checksum64_page(page, (uint64*)extended_checksum_loc);
+        checksum = pg_checksum64_page(page, blkno + segmentno * RELSEG_SIZE, (uint64*)extended_checksum_loc);
+    }
+    else
+    {
+        phdr = (PageHeader) page;
+        page_checksum = phdr->pd_feat.checksum;
+        checksum = pg_checksum_page(page, blkno + segmentno * RELSEG_SIZE);
+    }
+
+The page features are named, fixed size, and consistently offset so a cluster
+that is created with the same options could use pg_upgrade for future versions,
+similar to how data checksums are currently utilized.
+
+The code overrides the interpretation of the pd_checksum field only when a
+specific page flag is on the page, meaning that this code is
+backwards-compatible with both checksum-enabled and -disabled historical
+clusters, as well as forward-compatible with the development of additional page
+features in future versions.
+---
+ contrib/bloom/blutils.c                   |   2 +-
+ contrib/pageinspect/rawpage.c             |   2 +-
+ doc/src/sgml/storage.sgml                 |   4 +-
+ src/backend/access/brin/brin_bloom.c      |   1 +
+ src/backend/access/brin/brin_pageops.c    |   2 +-
+ src/backend/access/common/bufmask.c       |   3 +-
+ src/backend/access/gin/ginutil.c          |   2 +-
+ src/backend/access/gist/gistutil.c        |   2 +-
+ src/backend/access/hash/hashpage.c        |   2 +-
+ src/backend/access/heap/heapam.c          |   8 +-
+ src/backend/access/heap/hio.c             |   4 +-
+ src/backend/access/heap/rewriteheap.c     |   2 +-
+ src/backend/access/heap/visibilitymap.c   |   2 +-
+ src/backend/access/nbtree/nbtpage.c       |   2 +-
+ src/backend/access/spgist/spgutils.c      |   2 +-
+ src/backend/access/transam/xlog.c         |  10 ++
+ src/backend/backup/basebackup.c           |   4 +-
+ src/backend/bootstrap/bootstrap.c         |  19 ++-
+ src/backend/commands/sequence.c           |   4 +-
+ src/backend/storage/freespace/freespace.c |   4 +-
+ src/backend/storage/page/README           | 163 +++++++++++++++++++++-
+ src/backend/storage/page/bufpage.c        |  39 ++++--
+ src/bin/initdb/initdb.c                   |   5 +
+ src/bin/pg_checksums/pg_checksums.c       |  11 +-
+ src/bin/pg_controldata/pg_controldata.c   |   3 +
+ src/bin/pg_upgrade/file.c                 |   2 +-
+ src/common/Makefile                       |   1 +
+ src/common/meson.build                    |   1 +
+ src/common/pagefeat.c                     | 140 +++++++++++++++++++
+ src/include/access/htup_details.h         |   1 +
+ src/include/catalog/pg_control.h          |   5 +-
+ src/include/common/pagefeat.h             |  56 ++++++++
+ src/include/storage/bufmgr.h              |   1 +
+ src/include/storage/bufpage.h             |  65 ++++++---
+ src/include/storage/checksum_impl.h       |  19 +--
+ src/test/perl/PostgreSQL/Test/Cluster.pm  |   2 +
+ src/tools/msvc/Mkvcbuild.pm               |   2 +-
+ 37 files changed, 519 insertions(+), 78 deletions(-)
+ create mode 100644 src/common/pagefeat.c
+ create mode 100644 src/include/common/pagefeat.h
+
+diff --git a/contrib/bloom/blutils.c b/contrib/bloom/blutils.c
+index d3d74a9d28..cc8c6eef4e 100644
+--- a/contrib/bloom/blutils.c
++++ b/contrib/bloom/blutils.c
+@@ -400,7 +400,7 @@ BloomInitPage(Page page, uint16 flags)
+ {
+ 	BloomPageOpaque opaque;
+ 
+-	PageInit(page, BLCKSZ, sizeof(BloomPageOpaqueData));
++	PageInit(page, BLCKSZ, sizeof(BloomPageOpaqueData), cluster_page_features);
+ 
+ 	opaque = BloomPageGetOpaque(page);
+ 	opaque->flags = flags;
+diff --git a/contrib/pageinspect/rawpage.c b/contrib/pageinspect/rawpage.c
+index b25a63cbd6..98f8a63086 100644
+--- a/contrib/pageinspect/rawpage.c
++++ b/contrib/pageinspect/rawpage.c
+@@ -284,7 +284,7 @@ page_header(PG_FUNCTION_ARGS)
+ 	}
+ 	else
+ 		values[0] = LSNGetDatum(lsn);
+-	values[1] = UInt16GetDatum(pageheader->pd_checksum);
++	values[1] = UInt16GetDatum(pageheader->pd_feat.checksum);
+ 	values[2] = UInt16GetDatum(pageheader->pd_flags);
+ 
+ 	/* pageinspect >= 1.10 uses int4 instead of int2 for those fields */
+diff --git a/doc/src/sgml/storage.sgml b/doc/src/sgml/storage.sgml
+index e5b9f3f1ff..86cfc4d8a2 100644
+--- a/doc/src/sgml/storage.sgml
++++ b/doc/src/sgml/storage.sgml
+@@ -839,10 +839,10 @@ data. Empty in ordinary tables.</entry>
+    to this page</entry>
+   </row>
+   <row>
+-   <entry>pd_checksum</entry>
++   <entry>pd_feat</entry>
+    <entry>uint16</entry>
+    <entry>2 bytes</entry>
+-   <entry>Page checksum</entry>
++   <entry>Page checksum or Page Features</entry>
+   </row>
+   <row>
+    <entry>pd_flags</entry>
+diff --git a/src/backend/access/brin/brin_bloom.c b/src/backend/access/brin/brin_bloom.c
+index 5bc0166fb8..1d7c5c34d3 100644
+--- a/src/backend/access/brin/brin_bloom.c
++++ b/src/backend/access/brin/brin_bloom.c
+@@ -125,6 +125,7 @@
+ #include "access/stratnum.h"
+ #include "catalog/pg_type.h"
+ #include "catalog/pg_amop.h"
++#include "common/pagefeat.h"
+ #include "utils/builtins.h"
+ #include "utils/datum.h"
+ #include "utils/lsyscache.h"
+diff --git a/src/backend/access/brin/brin_pageops.c b/src/backend/access/brin/brin_pageops.c
+index b578d25954..008e83d2ec 100644
+--- a/src/backend/access/brin/brin_pageops.c
++++ b/src/backend/access/brin/brin_pageops.c
+@@ -475,7 +475,7 @@ brin_doinsert(Relation idxrel, BlockNumber pagesPerRange,
+ void
+ brin_page_init(Page page, uint16 type)
+ {
+-	PageInit(page, BLCKSZ, sizeof(BrinSpecialSpace));
++	PageInit(page, BLCKSZ, sizeof(BrinSpecialSpace), cluster_page_features);
+ 
+ 	BrinPageType(page) = type;
+ }
+diff --git a/src/backend/access/common/bufmask.c b/src/backend/access/common/bufmask.c
+index 5e392dab1e..3f1fdb3c0d 100644
+--- a/src/backend/access/common/bufmask.c
++++ b/src/backend/access/common/bufmask.c
+@@ -33,7 +33,8 @@ mask_page_lsn_and_checksum(Page page)
+ 	PageHeader	phdr = (PageHeader) page;
+ 
+ 	PageXLogRecPtrSet(phdr->pd_lsn, (uint64) MASK_MARKER);
+-	phdr->pd_checksum = MASK_MARKER;
++	if (!(phdr->pd_flags & PD_EXTENDED_FEATS))
++		phdr->pd_feat.checksum = MASK_MARKER;
+ }
+ 
+ /*
+diff --git a/src/backend/access/gin/ginutil.c b/src/backend/access/gin/ginutil.c
+index 437f24753c..9d6a09d9ef 100644
+--- a/src/backend/access/gin/ginutil.c
++++ b/src/backend/access/gin/ginutil.c
+@@ -338,7 +338,7 @@ GinInitPage(Page page, uint32 f, Size pageSize)
+ {
+ 	GinPageOpaque opaque;
+ 
+-	PageInit(page, pageSize, sizeof(GinPageOpaqueData));
++	PageInit(page, pageSize, sizeof(GinPageOpaqueData), cluster_page_features);
+ 
+ 	opaque = GinPageGetOpaque(page);
+ 	opaque->flags = f;
+diff --git a/src/backend/access/gist/gistutil.c b/src/backend/access/gist/gistutil.c
+index f9f51152b8..4cfc353210 100644
+--- a/src/backend/access/gist/gistutil.c
++++ b/src/backend/access/gist/gistutil.c
+@@ -758,7 +758,7 @@ gistinitpage(Page page, uint32 f)
+ {
+ 	GISTPageOpaque opaque;
+ 
+-	PageInit(page, BLCKSZ, sizeof(GISTPageOpaqueData));
++	PageInit(page, BLCKSZ, sizeof(GISTPageOpaqueData), cluster_page_features);
+ 
+ 	opaque = GistPageGetOpaque(page);
+ 	opaque->rightlink = InvalidBlockNumber;
+diff --git a/src/backend/access/hash/hashpage.c b/src/backend/access/hash/hashpage.c
+index af3a154266..6c28db421b 100644
+--- a/src/backend/access/hash/hashpage.c
++++ b/src/backend/access/hash/hashpage.c
+@@ -595,7 +595,7 @@ _hash_init_metabuffer(Buffer buf, double num_tuples, RegProcedure procid,
+ void
+ _hash_pageinit(Page page, Size size)
+ {
+-	PageInit(page, size, sizeof(HashPageOpaqueData));
++	PageInit(page, size, sizeof(HashPageOpaqueData), cluster_page_features);
+ }
+ 
+ /*
+diff --git a/src/backend/access/heap/heapam.c b/src/backend/access/heap/heapam.c
+index 12e8baf93c..4429b77747 100644
+--- a/src/backend/access/heap/heapam.c
++++ b/src/backend/access/heap/heapam.c
+@@ -9019,7 +9019,7 @@ heap_xlog_visible(XLogReaderState *record)
+ 
+ 		/* initialize the page if it was read as zeros */
+ 		if (PageIsNew(vmpage))
+-			PageInit(vmpage, BLCKSZ, 0);
++			PageInit(vmpage, BLCKSZ, 0, cluster_page_features);
+ 
+ 		/* remove VISIBILITYMAP_XLOG_* */
+ 		vmbits = xlrec->flags & VISIBILITYMAP_VALID_BITS;
+@@ -9259,7 +9259,7 @@ heap_xlog_insert(XLogReaderState *record)
+ 	{
+ 		buffer = XLogInitBufferForRedo(record, 0);
+ 		page = BufferGetPage(buffer);
+-		PageInit(page, BufferGetPageSize(buffer), 0);
++		PageInit(page, BufferGetPageSize(buffer), 0, cluster_page_features);
+ 		action = BLK_NEEDS_REDO;
+ 	}
+ 	else
+@@ -9383,7 +9383,7 @@ heap_xlog_multi_insert(XLogReaderState *record)
+ 	{
+ 		buffer = XLogInitBufferForRedo(record, 0);
+ 		page = BufferGetPage(buffer);
+-		PageInit(page, BufferGetPageSize(buffer), 0);
++		PageInit(page, BufferGetPageSize(buffer), 0, cluster_page_features);
+ 		action = BLK_NEEDS_REDO;
+ 	}
+ 	else
+@@ -9601,7 +9601,7 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
+ 	{
+ 		nbuffer = XLogInitBufferForRedo(record, 0);
+ 		page = (Page) BufferGetPage(nbuffer);
+-		PageInit(page, BufferGetPageSize(nbuffer), 0);
++		PageInit(page, BufferGetPageSize(nbuffer), 0, cluster_page_features);
+ 		newaction = BLK_NEEDS_REDO;
+ 	}
+ 	else
+diff --git a/src/backend/access/heap/hio.c b/src/backend/access/heap/hio.c
+index 3ce357897c..f3c9acaeab 100644
+--- a/src/backend/access/heap/hio.c
++++ b/src/backend/access/heap/hio.c
+@@ -343,7 +343,7 @@ RelationAddBlocks(Relation relation, BulkInsertState bistate,
+ 			 first_block,
+ 			 RelationGetRelationName(relation));
+ 
+-	PageInit(page, BufferGetPageSize(buffer), 0);
++	PageInit(page, BufferGetPageSize(buffer), 0, cluster_page_features);
+ 	MarkBufferDirty(buffer);
+ 
+ 	/*
+@@ -677,7 +677,7 @@ loop:
+ 		 */
+ 		if (PageIsNew(page))
+ 		{
+-			PageInit(page, BufferGetPageSize(buffer), 0);
++			PageInit(page, BufferGetPageSize(buffer), 0, cluster_page_features);
+ 			MarkBufferDirty(buffer);
+ 		}
+ 
+diff --git a/src/backend/access/heap/rewriteheap.c b/src/backend/access/heap/rewriteheap.c
+index adc4cf9af7..72f9adc1cd 100644
+--- a/src/backend/access/heap/rewriteheap.c
++++ b/src/backend/access/heap/rewriteheap.c
+@@ -702,7 +702,7 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
+ 	if (!state->rs_buffer_valid)
+ 	{
+ 		/* Initialize a new empty page */
+-		PageInit(page, BLCKSZ, 0);
++		PageInit(page, BLCKSZ, 0, cluster_page_features);
+ 		state->rs_buffer_valid = true;
+ 	}
+ 
+diff --git a/src/backend/access/heap/visibilitymap.c b/src/backend/access/heap/visibilitymap.c
+index ac91d1a14d..3dbc022611 100644
+--- a/src/backend/access/heap/visibilitymap.c
++++ b/src/backend/access/heap/visibilitymap.c
+@@ -613,7 +613,7 @@ vm_readbuf(Relation rel, BlockNumber blkno, bool extend)
+ 	{
+ 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+ 		if (PageIsNew(BufferGetPage(buf)))
+-			PageInit(BufferGetPage(buf), BLCKSZ, 0);
++			PageInit(BufferGetPage(buf), BLCKSZ, 0, cluster_page_features);
+ 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+ 	}
+ 	return buf;
+diff --git a/src/backend/access/nbtree/nbtpage.c b/src/backend/access/nbtree/nbtpage.c
+index 41aa1c4ccd..f91b88e6b5 100644
+--- a/src/backend/access/nbtree/nbtpage.c
++++ b/src/backend/access/nbtree/nbtpage.c
+@@ -1125,7 +1125,7 @@ _bt_upgradelockbufcleanup(Relation rel, Buffer buf)
+ void
+ _bt_pageinit(Page page, Size size)
+ {
+-	PageInit(page, size, sizeof(BTPageOpaqueData));
++	PageInit(page, size, sizeof(BTPageOpaqueData), cluster_page_features);
+ }
+ 
+ /*
+diff --git a/src/backend/access/spgist/spgutils.c b/src/backend/access/spgist/spgutils.c
+index 190e4f76a9..9c88534d69 100644
+--- a/src/backend/access/spgist/spgutils.c
++++ b/src/backend/access/spgist/spgutils.c
+@@ -681,7 +681,7 @@ SpGistInitPage(Page page, uint16 f)
+ {
+ 	SpGistPageOpaque opaque;
+ 
+-	PageInit(page, BLCKSZ, sizeof(SpGistPageOpaqueData));
++	PageInit(page, BLCKSZ, sizeof(SpGistPageOpaqueData), cluster_page_features);
+ 	opaque = SpGistPageGetOpaque(page);
+ 	opaque->flags = f;
+ 	opaque->spgist_page_id = SPGIST_PAGE_ID;
+diff --git a/src/backend/access/transam/xlog.c b/src/backend/access/transam/xlog.c
+index bc5a8e0569..bdc0d08ae5 100644
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -69,6 +69,7 @@
+ #include "catalog/pg_database.h"
+ #include "common/controldata_utils.h"
+ #include "common/file_utils.h"
++#include "common/pagefeat.h"
+ #include "executor/instrument.h"
+ #include "miscadmin.h"
+ #include "pg_trace.h"
+@@ -89,6 +90,7 @@
+ #include "storage/ipc.h"
+ #include "storage/large_object.h"
+ #include "storage/latch.h"
++#include "common/pagefeat.h"
+ #include "storage/pmsignal.h"
+ #include "storage/predicate.h"
+ #include "storage/proc.h"
+@@ -109,6 +111,7 @@
+ #include "utils/varlena.h"
+ 
+ extern uint32 bootstrap_data_checksum_version;
++extern PageFeatureSet bootstrap_page_features;
+ 
+ /* timeline ID to be used when bootstrapping */
+ #define BootstrapTimeLineID		1
+@@ -3883,6 +3886,7 @@ InitControlFile(uint64 sysidentifier)
+ 	ControlFile->wal_log_hints = wal_log_hints;
+ 	ControlFile->track_commit_timestamp = track_commit_timestamp;
+ 	ControlFile->data_checksum_version = bootstrap_data_checksum_version;
++	ControlFile->page_features = bootstrap_page_features;
+ }
+ 
+ static void
+@@ -4158,9 +4162,15 @@ ReadControlFile(void)
+ 
+ 	CalculateCheckpointSegments();
+ 
++	/* set our page-level space reservation from ControlFile if any extended feature flags are set*/
++	reserved_page_size = PageFeatureSetCalculateSize(ControlFile->page_features);
++	Assert(reserved_page_size == MAXALIGN(reserved_page_size));
++
+ 	/* Make the initdb settings visible as GUC variables, too */
+ 	SetConfigOption("data_checksums", DataChecksumsEnabled() ? "yes" : "no",
+ 					PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
++
++	SetExtendedFeatureConfigOptions(ControlFile->page_features);
+ }
+ 
+ /*
+diff --git a/src/backend/backup/basebackup.c b/src/backend/backup/basebackup.c
+index 5baea7535b..7a7dc9f80d 100644
+--- a/src/backend/backup/basebackup.c
++++ b/src/backend/backup/basebackup.c
+@@ -1596,7 +1596,7 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
+ 				{
+ 					checksum = pg_checksum_page((char *) page, blkno + segmentno * RELSEG_SIZE);
+ 					phdr = (PageHeader) page;
+-					if (phdr->pd_checksum != checksum)
++					if (phdr->pd_feat.checksum != checksum)
+ 					{
+ 						/*
+ 						 * Retry the block on the first failure.  It's
+@@ -1659,7 +1659,7 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
+ 											"file \"%s\", block %u: calculated "
+ 											"%X but expected %X",
+ 											readfilename, blkno, checksum,
+-											phdr->pd_checksum)));
++											phdr->pd_feat.checksum)));
+ 						if (checksum_failures == 5)
+ 							ereport(WARNING,
+ 									(errmsg("further checksum verification "
+diff --git a/src/backend/bootstrap/bootstrap.c b/src/backend/bootstrap/bootstrap.c
+index 49e956b2c5..b66f24b47e 100644
+--- a/src/backend/bootstrap/bootstrap.c
++++ b/src/backend/bootstrap/bootstrap.c
+@@ -46,7 +46,7 @@
+ #include "utils/relmapper.h"
+ 
+ uint32		bootstrap_data_checksum_version = 0;	/* No checksum */
+-
++PageFeatureSet bootstrap_page_features = 0;			/* No special features */
+ 
+ static void CheckerModeMain(void);
+ static void bootstrap_signals(void);
+@@ -221,7 +221,7 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
+ 	argv++;
+ 	argc--;
+ 
+-	while ((flag = getopt(argc, argv, "B:c:d:D:Fkr:X:-:")) != -1)
++	while ((flag = getopt(argc, argv, "B:c:d:D:e:Fkr:X:-:")) != -1)
+ 	{
+ 		switch (flag)
+ 		{
+@@ -270,6 +270,19 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
+ 					pfree(debugstr);
+ 				}
+ 				break;
++			case 'e':
++				{
++					/* enable specific features */
++					PageFeatureSet features_tmp;
++
++					features_tmp = PageFeatureSetAddFeatureByName(bootstrap_page_features, optarg);
++					if (features_tmp == bootstrap_page_features)
++						ereport(ERROR,
++								(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
++								 errmsg("Unrecognized page feature requested: \"%s\"", optarg)));
++					bootstrap_page_features = features_tmp;
++				}
++				break;
+ 			case 'F':
+ 				SetConfigOption("fsync", "false", PGC_POSTMASTER, PGC_S_ARGV);
+ 				break;
+@@ -299,6 +312,8 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
+ 		}
+ 	}
+ 
++	ClusterPageFeatureInit(bootstrap_page_features);
++
+ 	if (argc != optind)
+ 	{
+ 		write_stderr("%s: invalid command-line arguments\n", progname);
+diff --git a/src/backend/commands/sequence.c b/src/backend/commands/sequence.c
+index ef01449678..83610bf6c0 100644
+--- a/src/backend/commands/sequence.c
++++ b/src/backend/commands/sequence.c
+@@ -383,7 +383,7 @@ fill_seq_fork_with_data(Relation rel, HeapTuple tuple, ForkNumber forkNum)
+ 
+ 	page = BufferGetPage(buf);
+ 
+-	PageInit(page, BufferGetPageSize(buf), sizeof(sequence_magic));
++	PageInit(page, BufferGetPageSize(buf), sizeof(sequence_magic), cluster_page_features);
+ 	sm = (sequence_magic *) PageGetSpecialPointer(page);
+ 	sm->magic = SEQ_MAGIC;
+ 
+@@ -1855,7 +1855,7 @@ seq_redo(XLogReaderState *record)
+ 	 */
+ 	localpage = (Page) palloc(BufferGetPageSize(buffer));
+ 
+-	PageInit(localpage, BufferGetPageSize(buffer), sizeof(sequence_magic));
++	PageInit(localpage, BufferGetPageSize(buffer), sizeof(sequence_magic), cluster_page_features);
+ 	sm = (sequence_magic *) PageGetSpecialPointer(localpage);
+ 	sm->magic = SEQ_MAGIC;
+ 
+diff --git a/src/backend/storage/freespace/freespace.c b/src/backend/storage/freespace/freespace.c
+index 2260532fbb..2a72b9a728 100644
+--- a/src/backend/storage/freespace/freespace.c
++++ b/src/backend/storage/freespace/freespace.c
+@@ -217,7 +217,7 @@ XLogRecordPageWithFreeSpace(RelFileLocator rlocator, BlockNumber heapBlk,
+ 
+ 	page = BufferGetPage(buf);
+ 	if (PageIsNew(page))
+-		PageInit(page, BLCKSZ, 0);
++		PageInit(page, BLCKSZ, 0, cluster_page_features);
+ 
+ 	if (fsm_set_avail(page, slot, new_cat))
+ 		MarkBufferDirtyHint(buf, false);
+@@ -598,7 +598,7 @@ fsm_readbuf(Relation rel, FSMAddress addr, bool extend)
+ 	{
+ 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+ 		if (PageIsNew(BufferGetPage(buf)))
+-			PageInit(BufferGetPage(buf), BLCKSZ, 0);
++			PageInit(BufferGetPage(buf), BLCKSZ, 0, cluster_page_features);
+ 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+ 	}
+ 	return buf;
+diff --git a/src/backend/storage/page/README b/src/backend/storage/page/README
+index e30d7ac59a..95e61ef25a 100644
+--- a/src/backend/storage/page/README
++++ b/src/backend/storage/page/README
+@@ -3,6 +3,11 @@ src/backend/storage/page/README
+ Checksums
+ ---------
+ 
++Note: The description of the page checksums described in this section are
++relevant only when the database cluster has been initialized without page
++features; see the section on Page Features below for full details on
++interpretation.
++
+ Checksums on data pages are designed to detect corruption by the I/O system.
+ We do not protect buffers against uncorrectable memory errors, since these
+ have a very low measured incidence according to research on large server farms,
+@@ -19,7 +24,7 @@ We set the checksum on a buffer in the shared pool immediately before we
+ flush the buffer. As a result we implicitly invalidate the page's checksum
+ when we modify the page for a data change or even a hint. This means that
+ many or even most pages in shared buffers have invalid page checksums,
+-so be careful how you interpret the pd_checksum field.
++so be careful how you interpret the pd_feat.checksum field.
+ 
+ That means that WAL-logged changes to a page do NOT update the page checksum,
+ so full page images may not have a valid checksum. But those page images have
+@@ -62,3 +67,159 @@ checksums are enabled.  Systems in Hot-Standby mode may benefit from hint bits
+ being set, but with checksums enabled, a page cannot be dirtied after setting a
+ hint bit (due to the torn page risk). So, it must wait for full-page images
+ containing the hint bit updates to arrive from the primary.
++
++
++Page Features
++-------------
++
++As described above, the use and interpretation of checksums on the page level
++are conditional depending on whether any Page Features had been enabled at
++initdb time.
++
++A Page Feature is an optional boolean parameter that will allocate a fixed-size
++amount of space from the end of a Page. All enabled Page Features are known as
++a Page Feature Set, and the control file contains the cluster-wide initial
++state. Future work here could expand out which features are utilized.
++
++Changes to the Page structure itself involve a new `pd_flags` bit and, if set, a
++reinterpretation of the `pd_checksums` field as a copy of this Page's enabled
++page features. This gives us both a sanity-check against the pg_control
++cluster_page_features as well as being a backwards-compatible change with
++existing disk pages with or without checksums enabled, meaning that pg_upgrade
++should work still.
++
++Future upgrades for clusters using Page Features should continue to work, as
++long as the initdb options for the future clusters are still compatible and as
++long as we keep the set of existing Page Features well-defined in terms of bit
++offsets and reserved length. (This does not seem like an unreasonable
++restriction.)
++
++Since we are taking over the pd_checksums field on the Page structure when Page
++Features are in use, it would seem that this would introduce some potential data
++corruption concerns, however one of the available page features is an extended
++checksum, which itself obviates the need for the checksums field and expands the
++available storage space for this checksum to a full 64-bits. This should be
++sufficient to address this concern, and the checksum-related code paths have
++already been updated to handle either the standard checksums or the extended
++checksums transparently.
++
++In addition to extended checksums, there is also a Page Feature which we use to
++store the GCM tag for authenticated encryption for TDE. This reserved space
++provides both storage and validation of Additional Authenticated Data so we can
++be sure that if a page decrypts appropriately is is cryptographically impossible
++to have twiddled any bits on this page outside of through Postgres itself, which
++serves as a stronger alternative to the checksum validation. The encryption
++tags and the extended checksums would both have validation guarantees, so there
++is no need for a cluster to include both (and in fact combining them makes no
++sense) so the options are considered incompatible.
++
++
++Developing new Page Features
++----------------------------
++
++The goal of Page Features is to make it easy to have space-occupying optional
++features without it being a huge pain for developers to create new features,
++probe for the use of said features or to provide unnecessary boilerplate.
++
++As such, defining a new page feature consists of making changes to the following
++files:
++
++pagefeat.h:
++
++- create an `extern bool page_feature_<foo>` to expose the feature to the GUC
++  system.
++
++- a new feature flag should be defined for the feature; new features should
++  always be added at the end of the list since where these appear in the list
++  determines their relative offset in the page and features that already exist
++  in a cluster must appear at the same offset.
++
++pagefeat.c:
++
++- define the `bool page_feature_<foo>` variable to store the status field
++
++- add a new PageFeatureDesc entry to the corresponding index in the
++  `feature_descs` structure for this feature, including the size of space to be
++  reserved and the name of the GUC to expose the status.
++
++guc_tables.c:
++
++- add a boolean computed field linking the variable name and the GUC name for
++  the feature.  Should be basically the same as any existing page feature GUC
++  such as "extended_checksums".
++
++initdb.c:
++
++- add whatever required getopt handling to optionally enable the feature at
++  initdb time.  This should eventually pass a `-e <feature_name>` to the
++  bootstrap process, at which point everything else should work.
++
++
++Page Feature Space Usage
++------------------------
++
++Page Features only consume space for the features that are enabled.  The total
++per-page space usage is exposed via the `reserved_page_space` GUC, which itself
++is MAXALIGN()ed.
++
++A design choice was made in which the checking for a page feature's enabling and
++accessing the memory area for said page feature could be combined in a single
++call, PageGetFeatureOffset().  This routine is passed a Page and a PageFeature,
++and if this specific page feature has been enabled it will return the memory
++offset inside this Page, otherwise it will return NULL.
++
++Using an example from basebackup.c:
++
++    char *extended_checksum_loc = NULL;
++
++    /* are we using extended checksums? */
++    if ((extended_checksum_loc = PageGetFeatureOffset(page, PF_EXT_CHECKSUMS)))
++    {
++        /* 64-bit checksum */
++        page_checksum = pg_get_checksum64_page(page, (uint64*)extended_checksum_loc);
++        checksum = pg_checksum64_page(page, blkno + segmentno * RELSEG_SIZE, (uint64*)extended_checksum_loc);
++    }
++    else
++    {
++        phdr = (PageHeader) page;
++        page_checksum = phdr->pd_feat.checksum;
++        checksum = pg_checksum_page(page, blkno + segmentno * RELSEG_SIZE);
++    }
++
++Above you can see that the pointer returned from the PageGetFeatureOffset() is
++being used as the validity check and the assignment of the corresponding memory
++location at the same time.
++
++The PageFeatureSet for the cluster is a bitfield, with the enabled features on
++the page being numbers from the low bits, so for a cluster initialized with the
++following feature for hypothetical Page Features with lengths of 8 except for
++feature 0 with length 16, you would have the following offsets calcuated for the
++page features:
++
++| 00110101 |
++
++0 -> page + BLCKSZ - 16
++1 -> NULL
++2 -> page + BLCKSZ - 16 - 8
++3 -> NULL
++4 -> page + BLCKSZ - 16 - 8 - 8
++5 -> page + BLCKSZ - 16 - 8 - 8 - 8
++6 -> NULL
++7 -> NULL
++
++Note that there are some definite performance improvements related to how we are
++currently calculating the feature offsets; these can be precalculated based on
++the enabled features in the table and turned into a simple LUT.
++
++
++It is worth noting that since we are allocating space from the end of the page,
++we must adjust (transparently) the pd_special pointers to account for the
++reserved_page_size.  This has been fixed in all core or contrib code, but since
++this is now calculated at runtime instead of compile time (due to the
++requirement that we be able to enable/disable features at initdb time) this
++means that a lot of things which had been static compile-time constants are now
++instead calculated.  This cost, unlike the space costs, must unfortunately be
++paid by all users of the code whether or not we are using any features at all.
++It is hoped that the utility of the page features and the extensibility it
++provides will outweigh any performance changes here.
++
+diff --git a/src/backend/storage/page/bufpage.c b/src/backend/storage/page/bufpage.c
+index a93cd9df9f..1b3ce14616 100644
+--- a/src/backend/storage/page/bufpage.c
++++ b/src/backend/storage/page/bufpage.c
+@@ -26,8 +26,6 @@
+ /* GUC variable */
+ bool		ignore_checksum_failure = false;
+ 
+-int			reserved_page_size = 0; /* how much page space to reserve for extended unencrypted metadata */
+-
+ 
+ /* ----------------------------------------------------------------
+  *						Page support functions
+@@ -41,11 +39,18 @@ int			reserved_page_size = 0; /* how much page space to reserve for extended une
+  *		until it's time to write.
+  */
+ void
+-PageInit(Page page, Size pageSize, Size specialSize)
++PageInit(Page page, Size pageSize, Size specialSize, PageFeatureSet features)
+ {
+ 	PageHeader	p = (PageHeader) page;
+ 
+-	specialSize = MAXALIGN(specialSize) + reserved_page_size;
++	specialSize = MAXALIGN(specialSize);
++
++	if (features)
++	{
++		Size reserved_size = PageFeatureSetCalculateSize(features);
++		Assert(reserved_size == MAXALIGN(reserved_size));
++		specialSize += reserved_size;
++	}
+ 
+ 	Assert(pageSize == BLCKSZ);
+ 	Assert(pageSize > specialSize + SizeOfPageHeaderData);
+@@ -53,7 +58,13 @@ PageInit(Page page, Size pageSize, Size specialSize)
+ 	/* Make sure all fields of page are zero, as well as unused space */
+ 	MemSet(p, 0, pageSize);
+ 
+-	p->pd_flags = 0;
++	if (features)
++	{
++		p->pd_flags = PD_EXTENDED_FEATS;
++		p->pd_feat.features = features;
++	}
++	else
++		p->pd_flags = 0; /* redundant w/MemSet? */
+ 	p->pd_lower = SizeOfPageHeaderData;
+ 	p->pd_upper = pageSize - specialSize;
+ 	p->pd_special = pageSize - specialSize;
+@@ -102,11 +113,11 @@ PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags)
+ 	 */
+ 	if (!PageIsNew(page))
+ 	{
+-		if (DataChecksumsEnabled())
++		if (DataChecksumsEnabled() && !(p->pd_flags & PD_EXTENDED_FEATS))
+ 		{
+ 			checksum = pg_checksum_page((char *) page, blkno);
+ 
+-			if (checksum != p->pd_checksum)
++			if (checksum != p->pd_feat.checksum)
+ 				checksum_failure = true;
+ 		}
+ 
+@@ -152,7 +163,7 @@ PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags)
+ 			ereport(WARNING,
+ 					(errcode(ERRCODE_DATA_CORRUPTED),
+ 					 errmsg("page verification failed, calculated checksum %u but expected %u",
+-							checksum, p->pd_checksum)));
++							checksum, p->pd_feat.checksum)));
+ 
+ 		if ((flags & PIV_REPORT_STAT) != 0)
+ 			pgstat_report_checksum_failure();
+@@ -409,7 +420,7 @@ PageGetTempPageCopySpecial(Page page)
+ 	pageSize = PageGetPageSize(page);
+ 	temp = (Page) palloc(pageSize);
+ 
+-	PageInit(temp, pageSize, PageGetSpecialSize(page));
++	PageInit(temp, pageSize, PageGetSpecialSize(page), PageGetPageFeatures(page));
+ 	memcpy(PageGetSpecialPointer(temp),
+ 		   PageGetSpecialPointer(page),
+ 		   PageGetSpecialSize(page));
+@@ -1514,7 +1525,8 @@ PageSetChecksumCopy(Page page, BlockNumber blkno)
+ 	static char *pageCopy = NULL;
+ 
+ 	/* If we don't need a checksum, just return the passed-in data */
+-	if (PageIsNew(page) || !DataChecksumsEnabled())
++	if (PageIsNew(page) || !DataChecksumsEnabled() || \
++		(((PageHeader)page)->pd_flags & PD_EXTENDED_FEATS))
+ 		return (char *) page;
+ 
+ 	/*
+@@ -1530,7 +1542,7 @@ PageSetChecksumCopy(Page page, BlockNumber blkno)
+ 											 0);
+ 
+ 	memcpy(pageCopy, (char *) page, BLCKSZ);
+-	((PageHeader) pageCopy)->pd_checksum = pg_checksum_page(pageCopy, blkno);
++	((PageHeader) pageCopy)->pd_feat.checksum = pg_checksum_page(pageCopy, blkno);
+ 	return pageCopy;
+ }
+ 
+@@ -1544,8 +1556,9 @@ void
+ PageSetChecksumInplace(Page page, BlockNumber blkno)
+ {
+ 	/* If we don't need a checksum, just return */
+-	if (PageIsNew(page) || !DataChecksumsEnabled())
++	if (PageIsNew(page) || !DataChecksumsEnabled() || \
++		(((PageHeader)page)->pd_flags & PD_EXTENDED_FEATS))
+ 		return;
+ 
+-	((PageHeader) page)->pd_checksum = pg_checksum_page((char *) page, blkno);
++	((PageHeader) page)->pd_feat.checksum = pg_checksum_page((char *) page, blkno);
+ }
+diff --git a/src/bin/initdb/initdb.c b/src/bin/initdb/initdb.c
+index 2c208ead01..1d76f694ec 100644
+--- a/src/bin/initdb/initdb.c
++++ b/src/bin/initdb/initdb.c
+@@ -166,6 +166,7 @@ static bool do_sync = true;
+ static bool sync_only = false;
+ static bool show_setting = false;
+ static bool data_checksums = false;
++static bool using_page_feats = false;
+ static char *xlog_dir = NULL;
+ static char *str_wal_segment_size_mb = NULL;
+ static int	wal_segment_size_mb;
+@@ -3447,6 +3448,10 @@ main(int argc, char *argv[])
+ 
+ 	printf("\n");
+ 
++	/* check for incompatible extended features */
++	if (data_checksums && using_page_feats)
++		pg_fatal("cannot use page features and data_checksums at the same time");
++
+ 	if (data_checksums)
+ 		printf(_("Data page checksums are enabled.\n"));
+ 	else
+diff --git a/src/bin/pg_checksums/pg_checksums.c b/src/bin/pg_checksums/pg_checksums.c
+index 19eb67e485..11008848e7 100644
+--- a/src/bin/pg_checksums/pg_checksums.c
++++ b/src/bin/pg_checksums/pg_checksums.c
+@@ -234,11 +234,11 @@ scan_file(const char *fn, int segmentno)
+ 		csum = pg_checksum_page(buf.data, blockno + segmentno * RELSEG_SIZE);
+ 		if (mode == PG_MODE_CHECK)
+ 		{
+-			if (csum != header->pd_checksum)
++			if (csum != header->pd_feat.checksum)
+ 			{
+ 				if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_VERSION)
+ 					pg_log_error("checksum verification failed in file \"%s\", block %u: calculated checksum %X but block contains %X",
+-								 fn, blockno, csum, header->pd_checksum);
++								 fn, blockno, csum, header->pd_feat.checksum);
+ 				badblocks++;
+ 			}
+ 		}
+@@ -250,13 +250,13 @@ scan_file(const char *fn, int segmentno)
+ 			 * Do not rewrite if the checksum is already set to the expected
+ 			 * value.
+ 			 */
+-			if (header->pd_checksum == csum)
++			if (header->pd_feat.checksum == csum)
+ 				continue;
+ 
+ 			blocks_written_in_file++;
+ 
+ 			/* Set checksum in page header */
+-			header->pd_checksum = csum;
++			header->pd_feat.checksum = csum;
+ 
+ 			/* Seek back to beginning of block */
+ 			if (lseek(f, -BLCKSZ, SEEK_CUR) < 0)
+@@ -551,6 +551,9 @@ main(int argc, char *argv[])
+ 	if (ControlFile->pg_control_version != PG_CONTROL_VERSION)
+ 		pg_fatal("cluster is not compatible with this version of pg_checksums");
+ 
++	if (ControlFile->page_features != 0)
++		pg_fatal("pg_checksums cannot be used on a cluster with enabled page features");
++
+ 	if (ControlFile->blcksz != BLCKSZ)
+ 	{
+ 		pg_log_error("database cluster is not compatible");
+diff --git a/src/bin/pg_controldata/pg_controldata.c b/src/bin/pg_controldata/pg_controldata.c
+index c390ec51ce..c1006ad5d8 100644
+--- a/src/bin/pg_controldata/pg_controldata.c
++++ b/src/bin/pg_controldata/pg_controldata.c
+@@ -26,6 +26,7 @@
+ #include "catalog/pg_control.h"
+ #include "common/controldata_utils.h"
+ #include "common/logging.h"
++#include "common/pagefeat.h"
+ #include "getopt_long.h"
+ #include "pg_getopt.h"
+ 
+@@ -328,5 +329,7 @@ main(int argc, char *argv[])
+ 		   ControlFile->data_checksum_version);
+ 	printf(_("Mock authentication nonce:            %s\n"),
+ 		   mock_auth_nonce_str);
++	printf(_("Reserved page size for features:      %d\n"),
++		   PageFeatureSetCalculateSize(ControlFile->page_features));
+ 	return 0;
+ }
+diff --git a/src/bin/pg_upgrade/file.c b/src/bin/pg_upgrade/file.c
+index d173602882..a33f5f351a 100644
+--- a/src/bin/pg_upgrade/file.c
++++ b/src/bin/pg_upgrade/file.c
+@@ -292,7 +292,7 @@ rewriteVisibilityMap(const char *fromfile, const char *tofile,
+ 
+ 			/* Set new checksum for visibility map page, if enabled */
+ 			if (new_cluster.controldata.data_checksum_version != 0)
+-				((PageHeader) new_vmbuf.data)->pd_checksum =
++				((PageHeader) new_vmbuf.data)->pd_feat.checksum =
+ 					pg_checksum_page(new_vmbuf.data, new_blkno);
+ 
+ 			errno = 0;
+diff --git a/src/common/Makefile b/src/common/Makefile
+index 113029bf7b..1c1f819350 100644
+--- a/src/common/Makefile
++++ b/src/common/Makefile
+@@ -65,6 +65,7 @@ OBJS_COMMON = \
+ 	kwlookup.o \
+ 	link-canary.o \
+ 	md5_common.o \
++	pagefeat.o \
+ 	percentrepl.o \
+ 	pg_get_line.o \
+ 	pg_lzcompress.o \
+diff --git a/src/common/meson.build b/src/common/meson.build
+index 41bd58ebdf..f87208db32 100644
+--- a/src/common/meson.build
++++ b/src/common/meson.build
+@@ -17,6 +17,7 @@ common_sources = files(
+   'kwlookup.c',
+   'link-canary.c',
+   'md5_common.c',
++  'pagefeat.c',
+   'percentrepl.c',
+   'pg_get_line.c',
+   'pg_lzcompress.c',
+diff --git a/src/common/pagefeat.c b/src/common/pagefeat.c
+new file mode 100644
+index 0000000000..06a4084f46
+--- /dev/null
++++ b/src/common/pagefeat.c
+@@ -0,0 +1,140 @@
++/*-------------------------------------------------------------------------
++ *
++ * pagefeat.c
++ *	  POSTGRES optional page features
++ *
++ * Copyright (c) 2022, PostgreSQL Global Development Group
++ *
++ *
++ * IDENTIFICATION
++ *	  src/common/pagefeat.c
++ *
++ *-------------------------------------------------------------------------
++ */
++#include "postgres.h"
++#include "common/pagefeat.h"
++#include "utils/guc.h"
++
++/* global variables */
++int reserved_page_size;
++PageFeatureSet cluster_page_features;
++
++/*
++ * A "page feature" is an optional cluster-defined additional data field that
++ * is stored in the "reserved_page_size" area in the footer of a given Page.
++ * These features are set at initdb time and are static for the life of the cluster.
++ *
++ * Page features are identified by flags, each corresponding to a blob of data
++ * with a fixed length and content.  For a given cluster, these features will
++ * globally exist or not, and can be queried for feature existence.  You can
++ * also get the data/length for a given feature using accessors.
++ */
++
++typedef struct PageFeatureDesc
++{
++	uint16 length;
++	char *guc_name;
++} PageFeatureDesc;
++
++/* These are the fixed widths for each feature type, indexed by feature.  This
++ * is also used to lookup page features by the bootstrap process and expose
++ * the state of this page feature as a readonly boolean GUC, so when adding a
++ * named feature here ensure you also update the guc_tables file to add this,
++ * or the attempt to set the GUC will fail. */
++
++static PageFeatureDesc feature_descs[PF_MAX_FEATURE] = {
++};
++
++
++/* Return the size for a given set of feature flags */
++uint16
++PageFeatureSetCalculateSize(PageFeatureSet features)
++{
++	uint16 size = 0;
++	int i;
++
++	if (!features)
++		return 0;
++
++	for (i = 0; i < PF_MAX_FEATURE; i++)
++		if (features & (1<<i))
++			size += feature_descs[i].length;
++
++	return MAXALIGN(size);
++}
++
++
++/* does a specific page have a feature? */
++static inline bool PageHasFeature(Page page, PageFeature feature)
++{
++	Assert(feature >= 0 && feature < PF_MAX_FEATURE);
++
++	return ((PageHeader) page)->pd_flags & PD_EXTENDED_FEATS && \
++		((PageHeader)page)->pd_feat.features & (1<<feature);
++}
++
++
++/*
++ * Get the page offset for the given feature given the page, flags, and
++ * feature id.  Returns NULL if the feature is not enabled.
++ */
++
++char *
++PageGetFeatureOffset(Page page, PageFeature feature_id)
++{
++	uint16 size = 0;
++	int i;
++	PageFeatureSet enabled_features;
++
++	Assert(page != NULL);
++
++	/* short circuit if page does not have extended features or is not using
++	 * this specific feature */
++
++	if (!PageHasFeature(page, feature_id))
++		return (char*)0;
++
++	enabled_features = ((PageHeader)page)->pd_feat.features;
++
++	/* we need to find the offsets of all previous features to skip */
++	for (i = PF_MAX_FEATURE; i > feature_id; i--)
++		if (enabled_features & (1<<i))
++			size += feature_descs[i].length;
++
++	/* size is now the offset from the start of the reserved page space */
++	return (char*)((char *)page + BLCKSZ - reserved_page_size + size);
++}
++
++/* expose the given feature flags as boolean yes/no GUCs */
++void
++SetExtendedFeatureConfigOptions(PageFeatureSet features)
++{
++#ifndef FRONTEND
++	int i;
++
++	for (i = 0; i < PF_MAX_FEATURE; i++)
++		SetConfigOption(feature_descs[i].guc_name, (features & (1<<i)) ? "yes" : "no",
++						PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
++#endif
++	cluster_page_features = features;
++}
++
++/* add a named feature to the feature set */
++PageFeatureSet
++PageFeatureSetAddFeatureByName(PageFeatureSet features, const char *feat_name)
++{
++	int i;
++
++	for (i = 0; i < PF_MAX_FEATURE; i++)
++		if (!strcmp(feat_name, feature_descs[i].guc_name))
++			return features | (1<<i);
++	return features;
++}
++
++/* add feature to the feature set by identifier */
++PageFeatureSet
++PageFeatureSetAddFeature(PageFeatureSet features, PageFeature feature)
++{
++	Assert(feature >= 0 && feature < PF_MAX_FEATURE);
++	return features | (1<<feature);
++}
+diff --git a/src/include/access/htup_details.h b/src/include/access/htup_details.h
+index 01362da297..7ed0958cda 100644
+--- a/src/include/access/htup_details.h
++++ b/src/include/access/htup_details.h
+@@ -18,6 +18,7 @@
+ #include "access/transam.h"
+ #include "access/tupdesc.h"
+ #include "access/tupmacs.h"
++#include "common/pagefeat.h"
+ #include "storage/bufpage.h"
+ #include "varatt.h"
+ 
+diff --git a/src/include/catalog/pg_control.h b/src/include/catalog/pg_control.h
+index dc953977c5..e2450ed540 100644
+--- a/src/include/catalog/pg_control.h
++++ b/src/include/catalog/pg_control.h
+@@ -19,7 +19,7 @@
+ #include "access/xlogdefs.h"
+ #include "pgtime.h"				/* for pg_time_t */
+ #include "port/pg_crc32c.h"
+-
++#include "common/pagefeat.h"
+ 
+ /* Version identifier for this pg_control format */
+ #define PG_CONTROL_VERSION	1300
+@@ -219,6 +219,9 @@ typedef struct ControlFileData
+ 	/* Are data pages protected by checksums? Zero if no checksum version */
+ 	uint32		data_checksum_version;
+ 
++	/* What extended page features are we using? */
++	PageFeatureSet page_features;
++
+ 	/*
+ 	 * Random nonce, used in authentication requests that need to proceed
+ 	 * based on values that are cluster-unique, like a SASL exchange that
+diff --git a/src/include/common/pagefeat.h b/src/include/common/pagefeat.h
+new file mode 100644
+index 0000000000..f07e1af315
+--- /dev/null
++++ b/src/include/common/pagefeat.h
+@@ -0,0 +1,56 @@
++/*-------------------------------------------------------------------------
++ *
++ * pagefeat.h
++ *	  POSTGRES page feature support
++ *
++ *
++ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
++ * Portions Copyright (c) 1994, Regents of the University of California
++ *
++ * src/include/common/pagefeat.h
++ *
++ *-------------------------------------------------------------------------
++ */
++#ifndef PAGEFEAT_H
++#define PAGEFEAT_H
++
++/* revealed for GUCs */
++extern PGDLLIMPORT int reserved_page_size;
++
++/* forward declaration to avoid circular includes */
++typedef Pointer Page;
++typedef uint8 PageFeatureSet;
++
++extern PGDLLIMPORT PageFeatureSet cluster_page_features;
++
++#define SizeOfPageReservedSpace() reserved_page_size
++#define MaxSizeOfPageReservedSpace 64 /* sum all of the page features */
++
++/* bit offset for features flags */
++typedef enum {
++	PF_MAX_FEATURE /* must be last */
++} PageFeature;
++
++/* Limit for total number of features we will support.  Since we are storing a
++ * single status byte, we are reserving the top bit here to be set to indicate
++ * for whether there are more than 7 features; used for future extensibility.
++ * This should not be increased as part of normal feature development, only
++ * when adding said mechanisms */
++
++#define PF_MAX_POSSIBLE_FEATURE_CUTOFF 7
++
++StaticAssertDecl(PF_MAX_FEATURE <= PF_MAX_POSSIBLE_FEATURE_CUTOFF,
++				 "defined more features than will fit in one byte");
++
++/* prototypes */
++void SetExtendedFeatureConfigOptions(PageFeatureSet features);
++uint16 PageFeatureSetCalculateSize(PageFeatureSet features);
++PageFeatureSet PageFeatureSetAddFeatureByName(PageFeatureSet features, const char *feat_name);
++PageFeatureSet PageFeatureSetAddFeature(PageFeatureSet features, PageFeature feature);
++
++/* macros dealing with the current cluster's page features */
++char *PageGetFeatureOffset(Page page, PageFeature feature);
++#define PageFeatureSetHasFeature(fs,f) (fs&(1<<f))
++#define ClusterPageFeatureInit(features) cluster_page_features = features;
++
++#endif							/* PAGEFEAT_H */
+diff --git a/src/include/storage/bufmgr.h b/src/include/storage/bufmgr.h
+index 6ab00daa2e..c56abfb184 100644
+--- a/src/include/storage/bufmgr.h
++++ b/src/include/storage/bufmgr.h
+@@ -17,6 +17,7 @@
+ #include "storage/block.h"
+ #include "storage/buf.h"
+ #include "storage/bufpage.h"
++#include "common/pagefeat.h"
+ #include "storage/relfilelocator.h"
+ #include "utils/relcache.h"
+ #include "utils/snapmgr.h"
+diff --git a/src/include/storage/bufpage.h b/src/include/storage/bufpage.h
+index 18ebd3b3c7..afaa466ec5 100644
+--- a/src/include/storage/bufpage.h
++++ b/src/include/storage/bufpage.h
+@@ -18,11 +18,7 @@
+ #include "storage/block.h"
+ #include "storage/item.h"
+ #include "storage/off.h"
+-
+-extern PGDLLIMPORT int reserved_page_size;
+-
+-#define SizeOfPageReservedSpace() reserved_page_size
+-#define MaxSizeOfPageReservedSpace 0
++#include "common/pagefeat.h"
+ 
+ /* strict upper bound on the amount of space occupied we have reserved on
+  * pages in this cluster */
+@@ -122,7 +118,9 @@ PageXLogRecPtrGet(PageXLogRecPtr val)
+  * space management information generic to any page
+  *
+  *		pd_lsn		- identifies xlog record for last change to this page.
+- *		pd_checksum - page checksum, if set.
++ *		pd_feat     - union type, one of:
++ *         checksum - page checksum, if checksums enabled.
++ *         features - page features, if using extended feature flags.
+  *		pd_flags	- flag bits.
+  *		pd_lower	- offset to start of free space.
+  *		pd_upper	- offset to end of free space.
+@@ -134,16 +132,18 @@ PageXLogRecPtrGet(PageXLogRecPtr val)
+  * "thou shalt write xlog before data".  A dirty buffer cannot be dumped
+  * to disk until xlog has been flushed at least as far as the page's LSN.
+  *
+- * pd_checksum stores the page checksum, if it has been set for this page;
+- * zero is a valid value for a checksum. If a checksum is not in use then
+- * we leave the field unset. This will typically mean the field is zero
+- * though non-zero values may also be present if databases have been
+- * pg_upgraded from releases prior to 9.3, when the same byte offset was
+- * used to store the current timelineid when the page was last updated.
+- * Note that there is no indication on a page as to whether the checksum
+- * is valid or not, a deliberate design choice which avoids the problem
+- * of relying on the page contents to decide whether to verify it. Hence
+- * there are no flag bits relating to checksums.
++ * pd_feat is a union type; if the `PD_EXTENDED_FEATS` page flag is set, we
++ * interpret it as a bitflag storing information about the page features in
++ * use on this page.  If this flag is unset, then it stores the page checksum,
++ * if it has been set for this page; zero is a valid value for a checksum. If
++ * a checksum is not in use then we leave the field unset. This will typically
++ * mean the field is zero though non-zero values may also be present if
++ * databases have been pg_upgraded from releases prior to 9.3, when the same
++ * byte offset was used to store the current timelineid when the page was last
++ * updated.  Note that there is no indication on a page as to whether the
++ * checksum is valid or not, a deliberate design choice which avoids the
++ * problem of relying on the page contents to decide whether to verify
++ * it. Hence there are no flag bits relating to checksums.
+  *
+  * pd_prune_xid is a hint field that helps determine whether pruning will be
+  * useful.  It is currently unused in index pages.
+@@ -167,7 +167,10 @@ typedef struct PageHeaderData
+ 	/* XXX LSN is member of *any* block, not only page-organized ones */
+ 	PageXLogRecPtr pd_lsn;		/* LSN: next byte after last byte of xlog
+ 								 * record for last change to this page */
+-	uint16		pd_checksum;	/* checksum */
++	union {
++		uint16		checksum;	/* checksum */
++		uint16		features;	/* page feature flags */
++	} pd_feat;
+ 	uint16		pd_flags;		/* flag bits, see below */
+ 	LocationIndex pd_lower;		/* offset to start of free space */
+ 	LocationIndex pd_upper;		/* offset to end of free space */
+@@ -195,8 +198,8 @@ typedef PageHeaderData *PageHeader;
+ #define PD_PAGE_FULL		0x0002	/* not enough free space for new tuple? */
+ #define PD_ALL_VISIBLE		0x0004	/* all tuples on page are visible to
+ 									 * everyone */
+-
+-#define PD_VALID_FLAG_BITS	0x0007	/* OR of all valid pd_flags bits */
++#define PD_EXTENDED_FEATS	0x0008	/* this page uses extended page features */
++#define PD_VALID_FLAG_BITS	0x000F	/* OR of all valid pd_flags bits */
+ 
+ /*
+  * Page layout version number 0 is for pre-7.3 Postgres releases.
+@@ -312,6 +315,26 @@ PageSetPageSizeAndVersion(Page page, Size size, uint8 version)
+ 	((PageHeader) page)->pd_pagesize_version = size | version;
+ }
+ 
++
++/*
++ * Return any extended page features set on the page.
++ */
++static inline PageFeatureSet PageGetPageFeatures(Page page)
++{
++	return ((PageHeader) page)->pd_flags & PD_EXTENDED_FEATS \
++		? (PageFeatureSet)((PageHeader)page)->pd_feat.features
++		: 0;
++}
++
++/*
++ * Return the size of space allocated for page features.
++ */
++static inline Size
++PageGetFeatureSize(Page page)
++{
++	return PageFeatureSetCalculateSize(PageGetPageFeatures(page));
++}
++
+ /* ----------------
+  *		page special data functions
+  * ----------------
+@@ -323,7 +346,7 @@ PageSetPageSizeAndVersion(Page page, Size size, uint8 version)
+ static inline uint16
+ PageGetSpecialSize(Page page)
+ {
+-	return (PageGetPageSize(page) - ((PageHeader) page)->pd_special - reserved_page_size);
++	return (PageGetPageSize(page) - ((PageHeader) page)->pd_special - PageGetFeatureSize(page));
+ }
+ 
+ /*
+@@ -495,7 +518,7 @@ do { \
+ StaticAssertDecl(BLCKSZ == ((BLCKSZ / sizeof(size_t)) * sizeof(size_t)),
+ 				 "BLCKSZ has to be a multiple of sizeof(size_t)");
+ 
+-extern void PageInit(Page page, Size pageSize, Size specialSize);
++extern void PageInit(Page page, Size pageSize, Size specialSize, PageFeatureSet features);
+ extern bool PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags);
+ extern OffsetNumber PageAddItemExtended(Page page, Item item, Size size,
+ 										OffsetNumber offsetNumber, int flags);
+diff --git a/src/include/storage/checksum_impl.h b/src/include/storage/checksum_impl.h
+index 7b157161a2..25933f1759 100644
+--- a/src/include/storage/checksum_impl.h
++++ b/src/include/storage/checksum_impl.h
+@@ -194,22 +194,23 @@ pg_checksum_page(char *page, BlockNumber blkno)
+ 	Assert(!PageIsNew((Page) page));
+ 
+ 	/*
+-	 * Save pd_checksum and temporarily set it to zero, so that the checksum
+-	 * calculation isn't affected by the old checksum stored on the page.
+-	 * Restore it after, because actually updating the checksum is NOT part of
+-	 * the API of this function.
++	 * Save pd_feat.checksum and temporarily set it to zero, so that the
++	 * checksum calculation isn't affected by the old checksum stored on the
++	 * page.  Restore it after, because actually updating the checksum is NOT
++	 * part of the API of this function.
+ 	 */
+-	save_checksum = cpage->phdr.pd_checksum;
+-	cpage->phdr.pd_checksum = 0;
++	save_checksum = cpage->phdr.pd_feat.checksum;
++	cpage->phdr.pd_feat.checksum = 0;
+ 	checksum = pg_checksum_block(cpage);
+-	cpage->phdr.pd_checksum = save_checksum;
++	cpage->phdr.pd_feat.checksum = save_checksum;
+ 
+ 	/* Mix in the block number to detect transposed pages */
+ 	checksum ^= blkno;
+ 
+ 	/*
+-	 * Reduce to a uint16 (to fit in the pd_checksum field) with an offset of
+-	 * one. That avoids checksums of zero, which seems like a good idea.
++	 * Reduce to a uint16 (to fit in the pd_feat.checksum field) with an
++	 * offset of one. That avoids checksums of zero, which seems like a good
++	 * idea.
+ 	 */
+ 	return (uint16) ((checksum % 65535) + 1);
+ }
+diff --git a/src/test/perl/PostgreSQL/Test/Cluster.pm b/src/test/perl/PostgreSQL/Test/Cluster.pm
+index bc9b5dc644..95e22f5822 100644
+--- a/src/test/perl/PostgreSQL/Test/Cluster.pm
++++ b/src/test/perl/PostgreSQL/Test/Cluster.pm
+@@ -3014,6 +3014,8 @@ The server must be stopped for this to work reliably.
+ The file name should be specified relative to the cluster datadir.
+ page_offset had better be a multiple of the cluster's block size.
+ 
++TODO: what to do about page features instead of checksums?
++
+ =cut
+ 
+ sub corrupt_page_checksum
+diff --git a/src/tools/msvc/Mkvcbuild.pm b/src/tools/msvc/Mkvcbuild.pm
+index 958206f315..fd1fb0e441 100644
+--- a/src/tools/msvc/Mkvcbuild.pm
++++ b/src/tools/msvc/Mkvcbuild.pm
+@@ -138,7 +138,7 @@ sub mkvcbuild
+ 	  archive.c base64.c checksum_helper.c compression.c
+ 	  config_info.c controldata_utils.c d2s.c encnames.c exec.c
+ 	  f2s.c file_perm.c file_utils.c hashfn.c ip.c jsonapi.c
+-	  keywords.c kwlookup.c link-canary.c md5_common.c percentrepl.c
++	  keywords.c kwlookup.c link-canary.c md5_common.c pagefeat.c percentrepl.c
+ 	  pg_get_line.c pg_lzcompress.c pg_prng.c pgfnames.c psprintf.c relpath.c
+ 	  rmtree.c saslprep.c scram-common.c string.c stringinfo.c unicode_norm.c
+ 	  username.c wait_error.c wchar.c);
+-- 
+2.39.2
+

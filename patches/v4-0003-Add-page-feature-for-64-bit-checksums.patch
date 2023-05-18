@@ -1,0 +1,1085 @@
+From b5fc096637154980e3deb4c198d33ac1ee95fdec Mon Sep 17 00:00:00 2001
+From: David Christensen <david@pgguru.net>
+Date: Tue, 9 May 2023 16:56:15 -0500
+Subject: [PATCH v4 3/3] Add page feature for 64-bit checksums
+
+Since we reclaimed the space from the pd_checksums field for storing a page's
+features, we present the use of a 64-bit page checksum as an alternative.  This
+uses an arbitrarily chosen 64-bit hash for demo purposes (TBD: is this
+compatible, or do we need a replacement?) to demonstrate the use of this feature.
+
+Since one of the main motivators of page features is to provide space for
+authenticated page encryption, we make this optional in order to ensure that
+either the 64-bit checksum (this patch) or the 64-bit authtag (future patch)
+will live in the final 8 bytes of the page at a single constant offset,
+hopefully allowing other programs that need to know how to handle the new format
+to do so in a much easier way.
+---
+ src/backend/access/transam/xlog.c       |   4 +-
+ src/backend/backup/basebackup.c         |  27 +-
+ src/backend/storage/page/bufpage.c      |  53 ++-
+ src/backend/utils/misc/guc_tables.c     |  11 +
+ src/bin/initdb/initdb.c                 |  17 +-
+ src/bin/pg_controldata/pg_controldata.c |   3 +
+ src/common/pagefeat.c                   |   5 +
+ src/include/common/komihash.h           | 569 ++++++++++++++++++++++++
+ src/include/common/pagefeat.h           |   2 +
+ src/include/storage/bufpage.h           |  13 +-
+ src/include/storage/checksum.h          |   3 +
+ src/include/storage/checksum_impl.h     |  89 ++++
+ 12 files changed, 771 insertions(+), 25 deletions(-)
+ create mode 100644 src/include/common/komihash.h
+
+diff --git a/src/backend/access/transam/xlog.c b/src/backend/access/transam/xlog.c
+index bdc0d08ae5..01cfab0793 100644
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -4210,7 +4210,9 @@ bool
+ DataChecksumsEnabled(void)
+ {
+ 	Assert(ControlFile != NULL);
+-	return (ControlFile->data_checksum_version > 0);
++	return (ControlFile->data_checksum_version > 0) || \
++		PageFeatureSetHasFeature(ControlFile->page_features, PF_EXT_CHECKSUMS);
++
+ }
+ 
+ /*
+diff --git a/src/backend/backup/basebackup.c b/src/backend/backup/basebackup.c
+index 7a7dc9f80d..01928797a1 100644
+--- a/src/backend/backup/basebackup.c
++++ b/src/backend/backup/basebackup.c
+@@ -25,6 +25,7 @@
+ #include "commands/defrem.h"
+ #include "common/compression.h"
+ #include "common/file_perm.h"
++#include "common/pagefeat.h"
+ #include "lib/stringinfo.h"
+ #include "miscadmin.h"
+ #include "nodes/pg_list.h"
+@@ -1486,7 +1487,7 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
+ 	int			fd;
+ 	BlockNumber blkno = 0;
+ 	bool		block_retry = false;
+-	uint16		checksum;
++	uint64		checksum, page_checksum;
+ 	int			checksum_failures = 0;
+ 	off_t		cnt;
+ 	int			i;
+@@ -1594,9 +1595,23 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
+ 				 */
+ 				if (!PageIsNew(page) && PageGetLSN(page) < sink->bbs_state->startptr)
+ 				{
+-					checksum = pg_checksum_page((char *) page, blkno + segmentno * RELSEG_SIZE);
+-					phdr = (PageHeader) page;
+-					if (phdr->pd_feat.checksum != checksum)
++					char *extended_checksum_loc = NULL;
++
++					/* are we using extended checksums? */
++					if ((extended_checksum_loc = PageGetFeatureOffset(page, PF_EXT_CHECKSUMS)))
++					{
++						/* 64-bit checksum */
++						page_checksum = pg_get_checksum64_page(page, (uint64*)extended_checksum_loc);
++						checksum = pg_checksum64_page(page, blkno + segmentno * RELSEG_SIZE, (uint64*)extended_checksum_loc);
++					}
++					else
++					{
++						phdr = (PageHeader) page;
++						page_checksum = phdr->pd_feat.checksum;
++						checksum = pg_checksum_page(page, blkno + segmentno * RELSEG_SIZE);
++					}
++
++					if (page_checksum != checksum)
+ 					{
+ 						/*
+ 						 * Retry the block on the first failure.  It's
+@@ -1657,9 +1672,9 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
+ 							ereport(WARNING,
+ 									(errmsg("checksum verification failed in "
+ 											"file \"%s\", block %u: calculated "
+-											"%X but expected %X",
++											UINT64_FORMAT " but expected " UINT64_FORMAT,
+ 											readfilename, blkno, checksum,
+-											phdr->pd_feat.checksum)));
++											page_checksum)));
+ 						if (checksum_failures == 5)
+ 							ereport(WARNING,
+ 									(errmsg("further checksum verification "
+diff --git a/src/backend/storage/page/bufpage.c b/src/backend/storage/page/bufpage.c
+index 1b3ce14616..6eac6f056e 100644
+--- a/src/backend/storage/page/bufpage.c
++++ b/src/backend/storage/page/bufpage.c
+@@ -106,18 +106,29 @@ PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags)
+ 	bool		checksum_failure = false;
+ 	bool		header_sane = false;
+ 	bool		all_zeroes = false;
+-	uint16		checksum = 0;
+-
++	uint64		checksum = 0;
++	uint64		page_checksum = 0;
++	char       *extended_checksum_loc = NULL;
+ 	/*
+ 	 * Don't verify page data unless the page passes basic non-zero test
+ 	 */
+ 	if (!PageIsNew(page))
+ 	{
+-		if (DataChecksumsEnabled() && !(p->pd_flags & PD_EXTENDED_FEATS))
++		if (DataChecksumsEnabled())
+ 		{
+-			checksum = pg_checksum_page((char *) page, blkno);
+-
+-			if (checksum != p->pd_feat.checksum)
++			/* are we using extended checksums? */
++			if ((extended_checksum_loc = PageGetFeatureOffset(page, PF_EXT_CHECKSUMS)))
++			{
++				page_checksum = pg_get_checksum64_page(page, (uint64*)extended_checksum_loc);
++				checksum = pg_checksum64_page(page, blkno, (uint64*)extended_checksum_loc);
++			}
++			else
++			{
++				/* traditional checksums in the pd_checksum field */
++				page_checksum = p->pd_feat.checksum;
++				checksum = pg_checksum_page((char *) page, blkno);
++			}
++			if (checksum != page_checksum)
+ 				checksum_failure = true;
+ 		}
+ 
+@@ -162,8 +173,9 @@ PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags)
+ 		if ((flags & PIV_LOG_WARNING) != 0)
+ 			ereport(WARNING,
+ 					(errcode(ERRCODE_DATA_CORRUPTED),
+-					 errmsg("page verification failed, calculated checksum %u but expected %u",
+-							checksum, p->pd_feat.checksum)));
++					 errmsg("page verification failed, calculated checksum "
++							UINT64_FORMAT " but expected " UINT64_FORMAT,
++							checksum, page_checksum)));
+ 
+ 		if ((flags & PIV_REPORT_STAT) != 0)
+ 			pgstat_report_checksum_failure();
+@@ -1523,10 +1535,10 @@ char *
+ PageSetChecksumCopy(Page page, BlockNumber blkno)
+ {
+ 	static char *pageCopy = NULL;
++	char *extended_checksum_loc = NULL;
+ 
+ 	/* If we don't need a checksum, just return the passed-in data */
+-	if (PageIsNew(page) || !DataChecksumsEnabled() || \
+-		(((PageHeader)page)->pd_flags & PD_EXTENDED_FEATS))
++	if (PageIsNew(page) || !DataChecksumsEnabled())
+ 		return (char *) page;
+ 
+ 	/*
+@@ -1542,7 +1554,13 @@ PageSetChecksumCopy(Page page, BlockNumber blkno)
+ 											 0);
+ 
+ 	memcpy(pageCopy, (char *) page, BLCKSZ);
+-	((PageHeader) pageCopy)->pd_feat.checksum = pg_checksum_page(pageCopy, blkno);
++
++	if ((extended_checksum_loc = PageGetFeatureOffset(pageCopy, PF_EXT_CHECKSUMS)))
++		pg_set_checksum64_page(pageCopy,
++							   pg_checksum64_page(pageCopy, blkno, (uint64*)extended_checksum_loc),
++							   (uint64*)extended_checksum_loc);
++	else
++		((PageHeader) pageCopy)->pd_feat.checksum = pg_checksum_page(pageCopy, blkno);
+ 	return pageCopy;
+ }
+ 
+@@ -1555,10 +1573,17 @@ PageSetChecksumCopy(Page page, BlockNumber blkno)
+ void
+ PageSetChecksumInplace(Page page, BlockNumber blkno)
+ {
++	char *extended_checksum_loc = NULL;
++
+ 	/* If we don't need a checksum, just return */
+-	if (PageIsNew(page) || !DataChecksumsEnabled() || \
+-		(((PageHeader)page)->pd_flags & PD_EXTENDED_FEATS))
++	if (PageIsNew(page) || !DataChecksumsEnabled())
+ 		return;
+ 
+-	((PageHeader) page)->pd_feat.checksum = pg_checksum_page((char *) page, blkno);
++	/* are we using extended checksums? */
++	if ((extended_checksum_loc = PageGetFeatureOffset(page, PF_EXT_CHECKSUMS)))
++		pg_set_checksum64_page(page,
++							   pg_checksum64_page(page, blkno, (uint64*)extended_checksum_loc),
++							   (uint64*)extended_checksum_loc);
++	else
++		((PageHeader) page)->pd_feat.checksum = pg_checksum_page(page, blkno);
+ }
+diff --git a/src/backend/utils/misc/guc_tables.c b/src/backend/utils/misc/guc_tables.c
+index f3d5a73adc..1abc7dce97 100644
+--- a/src/backend/utils/misc/guc_tables.c
++++ b/src/backend/utils/misc/guc_tables.c
+@@ -1875,6 +1875,17 @@ struct config_bool ConfigureNamesBool[] =
+ 		NULL, NULL, NULL
+ 	},
+ 
++	{
++		{"extended_checksums", PGC_INTERNAL, PRESET_OPTIONS,
++			gettext_noop("Shows whether extended checksums are turned on for this cluster."),
++			NULL,
++			GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE | GUC_RUNTIME_COMPUTED
++		},
++		&page_feature_extended_checksums,
++		false,
++		NULL, NULL, NULL
++	},
++
+ 	{
+ 		{"syslog_sequence_numbers", PGC_SIGHUP, LOGGING_WHERE,
+ 			gettext_noop("Add sequence number to syslog messages to avoid duplicate suppression."),
+diff --git a/src/bin/initdb/initdb.c b/src/bin/initdb/initdb.c
+index 1d76f694ec..ec8e671ff2 100644
+--- a/src/bin/initdb/initdb.c
++++ b/src/bin/initdb/initdb.c
+@@ -167,6 +167,7 @@ static bool sync_only = false;
+ static bool show_setting = false;
+ static bool data_checksums = false;
+ static bool using_page_feats = false;
++static bool extended_checksums = false;
+ static char *xlog_dir = NULL;
+ static char *str_wal_segment_size_mb = NULL;
+ static int	wal_segment_size_mb;
+@@ -1536,10 +1537,11 @@ bootstrap_template1(void)
+ 	unsetenv("PGCLIENTENCODING");
+ 
+ 	snprintf(cmd, sizeof(cmd),
+-			 "\"%s\" --boot -X %d %s %s %s %s",
++			 "\"%s\" --boot -X %d %s %s %s %s %s",
+ 			 backend_exec,
+ 			 wal_segment_size_mb * (1024 * 1024),
+ 			 data_checksums ? "-k" : "",
++			 extended_checksums ? "-e extended_checksums" : "",
+ 			 boot_options, extra_options,
+ 			 debug ? "-d 5" : "");
+ 
+@@ -2497,6 +2499,7 @@ usage(const char *progname)
+ 	printf(_("      --icu-locale=LOCALE   set ICU locale ID for new databases\n"));
+ 	printf(_("      --icu-rules=RULES     set additional ICU collation rules for new databases\n"));
+ 	printf(_("  -k, --data-checksums      use data page checksums\n"));
++	printf(_("      --extended-checksums  use extended data page checksums\n"));
+ 	printf(_("      --locale=LOCALE       set default locale for new databases\n"));
+ 	printf(_("      --lc-collate=, --lc-ctype=, --lc-messages=LOCALE\n"
+ 			 "      --lc-monetary=, --lc-numeric=, --lc-time=LOCALE\n"
+@@ -3155,6 +3158,7 @@ main(int argc, char *argv[])
+ 		{"waldir", required_argument, NULL, 'X'},
+ 		{"wal-segsize", required_argument, NULL, 12},
+ 		{"data-checksums", no_argument, NULL, 'k'},
++		{"extended-checksums", no_argument, NULL, 18},
+ 		{"allow-group-access", no_argument, NULL, 'g'},
+ 		{"discard-caches", no_argument, NULL, 14},
+ 		{"locale-provider", required_argument, NULL, 15},
+@@ -3272,6 +3276,10 @@ main(int argc, char *argv[])
+ 			case 'k':
+ 				data_checksums = true;
+ 				break;
++			case 18:
++				extended_checksums = true;
++				using_page_feats = true;
++				break;
+ 			case 'L':
+ 				share_path = pg_strdup(optarg);
+ 				break;
+@@ -3395,6 +3403,9 @@ main(int argc, char *argv[])
+ 	if (pwprompt && pwfilename)
+ 		pg_fatal("password prompt and password file cannot be specified together");
+ 
++	if (data_checksums && extended_checksums)
++		pg_fatal("data checksums and extended data checksums cannot be specified together");
++
+ 	check_authmethod_unspecified(&authmethodlocal);
+ 	check_authmethod_unspecified(&authmethodhost);
+ 
+@@ -3452,7 +3463,9 @@ main(int argc, char *argv[])
+ 	if (data_checksums && using_page_feats)
+ 		pg_fatal("cannot use page features and data_checksums at the same time");
+ 
+-	if (data_checksums)
++	if (extended_checksums)
++		printf(_("Extended data page checksums are enabled.\n"));
++	else if (data_checksums)
+ 		printf(_("Data page checksums are enabled.\n"));
+ 	else
+ 		printf(_("Data page checksums are disabled.\n"));
+diff --git a/src/bin/pg_controldata/pg_controldata.c b/src/bin/pg_controldata/pg_controldata.c
+index c1006ad5d8..bc6be4844a 100644
+--- a/src/bin/pg_controldata/pg_controldata.c
++++ b/src/bin/pg_controldata/pg_controldata.c
+@@ -331,5 +331,8 @@ main(int argc, char *argv[])
+ 		   mock_auth_nonce_str);
+ 	printf(_("Reserved page size for features:      %d\n"),
+ 		   PageFeatureSetCalculateSize(ControlFile->page_features));
++	printf(_("Using extended checksums:             %s\n"),
++		   PageFeatureSetHasFeature(ControlFile->page_features, PF_EXT_CHECKSUMS) \
++		   ? _("yes") : _("no"));
+ 	return 0;
+ }
+diff --git a/src/common/pagefeat.c b/src/common/pagefeat.c
+index 06a4084f46..45eeb4d403 100644
+--- a/src/common/pagefeat.c
++++ b/src/common/pagefeat.c
+@@ -19,6 +19,9 @@
+ int reserved_page_size;
+ PageFeatureSet cluster_page_features;
+ 
++/* status GUCs, display only. set by XLog startup */
++bool page_feature_extended_checksums;
++
+ /*
+  * A "page feature" is an optional cluster-defined additional data field that
+  * is stored in the "reserved_page_size" area in the footer of a given Page.
+@@ -43,6 +46,8 @@ typedef struct PageFeatureDesc
+  * or the attempt to set the GUC will fail. */
+ 
+ static PageFeatureDesc feature_descs[PF_MAX_FEATURE] = {
++	/* PF_EXT_CHECKSUMS */
++	{ 8, "extended_checksums" }
+ };
+ 
+ 
+diff --git a/src/include/common/komihash.h b/src/include/common/komihash.h
+new file mode 100644
+index 0000000000..867a7f09b1
+--- /dev/null
++++ b/src/include/common/komihash.h
+@@ -0,0 +1,569 @@
++/**
++ * komihash.h version 4.3.1
++ *
++ * The inclusion file for the "komihash" hash function.
++ *
++ * Description is available at https://github.com/avaneev/komihash
++ *
++ * License
++ *
++ * Copyright (c) 2021-2022 Aleksey Vaneev
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef KOMIHASH_INCLUDED
++#define KOMIHASH_INCLUDED
++
++#include <stdint.h>
++#include <string.h>
++
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
++
++// Macros that apply byte-swapping.
++
++#if defined( __GNUC__ ) || defined( __clang__ )
++
++	#define KOMIHASH_BYTESW32( v ) __builtin_bswap32( v )
++	#define KOMIHASH_BYTESW64( v ) __builtin_bswap64( v )
++
++#elif defined( _MSC_VER )
++
++	#define KOMIHASH_BYTESW32( v ) _byteswap_ulong( v )
++	#define KOMIHASH_BYTESW64( v ) _byteswap_uint64( v )
++
++#else // defined( _MSC_VER )
++
++	#define KOMIHASH_BYTESW32( v ) ( \
++		( v & 0xFF000000 ) >> 24 | \
++		( v & 0x00FF0000 ) >> 8 | \
++		( v & 0x0000FF00 ) << 8 | \
++		( v & 0x000000FF ) << 24 )
++
++	#define KOMIHASH_BYTESW64( v ) ( \
++		( v & 0xFF00000000000000 ) >> 56 | \
++		( v & 0x00FF000000000000 ) >> 40 | \
++		( v & 0x0000FF0000000000 ) >> 24 | \
++		( v & 0x000000FF00000000 ) >> 8 | \
++		( v & 0x00000000FF000000 ) << 8 | \
++		( v & 0x0000000000FF0000 ) << 24 | \
++		( v & 0x000000000000FF00 ) << 40 | \
++		( v & 0x00000000000000FF ) << 56 )
++
++#endif // defined( _MSC_VER )
++
++// Endianness-definition macro, can be defined externally (e.g. =1, if
++// endianness-correction is unnecessary in any case, to reduce its associated
++// overhead).
++
++#if !defined( KOMIHASH_LITTLE_ENDIAN )
++	#if defined( _WIN32 ) || defined( __LITTLE_ENDIAN__ ) || \
++		( defined( __BYTE_ORDER__ ) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ )
++
++		#define KOMIHASH_LITTLE_ENDIAN 1
++
++	#elif defined( __BIG_ENDIAN__ ) || \
++		( defined( __BYTE_ORDER__ ) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ )
++
++		#define KOMIHASH_LITTLE_ENDIAN 0
++
++	#else // defined( __BIG_ENDIAN__ )
++
++		#warning KOMIHASH: cannot determine endianness, assuming little-endian.
++
++		#define KOMIHASH_LITTLE_ENDIAN 1
++
++	#endif // defined( __BIG_ENDIAN__ )
++#endif // !defined( KOMIHASH_LITTLE_ENDIAN )
++
++// Macros that apply byte-swapping, used for endianness-correction.
++
++#if KOMIHASH_LITTLE_ENDIAN
++
++	#define KOMIHASH_EC32( v ) ( v )
++	#define KOMIHASH_EC64( v ) ( v )
++
++#else // KOMIHASH_LITTLE_ENDIAN
++
++	#define KOMIHASH_EC32( v ) KOMIHASH_BYTESW32( v )
++	#define KOMIHASH_EC64( v ) KOMIHASH_BYTESW64( v )
++
++#endif // KOMIHASH_LITTLE_ENDIAN
++
++// Likelihood macros that are used for manually-guided micro-optimization.
++
++#if defined( __GNUC__ ) || defined( __clang__ )
++
++	#define KOMIHASH_LIKELY( x )  __builtin_expect( x, 1 )
++	#define KOMIHASH_UNLIKELY( x )  __builtin_expect( x, 0 )
++
++#else // likelihood macros
++
++	#define KOMIHASH_LIKELY( x ) ( x )
++	#define KOMIHASH_UNLIKELY( x ) ( x )
++
++#endif // likelihood macros
++
++// In-memory data prefetch macro (temporal locality=1, in case a collision
++// resolution would be necessary).
++
++#if defined( __GNUC__ ) || defined( __clang__ )
++
++	#define KOMIHASH_PREFETCH( addr ) __builtin_prefetch( addr, 0, 1 )
++
++#else // prefetch macro
++
++	#define KOMIHASH_PREFETCH( addr )
++
++#endif // prefetch macro
++
++/**
++ * An auxiliary function that returns an unsigned 32-bit value created out of
++ * a sequence of bytes in memory. This function is used to convert endianness
++ * of in-memory 32-bit unsigned values, and to avoid unaligned memory
++ * accesses.
++ *
++ * @param p Pointer to 4 bytes in memory. Alignment is unimportant.
++ */
++
++static inline uint32_t kh_lu32ec( const uint8_t* const p )
++{
++	uint32_t v;
++	memcpy( &v, p, 4 );
++
++	return( KOMIHASH_EC32( v ));
++}
++
++/**
++ * An auxiliary function that returns an unsigned 64-bit value created out of
++ * a sequence of bytes in memory. This function is used to convert endianness
++ * of in-memory 64-bit unsigned values, and to avoid unaligned memory
++ * accesses.
++ *
++ * @param p Pointer to 8 bytes in memory. Alignment is unimportant.
++ */
++
++static inline uint64_t kh_lu64ec( const uint8_t* const p )
++{
++	uint64_t v;
++	memcpy( &v, p, 8 );
++
++	return( KOMIHASH_EC64( v ));
++}
++
++/**
++ * Function builds an unsigned 64-bit value out of remaining bytes in a
++ * message, and pads it with the "final byte". This function can only be
++ * called if less than 8 bytes are left to read. The message should be "long",
++ * permitting Msg[ -3 ] reads.
++ *
++ * @param Msg Message pointer, alignment is unimportant.
++ * @param MsgLen Message's remaining length, in bytes; can be 0.
++ * @param fb Final byte used for padding.
++ */
++
++static inline uint64_t kh_lpu64ec_l3( const uint8_t* const Msg,
++	const size_t MsgLen, uint64_t fb )
++{
++	if( MsgLen < 4 )
++	{
++		const uint8_t* const Msg3 = Msg + MsgLen - 3;
++		const int ml8 = (int) ( MsgLen << 3 );
++		const uint64_t m = (uint64_t) Msg3[ 0 ] | (uint64_t) Msg3[ 1 ] << 8 |
++			(uint64_t) Msg3[ 2 ] << 16;
++		return( fb << ml8 | m >> ( 24 - ml8 ));
++	}
++
++	const int ml8 = (int) ( MsgLen << 3 );
++	const uint64_t mh = kh_lu32ec( Msg + MsgLen - 4 );
++	const uint64_t ml = kh_lu32ec( Msg );
++
++	return( fb << ml8 | ml | ( mh >> ( 64 - ml8 )) << 32 );
++}
++
++/**
++ * Function builds an unsigned 64-bit value out of remaining bytes in a
++ * message, and pads it with the "final byte". This function can only be
++ * called if less than 8 bytes are left to read. Can be used on "short"
++ * messages, but MsgLen should be greater than 0.
++ *
++ * @param Msg Message pointer, alignment is unimportant.
++ * @param MsgLen Message's remaining length, in bytes; cannot be 0.
++ * @param fb Final byte used for padding.
++ */
++
++static inline uint64_t kh_lpu64ec_nz( const uint8_t* const Msg,
++	const size_t MsgLen, uint64_t fb )
++{
++	if( MsgLen < 4 )
++	{
++		fb <<= ( MsgLen << 3 );
++		uint64_t m = Msg[ 0 ];
++
++		if( MsgLen > 1 )
++		{
++			m |= (uint64_t) Msg[ 1 ] << 8;
++
++			if( MsgLen > 2 )
++			{
++				m |= (uint64_t) Msg[ 2 ] << 16;
++			}
++		}
++
++		return( fb | m );
++	}
++
++	const int ml8 = (int) ( MsgLen << 3 );
++	const uint64_t mh = kh_lu32ec( Msg + MsgLen - 4 );
++	const uint64_t ml = kh_lu32ec( Msg );
++
++	return( fb << ml8 | ml | ( mh >> ( 64 - ml8 )) << 32 );
++}
++
++/**
++ * Function builds an unsigned 64-bit value out of remaining bytes in a
++ * message, and pads it with the "final byte". This function can only be
++ * called if less than 8 bytes are left to read. The message should be "long",
++ * permitting Msg[ -4 ] reads.
++ *
++ * @param Msg Message pointer, alignment is unimportant.
++ * @param MsgLen Message's remaining length, in bytes; can be 0.
++ * @param fb Final byte used for padding.
++ */
++
++static inline uint64_t kh_lpu64ec_l4( const uint8_t* const Msg,
++	const size_t MsgLen, uint64_t fb )
++{
++	if( MsgLen < 5 )
++	{
++		const int ml8 = (int) ( MsgLen << 3 );
++
++		return( fb << ml8 |
++			(uint64_t) kh_lu32ec( Msg + MsgLen - 4 ) >> ( 32 - ml8 ));
++	}
++	else
++	{
++		const int ml8 = (int) ( MsgLen << 3 );
++
++		return( fb << ml8 | kh_lu64ec( Msg + MsgLen - 8 ) >> ( 64 - ml8 ));
++	}
++}
++
++#if defined( __SIZEOF_INT128__ )
++
++	/**
++	 * 64-bit by 64-bit unsigned multiplication.
++	 *
++	 * @param m1 Multiplier 1.
++	 * @param m2 Multiplier 2.
++	 * @param[out] rl The lower half of the 128-bit result.
++	 * @param[out] rh The higher half of the 128-bit result.
++	 */
++
++	static inline void kh_m128( const uint64_t m1, const uint64_t m2,
++		uint64_t* const rl, uint64_t* const rh )
++	{
++		const __uint128_t r = (__uint128_t) m1 * m2;
++
++		*rl = (uint64_t) r;
++		*rh = (uint64_t) ( r >> 64 );
++	}
++
++#elif defined( _MSC_VER ) && defined( _M_X64 )
++
++	#include <intrin.h>
++
++	static inline void kh_m128( const uint64_t m1, const uint64_t m2,
++		uint64_t* const rl, uint64_t* const rh )
++	{
++		*rl = _umul128( m1, m2, rh );
++	}
++
++#else // defined( _MSC_VER )
++
++	// _umul128() code for 32-bit systems, adapted from mullu(),
++	// from https://go.dev/src/runtime/softfloat64.go
++	// Licensed under BSD-style license.
++
++	static inline uint64_t kh__emulu( const uint32_t x, const uint32_t y )
++	{
++		return( x * (uint64_t) y );
++	}
++
++	static inline void kh_m128( const uint64_t u, const uint64_t v,
++		uint64_t* const rl, uint64_t* const rh )
++	{
++		*rl = u * v;
++
++		const uint32_t u0 = (uint32_t) u;
++		const uint32_t v0 = (uint32_t) v;
++		const uint64_t w0 = kh__emulu( u0, v0 );
++		const uint32_t u1 = (uint32_t) ( u >> 32 );
++		const uint32_t v1 = (uint32_t) ( v >> 32 );
++		const uint64_t t = kh__emulu( u1, v0 ) + ( w0 >> 32 );
++		const uint64_t w1 = (uint32_t) t + kh__emulu( u0, v1 );
++
++		*rh = kh__emulu( u1, v1 ) + ( w1 >> 32 ) + ( t >> 32 );
++	}
++
++#endif // defined( _MSC_VER )
++
++// Common hashing round with 16-byte input, using the "r1l" and "r1h"
++// temporary variables.
++
++#define KOMIHASH_HASH16( m ) \
++	kh_m128( Seed1 ^ kh_lu64ec( m ), \
++		Seed5 ^ kh_lu64ec( m + 8 ), &r1l, &r1h ); \
++	Seed5 += r1h; \
++	Seed1 = Seed5 ^ r1l;
++
++// Common hashing round without input, using the "r2l" and "r2h" temporary
++// variables.
++
++#define KOMIHASH_HASHROUND() \
++	kh_m128( Seed1, Seed5, &r2l, &r2h ); \
++	Seed5 += r2h; \
++	Seed1 = Seed5 ^ r2l;
++
++// Common hashing finalization round, with the final hashing input expected in
++// the "r2l" and "r2h" temporary variables.
++
++#define KOMIHASH_HASHFIN() \
++	kh_m128( r2l, r2h, &r1l, &r1h ); \
++	Seed5 += r1h; \
++	Seed1 = Seed5 ^ r1l; \
++	KOMIHASH_HASHROUND();
++
++/**
++ * KOMIHASH hash function. Produces and returns a 64-bit hash value of the
++ * specified message, string, or binary data block. Designed for 64-bit
++ * hash-table and hash-map uses. Produces identical hashes on both big- and
++ * little-endian systems.
++ *
++ * @param Msg0 The message to produce a hash from. The alignment of this
++ * pointer is unimportant.
++ * @param MsgLen Message's length, in bytes.
++ * @param UseSeed Optional value, to use instead of the default seed. To use
++ * the default seed, set to 0. The UseSeed value can have any bit length and
++ * statistical quality, and is used only as an additional entropy source. May
++ * need endianness-correction if this value is shared between big- and
++ * little-endian systems.
++ */
++
++static inline uint64_t komihash( const void* const Msg0, size_t MsgLen,
++	const uint64_t UseSeed )
++{
++	const uint8_t* Msg = (const uint8_t*) Msg0;
++
++	// The seeds are initialized to the first mantissa bits of PI.
++
++	uint64_t Seed1 = 0x243F6A8885A308D3 ^ ( UseSeed & 0x5555555555555555 );
++	uint64_t Seed5 = 0x452821E638D01377 ^ ( UseSeed & 0xAAAAAAAAAAAAAAAA );
++	uint64_t r1l, r1h, r2l, r2h;
++
++	// The three instructions in the "KOMIHASH_HASHROUND" macro represent the
++	// simplest constant-less PRNG, scalable to any even-sized state
++	// variables, with the `Seed1` being the PRNG output (2^64 PRNG period).
++	// It passes `PractRand` tests with rare non-systematic "unusual"
++	// evaluations.
++	//
++	// To make this PRNG reliable, self-starting, and eliminate a risk of
++	// stopping, the following variant can be used, which is a "register
++	// checker-board", a source of raw entropy. The PRNG is available as the
++	// komirand() function. Not required for hashing (but works for it) since
++	// the input entropy is usually available in abundance during hashing.
++	//
++	// Seed5 += r2h + 0xAAAAAAAAAAAAAAAA;
++	//
++	// (the `0xAAAA...` constant should match register's size; essentially,
++	// it is a replication of the `10` bit-pair; it is not an arbitrary
++	// constant).
++
++	KOMIHASH_HASHROUND(); // Required for PerlinNoise.
++
++	if( KOMIHASH_LIKELY( MsgLen < 16 ))
++	{
++		KOMIHASH_PREFETCH( Msg );
++
++		r2l = Seed1;
++		r2h = Seed5;
++
++		if( MsgLen > 7 )
++		{
++			// The following two XOR instructions are equivalent to mixing a
++			// message with a cryptographic one-time-pad (bitwise modulo 2
++			// addition). Message's statistics and distribution are thus
++			// unimportant.
++
++			r2h ^= kh_lpu64ec_l3( Msg + 8, MsgLen - 8,
++				1 << ( Msg[ MsgLen - 1 ] >> 7 ));
++
++			r2l ^= kh_lu64ec( Msg );
++		}
++		else
++		if( KOMIHASH_LIKELY( MsgLen != 0 ))
++		{
++			r2l ^= kh_lpu64ec_nz( Msg, MsgLen,
++				1 << ( Msg[ MsgLen - 1 ] >> 7 ));
++		}
++
++		KOMIHASH_HASHFIN();
++
++		return( Seed1 );
++	}
++
++	if( KOMIHASH_LIKELY( MsgLen < 32 ))
++	{
++		KOMIHASH_PREFETCH( Msg );
++
++		KOMIHASH_HASH16( Msg );
++
++		const uint64_t fb = 1 << ( Msg[ MsgLen - 1 ] >> 7 );
++
++		if( MsgLen > 23 )
++		{
++			r2h = Seed5 ^ kh_lpu64ec_l4( Msg + 24, MsgLen - 24, fb );
++			r2l = Seed1 ^ kh_lu64ec( Msg + 16 );
++		}
++		else
++		{
++			r2l = Seed1 ^ kh_lpu64ec_l4( Msg + 16, MsgLen - 16, fb );
++			r2h = Seed5;
++		}
++
++		KOMIHASH_HASHFIN();
++
++		return( Seed1 );
++	}
++
++	if( MsgLen > 63 )
++	{
++		uint64_t Seed2 = 0x13198A2E03707344 ^ Seed1;
++		uint64_t Seed3 = 0xA4093822299F31D0 ^ Seed1;
++		uint64_t Seed4 = 0x082EFA98EC4E6C89 ^ Seed1;
++		uint64_t Seed6 = 0xBE5466CF34E90C6C ^ Seed5;
++		uint64_t Seed7 = 0xC0AC29B7C97C50DD ^ Seed5;
++		uint64_t Seed8 = 0x3F84D5B5B5470917 ^ Seed5;
++		uint64_t r3l, r3h, r4l, r4h;
++
++		do
++		{
++			KOMIHASH_PREFETCH( Msg );
++
++			kh_m128( Seed1 ^ kh_lu64ec( Msg ),
++				Seed5 ^ kh_lu64ec( Msg + 8 ), &r1l, &r1h );
++
++			kh_m128( Seed2 ^ kh_lu64ec( Msg + 16 ),
++				Seed6 ^ kh_lu64ec( Msg + 24 ), &r2l, &r2h );
++
++			kh_m128( Seed3 ^ kh_lu64ec( Msg + 32 ),
++				Seed7 ^ kh_lu64ec( Msg + 40 ), &r3l, &r3h );
++
++			kh_m128( Seed4 ^ kh_lu64ec( Msg + 48 ),
++				Seed8 ^ kh_lu64ec( Msg + 56 ), &r4l, &r4h );
++
++			Msg += 64;
++			MsgLen -= 64;
++
++			// Such "shifting" arrangement (below) does not increase
++			// individual SeedN's PRNG period beyond 2^64, but reduces a
++			// chance of any occassional synchronization between PRNG lanes
++			// happening. Practically, Seed1-4 together become a single
++			// "fused" 256-bit PRNG value, having a summary PRNG period of
++			// 2^66.
++
++			Seed5 += r1h;
++			Seed6 += r2h;
++			Seed7 += r3h;
++			Seed8 += r4h;
++			Seed2 = Seed5 ^ r2l;
++			Seed3 = Seed6 ^ r3l;
++			Seed4 = Seed7 ^ r4l;
++			Seed1 = Seed8 ^ r1l;
++
++		} while( KOMIHASH_LIKELY( MsgLen > 63 ));
++
++		Seed5 ^= Seed6 ^ Seed7 ^ Seed8;
++		Seed1 ^= Seed2 ^ Seed3 ^ Seed4;
++	}
++
++	KOMIHASH_PREFETCH( Msg );
++
++	if( KOMIHASH_LIKELY( MsgLen > 31 ))
++	{
++		KOMIHASH_HASH16( Msg );
++		KOMIHASH_HASH16( Msg + 16 );
++
++		Msg += 32;
++		MsgLen -= 32;
++	}
++
++	if( MsgLen > 15 )
++	{
++		KOMIHASH_HASH16( Msg );
++
++		Msg += 16;
++		MsgLen -= 16;
++	}
++
++	const uint64_t fb = 1 << ( Msg[ MsgLen - 1 ] >> 7 );
++
++	if( MsgLen > 7 )
++	{
++		r2h = Seed5 ^ kh_lpu64ec_l4( Msg + 8, MsgLen - 8, fb );
++		r2l = Seed1 ^ kh_lu64ec( Msg );
++	}
++	else
++	{
++		r2l = Seed1 ^ kh_lpu64ec_l4( Msg, MsgLen, fb );
++		r2h = Seed5;
++	}
++
++	KOMIHASH_HASHFIN();
++
++	return( Seed1 );
++}
++
++/**
++ * Simple, reliable, self-starting yet efficient PRNG, with 2^64 period.
++ * 0.62 cycles/byte performance. Self-starts in 4 iterations, which is a
++ * suggested "warming up" initialization before using its output.
++ *
++ * @param[in,out] Seed1 Seed value 1. Can be initialized to any value
++ * (even 0). This is the usual "PRNG seed" value.
++ * @param[in,out] Seed2 Seed value 2, a supporting variable. Best initialized
++ * to the same value as Seed1.
++ * @return The next uniformly-random 64-bit value.
++ */
++
++static inline uint64_t komirand( uint64_t* const Seed1, uint64_t* const Seed2 )
++{
++	uint64_t r1l, r1h;
++
++	kh_m128( *Seed1, *Seed2, &r1l, &r1h );
++	*Seed2 += r1h + 0xAAAAAAAAAAAAAAAA;
++	*Seed1 = *Seed2 ^ r1l;
++
++	return( *Seed1 );
++}
++
++#pragma GCC diagnostic pop
++
++#endif // KOMIHASH_INCLUDED
+diff --git a/src/include/common/pagefeat.h b/src/include/common/pagefeat.h
+index f07e1af315..57650cdc7b 100644
+--- a/src/include/common/pagefeat.h
++++ b/src/include/common/pagefeat.h
+@@ -16,6 +16,7 @@
+ 
+ /* revealed for GUCs */
+ extern PGDLLIMPORT int reserved_page_size;
++extern PGDLLIMPORT bool page_feature_extended_checksums;
+ 
+ /* forward declaration to avoid circular includes */
+ typedef Pointer Page;
+@@ -28,6 +29,7 @@ extern PGDLLIMPORT PageFeatureSet cluster_page_features;
+ 
+ /* bit offset for features flags */
+ typedef enum {
++	PF_EXT_CHECKSUMS = 0,  /* must be first */
+ 	PF_MAX_FEATURE /* must be last */
+ } PageFeature;
+ 
+diff --git a/src/include/storage/bufpage.h b/src/include/storage/bufpage.h
+index afaa466ec5..377276b8e8 100644
+--- a/src/include/storage/bufpage.h
++++ b/src/include/storage/bufpage.h
+@@ -78,7 +78,16 @@
+  * initialize its pages with PageInit and then set its own opaque
+  * fields.
+  *
+- * XXX - update more comments here about reserved_page_space
++ * If any page features are in use (thus reserving the cluster-wise
++ * reserved_page_space), then the special space offset will be adjusted to
++ * start not at the end of the block itself, but right before the MAXALIGN'd
++ * reserved_page_space chunk at the end, which is allocated/managed using the
++ * page features mechanism.  This adjustment is done at PageInit() time
++ * transparently to the AM, which still uses the normal pd_special pointer to
++ * reference its opaque block.  The only difference here is that the
++ * pd_special field + sizeof(opaque structure) will not (necessarily) be the
++ * same as the heap block size, but instead BLCKSZ - reserved_page_space.
++ *
+  */
+ 
+ typedef Pointer Page;
+@@ -119,7 +128,7 @@ PageXLogRecPtrGet(PageXLogRecPtr val)
+  *
+  *		pd_lsn		- identifies xlog record for last change to this page.
+  *		pd_feat     - union type, one of:
+- *         checksum - page checksum, if checksums enabled.
++ *         checksum - page checksum, if legacy checksums are enabled.
+  *         features - page features, if using extended feature flags.
+  *		pd_flags	- flag bits.
+  *		pd_lower	- offset to start of free space.
+diff --git a/src/include/storage/checksum.h b/src/include/storage/checksum.h
+index 4afd25a0af..1c319dd2c5 100644
+--- a/src/include/storage/checksum.h
++++ b/src/include/storage/checksum.h
+@@ -20,5 +20,8 @@
+  * 4-byte boundary.
+  */
+ extern uint16 pg_checksum_page(char *page, BlockNumber blkno);
++extern uint64 pg_checksum64_page(char *page, BlockNumber blkno, uint64*offset);
++extern void pg_set_checksum64_page(char *page, uint64 checksum, uint64 *cksumloc);
++extern uint64 pg_get_checksum64_page(char *page, uint64 *cksumloc);
+ 
+ #endif							/* CHECKSUM_H */
+diff --git a/src/include/storage/checksum_impl.h b/src/include/storage/checksum_impl.h
+index 25933f1759..b10c9447bd 100644
+--- a/src/include/storage/checksum_impl.h
++++ b/src/include/storage/checksum_impl.h
+@@ -101,6 +101,7 @@
+  */
+ 
+ #include "storage/bufpage.h"
++#include "common/komihash.h"
+ 
+ /* number of checksums to calculate in parallel */
+ #define N_SUMS 32
+@@ -214,3 +215,91 @@ pg_checksum_page(char *page, BlockNumber blkno)
+ 	 */
+ 	return (uint16) ((checksum % 65535) + 1);
+ }
++
++
++/*
++ * 64-bit block checksum algorithm.  The page must be adequately aligned
++ * (on an 8-byte boundary).
++ */
++
++static uint64
++pg_checksum64_block(const PGChecksummablePage *page)
++{
++	/* ensure that the size is compatible with the algorithm */
++	Assert(sizeof(PGChecksummablePage) == BLCKSZ);
++
++	return (uint64)komihash(page, BLCKSZ, 0);
++}
++
++/*
++ * Compute and return a 64-bit checksum for a Postgres page.
++ *
++ * Beware that the 64-bit portion of the page that cksum points to is
++ * transiently zeroed, though it is restored.
++ *
++ * The checksum includes the block number (to detect the case where a page is
++ * somehow moved to a different location), the page header (excluding the
++ * checksum itself), and the page data.
++ */
++uint64
++pg_checksum64_page(char *page, BlockNumber blkno, uint64 *cksumloc)
++{
++	PGChecksummablePage *cpage = (PGChecksummablePage *) page;
++	uint64      saved;
++	uint64      checksum;
++
++	/* We only calculate the checksum for properly-initialized pages */
++	Assert(!PageIsNew((Page) page));
++	/* Ensure that the cksum pointer is in the page range on this page */
++	Assert((char*)cksumloc >= page && (char*)cksumloc <= (page + BLCKSZ - sizeof(uint64)));
++
++	saved = *cksumloc;
++	*cksumloc = 0;
++
++	checksum = pg_checksum64_block(cpage);
++
++	/* restore */
++	*cksumloc = saved;
++
++	/* Mix in the block number to detect transposed pages */
++	checksum ^= blkno;
++
++	/* ensure in the extremely unlikely case that we have non-zero return
++	 * value here; this does double-up on our coset for group 1 here, but it's
++	 * a nice property to preserve */
++	return (checksum == 0 ? 1 : checksum);
++}
++
++
++/*
++ * Set a 64-bit checksum onto a Postgres page.
++ *
++ */
++void
++pg_set_checksum64_page(char *page, uint64 checksum, uint64 *cksumloc)
++{
++	/* Can only set the checksum for properly-initialized pages */
++	Assert(!PageIsNew((Page) page));
++
++	/* Ensure that the cksum pointer is in the page range on this page */
++	Assert((char*)cksumloc >= page && (char*)cksumloc <= (page + BLCKSZ - sizeof(uint64)));
++	*cksumloc = checksum;
++}
++
++/*
++ * Get the 64-bit checksum onto a Postgres page given the offset to the
++ * containing uint64.
++ */
++uint64
++pg_get_checksum64_page(char *page, uint64 *cksumloc)
++{
++	/* Can only set the checksum for properly-initialized pages */
++	Assert(!PageIsNew((Page) page));
++
++	/* Ensure that the cksum pointer is in the page range on this page */
++	Assert((char*)cksumloc >= page && (char*)cksumloc <= (page + BLCKSZ - sizeof(uint64)));
++	Assert(MAXALIGN((uint64)cksumloc) == (uint64)cksumloc);
++
++	return *cksumloc;
++}
++
+-- 
+2.39.2
+
