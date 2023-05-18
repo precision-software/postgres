@@ -166,6 +166,7 @@ static bool do_sync = true;
 static bool sync_only = false;
 static bool show_setting = false;
 static bool data_checksums = false;
+static bool using_page_feats = false;
 static char *xlog_dir = NULL;
 static char *str_wal_segment_size_mb = NULL;
 static int	wal_segment_size_mb;
@@ -3446,6 +3447,10 @@ main(int argc, char *argv[])
 	setup_text_search();
 
 	printf("\n");
+
+	/* check for incompatible extended features */
+	if (data_checksums && using_page_feats)
+		pg_fatal("cannot use page features and data_checksums at the same time");
 
 	if (data_checksums)
 		printf(_("Data page checksums are enabled.\n"));

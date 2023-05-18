@@ -217,7 +217,7 @@ XLogRecordPageWithFreeSpace(RelFileLocator rlocator, BlockNumber heapBlk,
 
 	page = BufferGetPage(buf);
 	if (PageIsNew(page))
-		PageInit(page, BLCKSZ, 0);
+		PageInit(page, BLCKSZ, 0, cluster_page_features);
 
 	if (fsm_set_avail(page, slot, new_cat))
 		MarkBufferDirtyHint(buf, false);
@@ -598,7 +598,7 @@ fsm_readbuf(Relation rel, FSMAddress addr, bool extend)
 	{
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		if (PageIsNew(BufferGetPage(buf)))
-			PageInit(BufferGetPage(buf), BLCKSZ, 0);
+			PageInit(BufferGetPage(buf), BLCKSZ, 0, cluster_page_features);
 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 	}
 	return buf;

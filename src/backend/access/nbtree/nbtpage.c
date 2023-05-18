@@ -1125,7 +1125,7 @@ _bt_upgradelockbufcleanup(Relation rel, Buffer buf)
 void
 _bt_pageinit(Page page, Size size)
 {
-	PageInit(page, size, sizeof(BTPageOpaqueData));
+	PageInit(page, size, sizeof(BTPageOpaqueData), cluster_page_features);
 }
 
 /*

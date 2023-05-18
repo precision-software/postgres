@@ -26,6 +26,7 @@
 #include "catalog/pg_control.h"
 #include "common/controldata_utils.h"
 #include "common/logging.h"
+#include "common/pagefeat.h"
 #include "getopt_long.h"
 #include "pg_getopt.h"
 
@@ -328,5 +329,7 @@ main(int argc, char *argv[])
 		   ControlFile->data_checksum_version);
 	printf(_("Mock authentication nonce:            %s\n"),
 		   mock_auth_nonce_str);
+	printf(_("Reserved page size for features:      %d\n"),
+		   PageFeatureSetCalculateSize(ControlFile->page_features));
 	return 0;
 }
