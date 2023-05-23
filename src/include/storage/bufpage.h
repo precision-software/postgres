@@ -258,6 +258,29 @@ PageGetContents(Page page)
 	return (char *) page + MAXALIGN(SizeOfPageHeaderData);
 }
 
+/*
+ * PageGetContentSize
+ *     Returns the size of the page contents.
+ *
+ *     To be used in cases where the page does not contain line pointers.
+ */
+static inline Size
+PageGetContentSize(Page page)
+{
+	return ((PageHeader) page)->pd_lower - MAXALIGN(SizeOfPageHeaderData);
+}
+
+/*
+ * PageSetContentSize
+ *     Sets the size of the page contents.
+ */
+static inline void
+PageSetContentSize(Page page, Size size)
+{
+	((PageHeader) page)->pd_lower = MAXALIGN(SizeOfPageHeaderData) + size;
+	Assert(((PageHeader) page)->pd_lower <= ((PageHeader) page)->pd_upper);
+}
+
 /* ----------------
  *		functions to access page size info
  * ----------------

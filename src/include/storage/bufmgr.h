@@ -279,10 +279,9 @@ BufferGetBlock(Buffer buffer)
  * Notes:
  *		Assumes buffer is valid.
  *
- *		The buffer can be a raw disk block and need not contain a valid
- *		(formatted) disk page.
+ *		The buffer must always containe a valid (formatted) disk page.
+ *		To get the size of the contents of the page, use BufferGetContentSize.
  */
-/* XXX should dig out of buffer descriptor */
 static inline Size
 BufferGetPageSize(Buffer buffer)
 {
@@ -302,6 +301,63 @@ BufferGetPage(Buffer buffer)
 {
 	return (Page) BufferGetBlock(buffer);
 }
+
+/*****************************************************************
+ * Convenience functions to access buffer data.
+ * These are essentially the same as the Page functions,,
+ * but they abstract away our need to know about formatted pages.
+ *****************************************************************/
+
+/*
+ * BufferGetContents
+ *     Returns the contents of the buffer page.
+ */
+static inline char *
+BufferGetContents(Buffer buffer)
+{
+	return PageGetContents(BufferGetPage(buffer));
+}
+
+/*
+ * BufferGetContentSize
+ *    Returns the size of the buffer page contents.
+ */
+static inline Size
+BufferGetContentSize(Buffer buffer)
+{
+	return PageGetContentSize(BufferGetPage(buffer));
+}
+
+/*
+ * BufferSetContentSize
+ *    Sets the size of the buffer page contents.
+ */
+static inline void
+BufferSetContentSize(Buffer buffer, Size size)
+{
+	PageSetContentSize(BufferGetPage(buffer), size);
+}
+
+/*
+ * BufferGetLSN
+ *     Returns the LSN associated with the buffer page.
+ */
+static inline XLogRecPtr
+BufferGetLSN(Buffer buffer)
+{
+	return PageGetLSN(BufferGetPage(buffer));
+}
+
+/*
+ * BufferSetLSN
+ *      Sets the LSN for the buffer page.
+ */
+static inline void
+BufferSetLSN(Buffer buffer, XLogRecPtr lsn)
+{
+	PageSetLSN(BufferGetPage(buffer), lsn);
+}
+
 
 /*
  * Check whether the given snapshot is too old to have safely read the given
