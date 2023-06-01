@@ -745,7 +745,7 @@ GetLocalBufferStorage(void)
 		/* But not more than what we need for all remaining local bufs */
 		num_bufs = Min(num_bufs, NLocBuffer - total_bufs_allocated);
 		/* And don't overflow MaxAllocSize, either */
-		num_bufs = Min(num_bufs, MaxAllocSize / cluster_block_size);
+		num_bufs = Min(num_bufs, MaxAllocSize >> cluster_block_bits);
 
 		/* Buffers should be I/O aligned. */
 		cur_block = (char *)

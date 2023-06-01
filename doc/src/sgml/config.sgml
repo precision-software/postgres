@@ -10625,12 +10625,13 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
       </term>
       <listitem>
        <para>
-        Reports the size of a disk block.  It is determined by the value
-        of <literal>cluster_block_size</literal> when building the server. The default
-        value is 8192 bytes.  The meaning of some configuration
+        Reports the size of a disk block for this cluster.
+        The default value is 8192 bytes.  The meaning of some configuration
         variables (such as <xref linkend="guc-shared-buffers"/>) is
         influenced by <varname>block_size</varname>. See <xref
-        linkend="runtime-config-resource"/> for information.
+        linkend="runtime-config-resource"/> for information on GUC configuration
+        or <xref linkend="app-initdb-blocksize"/> for more information on
+        selecting a cluster's block size.
        </para>
       </listitem>
      </varlistentry>

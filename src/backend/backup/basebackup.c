@@ -23,6 +23,7 @@
 #include "backup/basebackup_sink.h"
 #include "backup/basebackup_target.h"
 #include "commands/defrem.h"
+#include "common/blocksize.h"
 #include "common/compression.h"
 #include "common/file_perm.h"
 #include "lib/stringinfo.h"
@@ -370,7 +371,7 @@ perform_base_backup(basebackup_options *opt, bbsink *sink)
 			else
 			{
 				/* Properly terminate the tarfile. */
-				StaticAssertDecl(2 * TAR_BLOCK_SIZE <= cluster_block_size,
+				StaticAssertDecl(2 * TAR_BLOCK_SIZE <= MAX_BLOCK_SIZE,
 								 "cluster_block_size too small for 2 tar blocks");
 				memset(sink->bbs_buffer, 0, 2 * TAR_BLOCK_SIZE);
 				bbsink_archive_contents(sink, 2 * TAR_BLOCK_SIZE);
@@ -623,7 +624,7 @@ perform_base_backup(basebackup_options *opt, bbsink *sink)
 		}
 
 		/* Properly terminate the tar file. */
-		StaticAssertStmt(2 * TAR_BLOCK_SIZE <= cluster_block_size,
+		StaticAssertStmt(2 * TAR_BLOCK_SIZE <= MAX_BLOCK_SIZE,
 						 "cluster_block_size too small for 2 tar blocks");
 		memset(sink->bbs_buffer, 0, 2 * TAR_BLOCK_SIZE);
 		bbsink_archive_contents(sink, 2 * TAR_BLOCK_SIZE);
@@ -1580,7 +1581,7 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 
 		if (verify_checksum)
 		{
-			for (i = 0; i < cnt / cluster_block_size; i++)
+			for (i = 0; i < cnt >> cluster_block_bits; i++)
 			{
 				page = sink->bbs_buffer + cluster_block_size * i;
 
@@ -1594,7 +1595,7 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 				 */
 				if (!PageIsNew(page) && PageGetLSN(page) < sink->bbs_state->startptr)
 				{
-					checksum = pg_checksum_page((char *) page, blkno + segmentno * RELSEG_SIZE);
+					checksum = pg_checksum_page((char *) page, blkno + segmentno * RELSEG_SIZE, cluster_block_size);
 					phdr = (PageHeader) page;
 					if (phdr->pd_checksum != checksum)
 					{
@@ -1749,8 +1750,8 @@ _tarWriteHeader(bbsink *sink, const char *filename, const char *linktarget,
 		 * large enough to fit an entire tar block. We double-check by means
 		 * of these assertions.
 		 */
-		StaticAssertDecl(TAR_BLOCK_SIZE <= cluster_block_size,
-						 "cluster_block_size too small for tar block");
+		StaticAssertDecl(TAR_BLOCK_SIZE <= DEFAULT_BLOCK_SIZE,
+						 "DEFAULT_BLOCK_SIZE too small for tar block");
 		Assert(sink->bbs_buffer_length >= TAR_BLOCK_SIZE);
 
 		rc = tarCreateHeader(sink->bbs_buffer, filename, linktarget,

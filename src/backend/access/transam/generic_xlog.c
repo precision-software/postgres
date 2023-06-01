@@ -45,7 +45,7 @@
  */
 #define FRAGMENT_HEADER_SIZE	(2 * sizeof(OffsetNumber))
 #define MATCH_THRESHOLD			FRAGMENT_HEADER_SIZE
-#define MAX_DELTA_SIZE			(cluster_block_size + 2 * FRAGMENT_HEADER_SIZE)
+#define MAX_DELTA_SIZE			(MAX_BLOCK_SIZE + 2 * FRAGMENT_HEADER_SIZE)
 
 /* Struct of generic xlog data for single page */
 typedef struct

@@ -3943,10 +3943,10 @@ check_debug_io_direct(char **newval, void **extra, GucSource source)
 		result = false;
 	}
 #endif
-#if cluster_block_size < PG_IO_ALIGN_SIZE
+#if DEFAULT_BLOCK_SIZE < PG_IO_ALIGN_SIZE
 	if (result && (flags & IO_DIRECT_DATA))
 	{
-		GUC_check_errdetail("debug_io_direct is not supported for data because cluster_block_size is too small");
+		GUC_check_errdetail("debug_io_direct is not supported for data because DEFAULT_BLOCK_SIZE is too small");
 		result = false;
 	}
 #endif

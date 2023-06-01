@@ -3500,7 +3500,7 @@ RelationGetNumberOfBlocksInFork(Relation relation, ForkNumber forkNum)
 
 		szbytes = table_relation_size(relation, forkNum);
 
-		return (szbytes + (cluster_block_size - 1)) / cluster_block_size;
+		return (szbytes + (cluster_block_size - 1)) >> cluster_block_bits;
 	}
 	else if (RELKIND_HAS_STORAGE(relation->rd_rel->relkind))
 	{

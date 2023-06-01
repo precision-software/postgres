@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "catalog/pg_tablespace_d.h"
+#include "common/blocksize.h"
 #include "common/hashfn.h"
 #include "common/string.h"
 #include "datapagemap.h"

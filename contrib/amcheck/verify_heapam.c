@@ -403,11 +403,11 @@ verify_heapam(PG_FUNCTION_ARGS)
 	for (ctx.blkno = first_block; ctx.blkno <= last_block; ctx.blkno++)
 	{
 		OffsetNumber maxoff;
-		OffsetNumber predecessor[MaxOffsetNumber];
-		OffsetNumber successor[MaxOffsetNumber];
-		bool		lp_valid[MaxOffsetNumber];
-		bool		xmin_commit_status_ok[MaxOffsetNumber];
-		XidCommitStatus xmin_commit_status[MaxOffsetNumber];
+		OffsetNumber predecessor[MaxOffsetNumberLimit];
+		OffsetNumber successor[MaxOffsetNumberLimit];
+		bool		lp_valid[MaxOffsetNumberLimit];
+		bool		xmin_commit_status_ok[MaxOffsetNumberLimit];
+		XidCommitStatus xmin_commit_status[MaxOffsetNumberLimit];
 
 		CHECK_FOR_INTERRUPTS();
 

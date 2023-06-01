@@ -1156,9 +1156,9 @@ backtrack:
 	}
 	else if (P_ISLEAF(opaque))
 	{
-		OffsetNumber deletable[MaxIndexTuplesPerPage];
+		OffsetNumber deletable[MaxIndexTuplesPerPageLimit];
 		int			ndeletable;
-		BTVacuumPosting updatable[MaxIndexTuplesPerPage];
+		BTVacuumPosting updatable[MaxIndexTuplesPerPageLimit];
 		int			nupdatable;
 		OffsetNumber offnum,
 					minoff,

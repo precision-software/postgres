@@ -98,7 +98,7 @@
  * (Note that this is deliberately kept to a power-of-two, usually 2^19.)
  */
 #define failsafe_every_pages \
-	((BlockNumber) (((uint64) 4 * 1024 * 1024 * 1024) / cluster_block_size))
+	((BlockNumber) (((uint64) 4 * 1024 * 1024 * 1024) >> cluster_block_bits))
 
 /*
  * When a table has no indexes, vacuum the FSM after every 8GB, approximately
@@ -107,7 +107,7 @@
  * and we vacuum FSM after each index/heap cleaning pass.
  */
 #define vacuum_fsm_every_pages \
-	((BlockNumber) (((uint64) 8 * 1024 * 1024 * 1024) / cluster_block_size))
+	((BlockNumber) (((uint64) 8 * 1024 * 1024 * 1024) >> cluster_block_bits))
 
 /*
  * Before we consider skipping a page that's marked as clean in
@@ -1552,8 +1552,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	int			nnewlpdead;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
-	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
-	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+	OffsetNumber deadoffsets[MaxHeapTuplesPerPageLimit];
+	HeapTupleFreeze frozen[MaxHeapTuplesPerPageLimit];
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1972,7 +1972,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 	HeapTupleHeader tupleheader;
 	TransactionId NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid = vacrel->NewRelminMxid;
-	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
+	OffsetNumber deadoffsets[MaxHeapTuplesPerPageLimit];
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -2526,7 +2526,7 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 {
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Page		page = BufferGetPage(buffer);
-	OffsetNumber unused[MaxHeapTuplesPerPage];
+	OffsetNumber unused[MaxHeapTuplesPerPageLimit];
 	int			nunused = 0;
 	TransactionId visibility_cutoff_xid;
 	bool		all_frozen;

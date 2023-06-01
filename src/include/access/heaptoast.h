@@ -20,10 +20,8 @@
 /*
  * Find the maximum size of a tuple if there are to be N tuples per page.
  */
-#define MaximumBytesPerTuple(tuplesPerPage) \
-	MAXALIGN_DOWN((cluster_block_size - \
-				   MAXALIGN(SizeOfPageHeaderData + (tuplesPerPage) * sizeof(ItemIdData))) \
-				  / (tuplesPerPage))
+#define MaximumBytesPerTuple(tuplesPerPage) CalcMaximumBytesPerTuple(cluster_block_size,tuplesPerPage)
+BlockSizeDecl2(CalcMaximumBytesPerTuple);
 
 /*
  * These symbols control toaster activation.  If a tuple is larger than
@@ -45,7 +43,7 @@
  */
 #define TOAST_TUPLES_PER_PAGE	4
 
-#define toast_tuple_threshold	MaximumBytesPerTuple(TOAST_TUPLES_PER_PAGE)
+#define toast_tuple_threshold	CalcMaximumBytesPerTuple(cluster_block_size,TOAST_TUPLES_PER_PAGE)
 
 #define cluster_toast_tuple_target		toast_tuple_threshold
 
@@ -58,7 +56,7 @@
  */
 #define TOAST_TUPLES_PER_PAGE_MAIN	1
 
-#define toast_tuple_target_main MaximumBytesPerTuple(TOAST_TUPLES_PER_PAGE_MAIN)
+#define toast_tuple_target_main CalcMaximumBytesPerTuple(cluster_block_size,TOAST_TUPLES_PER_PAGE_MAIN)
 
 /*
  * If an index value is larger than TOAST_INDEX_TARGET, we will try to
@@ -81,12 +79,10 @@
 
 #define EXTERN_TUPLE_MAX_SIZE	MaximumBytesPerTuple(EXTERN_TUPLES_PER_PAGE)
 
-#define cluster_toast_max_chunk_size	\
-	(EXTERN_TUPLE_MAX_SIZE -							\
-	 MAXALIGN(SizeofHeapTupleHeader) -					\
-	 sizeof(Oid) -										\
-	 sizeof(int32) -									\
-	 VARHDRSZ)
+#define TOAST_MAX_CHUNK_SIZE_LIMIT CalcToastMaxChunkSize(MAX_BLOCK_SIZE)
+#define cluster_toast_max_chunk_size BlockSizeCalc(cluster_block_setting,CalcToastMaxChunkSize)
+BlockSizeDecl(CalcToastMaxChunkSize);
+
 
 /* ----------
  * heap_toast_insert_or_update -

@@ -163,7 +163,7 @@
  * than that, so changes in that data structure won't affect user-visible
  * restrictions.
  */
-#define NOTIFY_PAYLOAD_MAX_LENGTH	(cluster_block_size - NAMEDATALEN - 128)
+#define NOTIFY_PAYLOAD_MAX_LENGTH	(DEFAULT_BLOCK_SIZE - NAMEDATALEN - 128)
 
 /*
  * Struct representing an entry in the global notify queue
@@ -311,7 +311,7 @@ static AsyncQueueControl *asyncQueueControl;
 static SlruCtlData NotifyCtlData;
 
 #define NotifyCtl					(&NotifyCtlData)
-#define QUEUE_PAGESIZE				cluster_block_size
+#define QUEUE_PAGESIZE				DEFAULT_BLOCK_SIZE
 #define QUEUE_FULL_WARN_INTERVAL	5000	/* warn at most once every 5s */
 
 /*

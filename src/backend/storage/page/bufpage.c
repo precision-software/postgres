@@ -102,7 +102,7 @@ PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags)
 	{
 		if (DataChecksumsEnabled())
 		{
-			checksum = pg_checksum_page((char *) page, blkno);
+			checksum = pg_checksum_page((char *) page, blkno, cluster_block_size);
 
 			if (checksum != p->pd_checksum)
 				checksum_failure = true;
@@ -702,7 +702,7 @@ PageRepairFragmentation(Page page)
 	Offset		pd_upper = ((PageHeader) page)->pd_upper;
 	Offset		pd_special = ((PageHeader) page)->pd_special;
 	Offset		last_offset;
-	itemIdCompactData itemidbase[MaxHeapTuplesPerPage];
+	itemIdCompactData itemidbase[MaxHeapTuplesPerPageLimit];
 	itemIdCompact itemidptr;
 	ItemId		lp;
 	int			nline,
@@ -1165,8 +1165,8 @@ PageIndexMultiDelete(Page page, OffsetNumber *itemnos, int nitems)
 	Offset		pd_upper = phdr->pd_upper;
 	Offset		pd_special = phdr->pd_special;
 	Offset		last_offset;
-	itemIdCompactData itemidbase[MaxIndexTuplesPerPage];
-	ItemIdData	newitemids[MaxIndexTuplesPerPage];
+	itemIdCompactData itemidbase[MaxIndexTuplesPerPageLimit];
+	ItemIdData	newitemids[MaxIndexTuplesPerPageLimit];
 	itemIdCompact itemidptr;
 	ItemId		lp;
 	int			nline,
@@ -1528,7 +1528,7 @@ PageSetChecksumCopy(Page page, BlockNumber blkno)
 											 0);
 
 	memcpy(pageCopy, (char *) page, cluster_block_size);
-	((PageHeader) pageCopy)->pd_checksum = pg_checksum_page(pageCopy, blkno);
+	((PageHeader) pageCopy)->pd_checksum = pg_checksum_page(pageCopy, blkno, cluster_block_size);
 	return pageCopy;
 }
 
@@ -1545,5 +1545,5 @@ PageSetChecksumInplace(Page page, BlockNumber blkno)
 	if (PageIsNew(page) || !DataChecksumsEnabled())
 		return;
 
-	((PageHeader) page)->pd_checksum = pg_checksum_page((char *) page, blkno);
+	((PageHeader) page)->pd_checksum = pg_checksum_page((char *) page, blkno, cluster_block_size);
 }

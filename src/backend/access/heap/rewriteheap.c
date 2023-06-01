@@ -657,7 +657,7 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("row is too big: size %zu, maximum size %zu",
-						len, MaxHeapTupleSize)));
+						len, (Size)MaxHeapTupleSize)));
 
 	/* Compute desired extra freespace due to fillfactor option */
 	saveFreeSpace = RelationGetTargetPageFreeSpace(state->rs_new_rel,

@@ -46,18 +46,18 @@
  * backup block image.
  */
 #ifdef USE_LZ4
-#define	LZ4_MAX_BLCKSZ		LZ4_COMPRESSBOUND(cluster_block_size)
+#define	LZ4_MAX_BLCKSZ		LZ4_COMPRESSBOUND(MAX_BLOCK_SIZE)
 #else
 #define LZ4_MAX_BLCKSZ		0
 #endif
 
 #ifdef USE_ZSTD
-#define ZSTD_MAX_BLCKSZ		ZSTD_COMPRESSBOUND(cluster_block_size)
+#define ZSTD_MAX_BLCKSZ		ZSTD_COMPRESSBOUND(MAX_BLOCK_SIZE)
 #else
 #define ZSTD_MAX_BLCKSZ		0
 #endif
 
-#define PGLZ_MAX_BLCKSZ		PGLZ_MAX_OUTPUT(cluster_block_size)
+#define PGLZ_MAX_BLCKSZ		PGLZ_MAX_OUTPUT(MAX_BLOCK_SIZE)
 
 /* Buffer size required to store a compressed version of backup block image */
 #define COMPRESS_BUFSIZE	Max(Max(PGLZ_MAX_BLCKSZ, LZ4_MAX_BLCKSZ), ZSTD_MAX_BLCKSZ)

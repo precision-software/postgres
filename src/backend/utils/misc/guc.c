@@ -30,6 +30,7 @@
 
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "access/xlog_internal.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_parameter_acl.h"
@@ -105,8 +106,8 @@ typedef struct
 } unit_conversion;
 
 /* Ensure that the constants in the tables don't overflow or underflow */
-#if cluster_block_size < 1024 || cluster_block_size > (1024*1024)
-#error cluster_block_size must be between 1KB and 1MB
+#if DEFAULT_BLOCK_SIZE < 1024 || DEFAULT_BLOCK_SIZE > (1024*1024)
+#error DEFAULT_BLOCK_SIZE must be between 1KB and 1MB
 #endif
 #if XLOG_BLCKSZ < 1024 || XLOG_BLCKSZ > (1024*1024)
 #error XLOG_BLCKSZ must be between 1KB and 1MB
@@ -134,11 +135,11 @@ static const unit_conversion memory_unit_conversion_table[] =
 	{"kB", GUC_UNIT_MB, 1.0 / 1024.0},
 	{"B", GUC_UNIT_MB, 1.0 / (1024.0 * 1024.0)},
 
-	{"TB", GUC_UNIT_BLOCKS, (1024.0 * 1024.0 * 1024.0) / (cluster_block_size / 1024)},
-	{"GB", GUC_UNIT_BLOCKS, (1024.0 * 1024.0) / (cluster_block_size / 1024)},
-	{"MB", GUC_UNIT_BLOCKS, 1024.0 / (cluster_block_size / 1024)},
-	{"kB", GUC_UNIT_BLOCKS, 1.0 / (cluster_block_size / 1024)},
-	{"B", GUC_UNIT_BLOCKS, 1.0 / cluster_block_size},
+	{"TB", GUC_UNIT_BLOCKS, (1024.0 * 1024.0 * 1024.0) / (DEFAULT_BLOCK_SIZE / 1024)},
+	{"GB", GUC_UNIT_BLOCKS, (1024.0 * 1024.0) / (DEFAULT_BLOCK_SIZE / 1024)},
+	{"MB", GUC_UNIT_BLOCKS, 1024.0 / (DEFAULT_BLOCK_SIZE / 1024)},
+	{"kB", GUC_UNIT_BLOCKS, 1.0 / (DEFAULT_BLOCK_SIZE / 1024)},
+	{"B", GUC_UNIT_BLOCKS, 1.0 / DEFAULT_BLOCK_SIZE},
 
 	{"TB", GUC_UNIT_XBLOCKS, (1024.0 * 1024.0 * 1024.0) / (XLOG_BLCKSZ / 1024)},
 	{"GB", GUC_UNIT_XBLOCKS, (1024.0 * 1024.0) / (XLOG_BLCKSZ / 1024)},
@@ -1502,6 +1503,16 @@ InitializeGUCOptions(void)
 	 * sure that timezone processing is minimally alive (see elog.c).
 	 */
 	pg_timezone_initialize();
+
+	/* Load our block size -- no valid in Bootstrap or init mode, since control file hasn't been written */
+	if (!(IsInitProcessingMode() || IsBootstrapProcessingMode()))
+	{
+		BlockSizeInit(ClusterBlockSize());
+		/*
+		 * Ensure GUCs with dynamic limits have been properly initialized
+		 */
+		update_dynamic_gucs();
+	}
 
 	/*
 	 * Create GUCMemoryContext and build hash table of all GUC variables.

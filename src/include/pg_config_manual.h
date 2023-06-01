@@ -234,6 +234,14 @@
 #define PG_IO_ALIGN_SIZE		4096
 
 /*
+ * Blocksize-related constants
+ */
+
+#define MIN_BLOCK_SIZE 1024
+#define MAX_BLOCK_SIZE 32768
+/* #define DEFAULT_BLOCK_SIZE 8192 */
+
+/*
  *------------------------------------------------------------------------
  * The following symbols are for enabling debugging code, not for
  * controlling user-visible features or resource limits.

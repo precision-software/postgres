@@ -18,6 +18,7 @@
 #include "access/xlog_internal.h"
 #include "catalog/catversion.h"
 #include "catalog/pg_control.h"
+#include "common/blocksize.h"
 #include "common/controldata_utils.h"
 #include "common/file_perm.h"
 #include "common/restricted_token.h"
@@ -339,6 +340,13 @@ main(int argc, char **argv)
 	pg_free(buffer);
 
 	sanityChecks();
+
+	if (IsValidBlockSize(ControlFile_source.blcksz) &&
+		ControlFile_source.blcksz == ControlFile_target.blcksz)
+		BlockSizeInit(ControlFile_source.blcksz);
+	else
+		pg_fatal("cluster block sizes do not match or are invalid: %d",
+				 ControlFile_source.blcksz);
 
 	/*
 	 * Usually, the TLI can be found in the latest checkpoint record. But if

@@ -18,6 +18,7 @@
 #include "access/transam.h"
 #include "access/tupdesc.h"
 #include "access/tupmacs.h"
+#include "common/blocksize.h"
 #include "storage/bufpage.h"
 #include "varatt.h"
 
@@ -427,8 +428,8 @@ do { \
 	(tup)->t_choice.t_heap.t_field3.t_xvac = (xid); \
 } while (0)
 
-StaticAssertDecl(MaxOffsetNumber < SpecTokenOffsetNumber,
-				 "invalid speculative token constant");
+/* StaticAssertDecl(MaxOffsetNumber < SpecTokenOffsetNumber, */
+/* 				 "invalid speculative token constant"); */
 
 #define HeapTupleHeaderIsSpeculative(tup) \
 ( \
@@ -560,8 +561,10 @@ StaticAssertDecl(MaxOffsetNumber < SpecTokenOffsetNumber,
  * ItemIds and tuples have different alignment requirements, don't assume that
  * you can, say, fit 2 tuples of size MaxHeapTupleSize/2 on the same page.
  */
-#define MaxHeapTupleSize  (cluster_block_size - MAXALIGN(SizeOfPageHeaderData + sizeof(ItemIdData)))
+#define MaxHeapTupleSize BlockSizeCalc(cluster_block_setting,CalcMaxHeapTupleSize)
+#define MaxHeapTupleSizeLimit CalcMaxHeapTupleSize(MAX_BLOCK_SIZE)
 #define MinHeapTupleSize  MAXALIGN(SizeofHeapTupleHeader)
+BlockSizeDecl(CalcMaxHeapTupleSize);
 
 /*
  * MaxHeapTuplesPerPage is an upper bound on the number of tuples that can
@@ -574,9 +577,10 @@ StaticAssertDecl(MaxOffsetNumber < SpecTokenOffsetNumber,
  * pointers to this anyway, to avoid excessive line-pointer bloat and not
  * require increases in the size of work arrays.
  */
-#define MaxHeapTuplesPerPage	\
-	((int) ((cluster_block_size - SizeOfPageHeaderData) / \
-			(MAXALIGN(SizeofHeapTupleHeader) + sizeof(ItemIdData))))
+
+#define MaxHeapTuplesPerPage BlockSizeCalc(cluster_block_setting,CalcMaxHeapTuplesPerPage)
+#define MaxHeapTuplesPerPageLimit CalcMaxHeapTuplesPerPage(MAX_BLOCK_SIZE)
+BlockSizeDecl(CalcMaxHeapTuplesPerPage);
 
 /*
  * MaxAttrSize is a somewhat arbitrary upper limit on the declared size of

@@ -111,7 +111,7 @@
 #define HEAPBLOCKS_PER_BYTE (BITS_PER_BYTE / BITS_PER_HEAPBLOCK)
 
 /* Number of heap blocks we can represent in one visibility map page. */
-#define HEAPBLOCKS_PER_PAGE (MAPSIZE * HEAPBLOCKS_PER_BYTE)
+#define HEAPBLOCKS_PER_PAGE (MAPSIZE << BITS_PER_HEAPBLOCK)
 
 /* Mapping from heap block number to the right bit in the visibility map */
 #define HEAPBLK_TO_MAPBLOCK(x) ((x) / HEAPBLOCKS_PER_PAGE)
@@ -414,8 +414,8 @@ visibilitymap_count(Relation rel, BlockNumber *all_visible, BlockNumber *all_fro
 		 */
 		map = (uint64 *) PageGetContents(BufferGetPage(mapBuffer));
 
-		StaticAssertStmt(MAPSIZE % sizeof(uint64) == 0,
-						 "unsupported MAPSIZE");
+		Assert(MAPSIZE % sizeof(uint64) == 0);
+
 		if (all_frozen == NULL)
 		{
 			for (i = 0; i < MAPSIZE / sizeof(uint64); i++)

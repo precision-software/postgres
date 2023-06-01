@@ -60,7 +60,7 @@
  * tablespaces when available.
  */
 #define MAX_PHYSICAL_FILESIZE	0x40000000
-#define BUFFILE_SEG_SIZE		(MAX_PHYSICAL_FILESIZE / cluster_block_size)
+#define BUFFILE_SEG_SIZE		(MAX_PHYSICAL_FILESIZE >> cluster_block_bits)
 
 /*
  * This data structure represents a buffered file that consists of one or
@@ -867,7 +867,7 @@ BufFileTellBlock(BufFile *file)
 {
 	long		blknum;
 
-	blknum = (file->curOffset + file->pos) / cluster_block_size;
+	blknum = (file->curOffset + file->pos) >> cluster_block_bits;
 	blknum += file->curFile * BUFFILE_SEG_SIZE;
 	return blknum;
 }

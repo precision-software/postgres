@@ -640,7 +640,7 @@ LogicalTapeImport(LogicalTapeSet *lts, int worker, TapeShare *shared)
 	}
 	/* Don't allocate more for read buffer than could possibly help */
 	lt->max_size = Min(MaxAllocSize, filesize);
-	tapeblocks = filesize / cluster_block_size;
+	tapeblocks = filesize >> cluster_block_bits;
 
 	/*
 	 * Update # of allocated blocks and # blocks written to reflect the

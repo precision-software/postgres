@@ -6741,8 +6741,8 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 	/* Now WAL-log freezing if necessary */
 	if (RelationNeedsWAL(rel))
 	{
-		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
-		OffsetNumber offsets[MaxHeapTuplesPerPage];
+		xl_heap_freeze_plan plans[MaxHeapTuplesPerPageLimit];
+		OffsetNumber offsets[MaxHeapTuplesPerPageLimit];
 		int			nplans;
 		xl_heap_freeze_page xlrec;
 		XLogRecPtr	recptr;
@@ -9222,7 +9222,7 @@ heap_xlog_insert(XLogReaderState *record)
 	union
 	{
 		HeapTupleHeaderData hdr;
-		char		data[MaxHeapTupleSize];
+		char		data[MaxHeapTupleSizeLimit];
 	}			tbuf;
 	HeapTupleHeader htup;
 	xl_heap_header xlhdr;
@@ -9344,7 +9344,7 @@ heap_xlog_multi_insert(XLogReaderState *record)
 	union
 	{
 		HeapTupleHeaderData hdr;
-		char		data[MaxHeapTupleSize];
+		char		data[MaxHeapTupleSizeLimit];
 	}			tbuf;
 	HeapTupleHeader htup;
 	uint32		newlen;
@@ -9501,7 +9501,7 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 	union
 	{
 		HeapTupleHeaderData hdr;
-		char		data[MaxHeapTupleSize];
+		char		data[MaxHeapTupleSizeLimit];
 	}			tbuf;
 	xl_heap_header xlhdr;
 	uint32		newlen;

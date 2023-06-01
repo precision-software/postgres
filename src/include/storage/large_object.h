@@ -67,7 +67,9 @@ typedef struct LargeObjectDesc
  *
  * NB: Changing cluster_loblksize requires an initdb.
  */
+#define CalcLOBLKSIZE(size) (size/4)
 #define cluster_loblksize		(cluster_block_size / 4)
+#define LOBLKSIZE_LIMIT		CalcLOBLKSIZE(MAX_BLOCK_SIZE)
 
 /*
  * Maximum length in bytes for a large object.  To make this larger, we'd

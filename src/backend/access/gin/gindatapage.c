@@ -1259,7 +1259,7 @@ dataSplitPageInternal(GinBtree btree, Buffer origbuf,
 	Page		lpage;
 	Page		rpage;
 	OffsetNumber separator;
-	PostingItem allitems[(cluster_block_size / sizeof(PostingItem)) + 1];
+	PostingItem allitems[(MAX_BLOCK_SIZE / sizeof(PostingItem)) + 1];
 
 	lpage = PageGetTempPage(oldpage);
 	rpage = PageGetTempPage(oldpage);

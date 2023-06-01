@@ -87,8 +87,8 @@ typedef struct
 	int			logpageno;		/* page number within the level */
 } FSMAddress;
 
-/* Address of the root page. */
-static const FSMAddress FSM_ROOT_ADDRESS = {FSM_ROOT_LEVEL, 0};
+/* Address of the root page. Level is adjusted by FreeSpaceMapInit()  */
+static FSMAddress FSM_ROOT_ADDRESS = {0,0};
 
 /* functions to navigate the tree */
 static FSMAddress fsm_get_child(FSMAddress parent, uint16 slot);
@@ -115,6 +115,17 @@ static uint8 fsm_vacuum_page(Relation rel, FSMAddress addr,
 
 
 /******** Public API ********/
+
+/*
+ * FreeSpaceMapInit - initialize the FSM system with the cluster block size
+ *
+ */
+
+void
+FreeSpaceMapInit(void)
+{
+	FSM_ROOT_ADDRESS.level = FSM_ROOT_LEVEL;
+}
 
 /*
  * GetPageWithFreeSpace - try to find a page in the given relation with

@@ -124,7 +124,7 @@ typedef struct HashScanPosData
 	int			lastItem;		/* last valid index in items[] */
 	int			itemIndex;		/* current index in items[] */
 
-	HashScanPosItem items[MaxIndexTuplesPerPage];	/* MUST BE LAST */
+	HashScanPosItem items[MaxIndexTuplesPerPageLimit];	/* MUST BE LAST */
 } HashScanPosData;
 
 #define HashScanPosIsPinned(scanpos) \
@@ -227,7 +227,7 @@ typedef HashScanOpaqueData *HashScanOpaque;
  * the block size boundary.  So we use cluster_block_size to determine the maximum number
  * of bitmaps.
  */
-#define HASH_MAX_BITMAPS			Min(cluster_block_size / 8, 1024)
+#define HASH_MAX_BITMAPS			Min(DEFAULT_BLOCK_SIZE / 8, 1024)
 
 #define HASH_SPLITPOINT_PHASE_BITS	2
 #define HASH_SPLITPOINT_PHASES_PER_GRP	(1 << HASH_SPLITPOINT_PHASE_BITS)

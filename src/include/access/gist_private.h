@@ -171,7 +171,7 @@ typedef struct GISTScanOpaqueData
 	GistNSN		curPageLSN;		/* pos in the WAL stream when page was read */
 
 	/* In a non-ordered search, returnable heap items are stored here: */
-	GISTSearchHeapItem pageData[cluster_block_size / sizeof(IndexTupleData)];
+	GISTSearchHeapItem pageData[MAX_BLOCK_SIZE / sizeof(IndexTupleData)];
 	OffsetNumber nPageData;		/* number of valid items in array */
 	OffsetNumber curPageData;	/* next item to return */
 	MemoryContext pageDataCxt;	/* context holding the fetched tuples, for
