@@ -97,10 +97,22 @@
 #include "postmaster/startup.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
+#include "storage/vfd.h"
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
 #include "utils/resowner_private.h"
 #include "utils/varlena.h"
+
+/* Function prototypes for "Internal" functions (internal functions shared with vfd.c) */
+File PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode);
+int FileClose_Internal(File file);
+ssize_t FileRead_Internal(File file, void *buffer, size_t amount, off_t offset);
+ssize_t FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset);
+int FileSync_Internal(File file);
+off_t FileSize_Internal(File file);
+int FileClose_Internal(File file);
+int FileTruncate_Internal(File file, off_t offset);
+
 
 /* Define PG_FLUSH_DATA_WORKS if we have an implementation for pg_flush_data */
 #if defined(HAVE_SYNC_FILE_RANGE)
@@ -168,7 +180,6 @@ int			recovery_init_sync_method = RECOVERY_INIT_SYNC_METHOD_FSYNC;
 int			io_direct_flags;
 
 /* Debugging.... */
-
 #ifdef FDDEBUG
 #define DO_DB(A) \
 	do { \
@@ -183,38 +194,16 @@ int			io_direct_flags;
 
 #define VFD_CLOSED (-1)
 
-#define FileIsValid(file) \
-	((file) > 0 && (file) < (int) SizeVfdCache && VfdCache[file].fileName != NULL)
-
 #define FileIsNotOpen(file) (VfdCache[file].fd == VFD_CLOSED)
 
-/* these are the assigned bits in fdstate below: */
-#define FD_DELETE_AT_CLOSE	(1 << 0)	/* T = delete when closed */
-#define FD_CLOSE_AT_EOXACT	(1 << 1)	/* T = close at eoXact */
-#define FD_TEMP_FILE_LIMIT	(1 << 2)	/* T = respect temp_file_limit */
-
-typedef struct vfd
-{
-	int			fd;				/* current FD, or VFD_CLOSED if none */
-	unsigned short fdstate;		/* bitflags for VFD's state */
-	ResourceOwner resowner;		/* owner, for automatic cleanup */
-	File		nextFree;		/* link to next free VFD, if in freelist */
-	File		lruMoreRecently;	/* doubly linked recency-of-use list */
-	File		lruLessRecently;
-	off_t		fileSize;		/* current size of file (0 if not temporary) */
-	char	   *fileName;		/* name of file, or NULL for unused VFD */
-	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
-	int			fileFlags;		/* open(2) flags for (re)opening the file */
-	mode_t		fileMode;		/* mode to pass to open(2) */
-} Vfd;
 
 /*
  * Virtual File Descriptor array pointer and size.  This grows as
  * needed.  'File' values are indexes into this array.
  * Note that VfdCache[0] is not a usable VFD, just a list header.
  */
-static Vfd *VfdCache;
-static Size SizeVfdCache = 0;
+Vfd *VfdCache = NULL;
+Size SizeVfdCache = 0;
 
 /*
  * Number of file descriptors known to be in use by VFD entries.
@@ -1539,7 +1528,7 @@ PathNameOpenFile(const char *fileName, int fileFlags)
  * (which should always be $PGDATA when this code is running).
  */
 File
-PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
+PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	char	   *fnamecopy;
 	File		file;
@@ -1775,7 +1764,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 	 * temp file that can be reused.
 	 */
 	file = PathNameOpenFile(tempfilepath,
-							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
+							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 	if (file <= 0)
 	{
 		/*
@@ -1789,7 +1778,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 		(void) MakePGDirectory(tempdirpath);
 
 		file = PathNameOpenFile(tempfilepath,
-								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
+								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY | PG_ENCRYPT);
 		if (file <= 0 && rejectError)
 			elog(ERROR, "could not create temporary file \"%s\": %m",
 				 tempfilepath);
@@ -1926,31 +1915,38 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 }
 
 /*
- * close a file when done with it
+ * close a file when done with it. Return 0 if close was successfule.
  */
-void
-FileClose(File file)
+int
+FileClose_Internal(File file)
 {
-	Vfd		   *vfdP;
+	Vfd		   *vfdP = getVfd(file);
+	int retval = 0;
 
-	Assert(FileIsValid(file));
-
-	DO_DB(elog(LOG, "FileClose: %d (%s)",
-			   file, VfdCache[file].fileName));
-
-	vfdP = &VfdCache[file];
+	DO_DB(elog(LOG, "FileClose: %d (%s)", file, vfdP->fileName));
 
 	if (!FileIsNotOpen(file))
 	{
 		/* close the file */
+		int save_errno = errno;
 		if (close(vfdP->fd) != 0)
 		{
+			/*
+			 * Save the error code, but don't override an existing one.
+			 * We want to close on error without losing the original error code.
+			 */
+			if (save_errno == 0)
+				save_errno = errno;
+
 			/*
 			 * We may need to panic on failure to close non-temporary files;
 			 * see LruDelete.
 			 */
 			elog(vfdP->fdstate & FD_TEMP_FILE_LIMIT ? LOG : data_sync_elevel(LOG),
 				 "could not close file \"%s\": %m", vfdP->fileName);
+
+			errno = save_errno;
+			retval = -1;
 		}
 
 		--nfile;
@@ -2017,6 +2013,9 @@ FileClose(File file)
 	 * Return the Vfd slot to the free list
 	 */
 	FreeVfd(file);
+
+	/* Return 0 if successful, 1 if problems closing file. */
+    return retval;
 }
 
 /*
@@ -2086,14 +2085,11 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 	pgstat_report_wait_end();
 }
 
-int
-FileRead(File file, void *buffer, size_t amount, off_t offset,
-		 uint32 wait_event_info)
+ssize_t
+FileRead_Internal(File file, void *buffer, size_t amount, off_t offset)
 {
-	int			returnCode;
-	Vfd		   *vfdP;
-
-	Assert(FileIsValid(file));
+	ssize_t			returnCode;
+	Vfd		   *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
@@ -2104,13 +2100,8 @@ FileRead(File file, void *buffer, size_t amount, off_t offset,
 	if (returnCode < 0)
 		return returnCode;
 
-	vfdP = &VfdCache[file];
-
 retry:
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_pread(vfdP->fd, buffer, amount, offset);
-	pgstat_report_wait_end();
-
 	if (returnCode < 0)
 	{
 		/*
@@ -2142,14 +2133,11 @@ retry:
 	return returnCode;
 }
 
-int
-FileWrite(File file, const void *buffer, size_t amount, off_t offset,
-		  uint32 wait_event_info)
+ssize_t
+FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset)
 {
-	int			returnCode;
-	Vfd		   *vfdP;
-
-	Assert(FileIsValid(file));
+    ssize_t			returnCode;
+    Vfd		   *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
@@ -2159,8 +2147,6 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
-
-	vfdP = &VfdCache[file];
 
 	/*
 	 * If enforcing temp_file_limit and it's a temp file, check to see if the
@@ -2180,7 +2166,7 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 
 			newTotal += past_write - vfdP->fileSize;
 			if (newTotal > (uint64) temp_file_limit * (uint64) 1024)
-				ereport(ERROR,
+				ereport(ERROR,  /* TODO: return error code which is interpreted by caller */
 						(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
 						 errmsg("temporary file size exceeds temp_file_limit (%dkB)",
 								temp_file_limit)));
@@ -2189,30 +2175,28 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 
 retry:
 	errno = 0;
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_pwrite(VfdCache[file].fd, buffer, amount, offset);
-	pgstat_report_wait_end();
 
 	/* if write didn't set errno, assume problem is no disk space */
 	if (returnCode != amount && errno == 0)
 		errno = ENOSPC;
 
-	if (returnCode >= 0)
-	{
-		/*
-		 * Maintain fileSize and temporary_files_size if it's a temp file.
-		 */
-		if (vfdP->fdstate & FD_TEMP_FILE_LIMIT)
-		{
-			off_t		past_write = offset + amount;
-
-			if (past_write > vfdP->fileSize)
-			{
-				temporary_files_size += past_write - vfdP->fileSize;
-				vfdP->fileSize = past_write;
-			}
-		}
-	}
+    if (returnCode >= 0)
+    {
+        /*
+         * Maintain fileSize and temporary_files_size if it's a temp file.
+         */
+        if (vfdP->fdstate & FD_TEMP_FILE_LIMIT)
+        {
+            off_t		past_write = offset + amount;
+            
+            if (past_write > vfdP->fileSize)
+            {
+                temporary_files_size += past_write - vfdP->fileSize;
+                vfdP->fileSize = past_write;
+            }
+        }
+    }
 	else
 	{
 		/*
@@ -2241,24 +2225,20 @@ retry:
 }
 
 int
-FileSync(File file, uint32 wait_event_info)
+FileSync_Internal(File file)
 {
-	int			returnCode;
+    int			returnCode;
+    
+    Assert(FileIsValid(file));
+    
+    DO_DB(elog(LOG, "FileSync: %d (%s)",
+               file, VfdCache[file].fileName));
+    
+    returnCode = FileAccess(file);
+    if (returnCode < 0)
+        return returnCode;
 
-	Assert(FileIsValid(file));
-
-	DO_DB(elog(LOG, "FileSync: %d (%s)",
-			   file, VfdCache[file].fileName));
-
-	returnCode = FileAccess(file);
-	if (returnCode < 0)
-		return returnCode;
-
-	pgstat_report_wait_start(wait_event_info);
-	returnCode = pg_fsync(VfdCache[file].fd);
-	pgstat_report_wait_end();
-
-	return returnCode;
+    return pg_fsync(VfdCache[file].fd);
 }
 
 /*
@@ -2353,12 +2333,13 @@ retry:
 }
 
 off_t
-FileSize(File file)
+FileSize_Internal(File file)
 {
-	Assert(FileIsValid(file));
+    int ret;
+	Vfd *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileSize %d (%s)",
-			   file, VfdCache[file].fileName));
+			   file, vfdP->fileName));
 
 	if (FileIsNotOpen(file))
 	{
@@ -2366,36 +2347,56 @@ FileSize(File file)
 			return (off_t) -1;
 	}
 
-	return lseek(VfdCache[file].fd, 0, SEEK_END);
+	ret = lseek(vfdP->fd, 0, SEEK_END);
+
+	return ret;
 }
 
 int
-FileTruncate(File file, off_t offset, uint32 wait_event_info)
+FileTruncate_Internal(File file, off_t offset)
 {
 	int			returnCode;
-
-	Assert(FileIsValid(file));
+	Vfd *vfdP = getVfd(file);
 
 	DO_DB(elog(LOG, "FileTruncate %d (%s)",
-			   file, VfdCache[file].fileName));
+			   file, vfdP->fileName));
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
 
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_ftruncate(VfdCache[file].fd, offset);
-	pgstat_report_wait_end();
-
-	if (returnCode == 0 && VfdCache[file].fileSize > offset)
+	if (returnCode == 0 && vfdP->fileSize > offset)
 	{
 		/* adjust our state for truncation of a temp file */
-		Assert(VfdCache[file].fdstate & FD_TEMP_FILE_LIMIT);
-		temporary_files_size -= VfdCache[file].fileSize - offset;
-		VfdCache[file].fileSize = offset;
+		Assert(vfdP->fdstate & FD_TEMP_FILE_LIMIT);
+		temporary_files_size -= vfdP->fileSize - offset;
+		vfdP->fileSize = offset;
 	}
 
 	return returnCode;
+}
+
+int
+PathNameFileSync(const char *pathName, uint32 wait_event_info)
+{
+    int ret, save_errno;
+
+	/* Open the file, returning immediately if unable */
+	File file = PathNameOpenFile(pathName, O_RDWR | PG_BINARY);
+	if (file < 0)
+		return file;
+
+	/* Sync the now opened file, remembering if error occurred. */
+	ret = FileSync(file, wait_event_info);
+	save_errno = errno;
+
+	/* Close the file. */
+	FileClose(file);
+
+	/* Done, remembering the sync error */
+	errno = save_errno;
+	return ret;
 }
 
 /*

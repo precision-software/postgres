@@ -18,6 +18,7 @@
 #include "storage/block.h"
 #include "storage/item.h"
 #include "storage/off.h"
+#include "c.h"
 
 /*
  * A postgres disk page is an abstraction layered on top of a postgres
@@ -452,6 +453,36 @@ do { \
 #define PageClearPrunable(page) \
 	(((PageHeader) (page))->pd_prune_xid = InvalidTransactionId)
 
+/*
+ * Get the maximum content size this page supports.
+ */
+static inline Size
+PageGetMaxContentSize(Page page)
+{
+	PageHeader header = (PageHeader)page;
+	return header->pd_special - SizeOfPageHeaderData;
+}
+
+/*
+ * Get the size of the page's contents.
+ */
+static inline Size
+PageGetContentSize(Page page)
+{
+	PageHeader header = (PageHeader)page;
+	return header->pd_lower - SizeOfPageHeaderData;
+}
+
+/*
+ * Set the current content size for this page.
+ */
+static inline void
+PageSetContentSize(Page page, Size size)
+{
+	PageHeader header = (PageHeader)page;
+	Assert(size <= PageGetMaxContentSize(page));
+	header->pd_lower = SizeOfPageHeaderData + size;
+}
 
 /* ----------------------------------------------------------------
  *		extern declarations

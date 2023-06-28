@@ -105,14 +105,13 @@ extern PGDLLIMPORT int max_safe_fds;
  * prototypes for functions in fd.c
  */
 
-/* Operations on virtual Files --- equivalent to Unix kernel file ops */
-extern File PathNameOpenFile(const char *fileName, int fileFlags);
-extern File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
-extern File OpenTemporaryFile(bool interXact);
-extern void FileClose(File file);
+/* Operations on Virtual files */
+extern File FileOpen(const char *fileName, int fileFlags);
+extern File FileOpenPerm(const char*fileName, int fileFlags, mode_t fileMode);
+extern int FileClose(File file);
 extern int	FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info);
-extern int	FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
-extern int	FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
+extern ssize_t	FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
+extern ssize_t	FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
 extern int	FileSync(File file, uint32 wait_event_info);
 extern int	FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info);
 extern int	FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info);
@@ -124,8 +123,37 @@ extern char *FilePathName(File file);
 extern int	FileGetRawDesc(File file);
 extern int	FileGetRawFlags(File file);
 extern mode_t FileGetRawMode(File file);
+extern int PathNameFileSync(const char *path, uint32 wait_event_info);
+extern ssize_t FileBlockSize(File file);
 
-/* Operations used for sharing named temporary files */
+/* Operations on virtual files -- Sequential I/O */
+extern ssize_t FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info);
+extern ssize_t FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info);
+extern off_t FileTell(File file);
+extern off_t FileSeek(File file, off_t offset);
+
+/* Operations on virtual files --- similar to fread/fwrite */
+extern int FilePrintf(File file, const char *format, ...) pg_attribute_printf(2,3);
+extern int FileScanf(File file, const char *format, ...) pg_attribute_printf(2,3);
+extern int FilePuts(File, const char *string);
+extern int FileGetc(File file);
+extern int FilePutc(int c, File file);
+
+/* Error handling on virtual files -- similar to feof/ferror */
+extern int FileEof(File file);
+extern bool FileClearError(File file);
+extern bool FileError(File file);
+extern const char *FileErrorMsg(File file);
+extern int FileErrorCode(File file);
+
+/* Deprecated methods to open a virtual file - use FileOpen and FileOpenPerm instead */
+extern File PathNameOpenFile(const char *fileName, int fileFlags);
+extern File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
+
+/* Open an unnamed temporary file */
+extern File OpenTemporaryFile(bool interXact);
+
+/* Operations used for creating and sharing named temporary files */
 extern File PathNameCreateTemporaryFile(const char *path, bool error_on_failure);
 extern File PathNameOpenTemporaryFile(const char *path, int mode);
 extern bool PathNameDeleteTemporaryFile(const char *path, bool error_on_failure);
@@ -133,7 +161,7 @@ extern void PathNameCreateTemporaryDir(const char *basedir, const char *director
 extern void PathNameDeleteTemporaryDir(const char *dirname);
 extern void TempTablespacePath(char *path, Oid tablespace);
 
-/* Operations that allow use of regular stdio --- USE WITH CAUTION */
+/* Operations that allow use of regular stdio --- Deprecated, USE WITH CAUTION */
 extern FILE *AllocateFile(const char *name, const char *mode);
 extern int	FreeFile(FILE *file);
 
@@ -148,12 +176,12 @@ extern struct dirent *ReadDirExtended(DIR *dir, const char *dirname,
 									  int elevel);
 extern int	FreeDir(DIR *dir);
 
-/* Operations to allow use of a plain kernel FD, with automatic cleanup */
+/* Operations to allow use of a plain kernel FD, with automatic cleanup. */
 extern int	OpenTransientFile(const char *fileName, int fileFlags);
 extern int	OpenTransientFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
 extern int	CloseTransientFile(int fd);
 
-/* If you've really really gotta have a plain kernel FD, use this */
+/* If you've really really gotta have a plain kernel FD, use this. */
 extern int	BasicOpenFile(const char *fileName, int fileFlags);
 extern int	BasicOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
 
@@ -198,5 +226,28 @@ extern int	data_sync_elevel(int elevel);
 /* Filename components */
 #define PG_TEMP_FILES_DIR "pgsql_tmp"
 #define PG_TEMP_FILE_PREFIX "pgsql_tmp"
+
+/* TODO: consider useing uint64 to support special flags, or use a different mechanism */
+
+/* open flags to select encryption, buffering, compression */
+#define PG_STACK_MASK     (7 << 28)
+#define PG_RAW    	      (0 << 28)   /* Direct calls to pread/pwrite (default) */
+#define PG_ENCRYPT        (1 << 28)   /* buffered an encrypted using session key */
+#define PG_ECOMPRESS      (2 << 28)   /* Encrypted and compressed, supports reandom reads - EXPERIMENTAL */
+#define PG_ENCRYPT_PERM   (3 << 28)   /* Encrypted using a permanent key */
+#define PG_TESTSTACK      (4 << 28)   /* For unit testing */
+#define PG_PLAIN          (5 << 28)   /* Plan text, buffered */
+
+/* These are flag combinations frequently used in postgres */
+#define PG_CREATE (O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY)
+#define PG_READ   (O_RDONLY | PG_BINARY)
+#define PG_UPDATE (O_RDWR   | PG_BINARY)
+
+/* Potental future flags for FileOpen (not yet) */
+#define PG_XACT 0       /* File will be closed at end of current transaction */
+#define PG_DELETE 0     /* File will be deleted when closed */
+#define PG_LIMIT 0      /* Temp file limits apply */
+
+
 
 #endif							/* FD_H */
