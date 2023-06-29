@@ -4083,10 +4083,6 @@ int FileClose(File file)
 {
 	debug("FileClose: name=%s, file=%d\n", getName(file), file);
 
-	/* If invalid vfd or if already closed, then EBADF */
-	if (file < 0 || file >= SizeVfdCache || getVfd(file)->fd == -1)
-		return setFileError(-1, EBADF, "FileClose: invalid file descriptor %d", file);
-
 	/* Save any existing error information */
 	copyFileError(-1, file);
 
@@ -4266,9 +4262,11 @@ bool FileClearError(File file)
 {
 	Vfd *vfd = getVfdErr(file);
 	bool hasError = vfd->errorCode != 0;
-	vfd->errorCode = 0;
-	vfd->errorMsg[0] = '\0';
-	vfd->eof = false;
+	if (hasError)
+	{
+		vfd->errorCode = 0;
+		vfd->errorMsg[0] = '\0';
+	}
 	return hasError;
 }
 
@@ -4284,18 +4282,17 @@ const char *FileErrorMsg(File file)
  */
 int FileErrorCode(File file)
 {
-	int errorCode = getVfdErr(file)->errorCode;
-	errno = errorCode;
-	return errorCode;
+	errno = getVfdErr(file)->errorCode;
+	return errno;
 }
 
-int setFileError(File file, int errorCode, const char *fmt, ...)
+int setFileError(File file, int err, const char *fmt, ...)
 {
 	va_list args;
 	Vfd *vfd = getVfdErr(file);
 
 	/* Save the errno */
-	vfd->errorCode = errorCode;
+	vfd->errorCode = errno;
 
 	/* Format the error message */
 	va_start(args, fmt);
@@ -4309,7 +4306,7 @@ int setFileError(File file, int errorCode, const char *fmt, ...)
 	return -1;
 }
 
-int updateFileError(File file, int errorCode, const char *fmt, ...)
+int updateFileError(File file, int err, const char *fmt, ...)
 {
     va_list args;
 	Vfd *vfd = getVfdErr(file);
@@ -4319,7 +4316,7 @@ int updateFileError(File file, int errorCode, const char *fmt, ...)
 		return -1;
 
 	/* Save the errno */
-	vfd->errorCode = errorCode;
+	vfd->errorCode = errno;
 
 	/* Format the error message */
 	va_start(args, fmt);
