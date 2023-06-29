@@ -12,6 +12,8 @@
  *-------------------------------------------------------------------------
  */
 
+//#define DEBUG
+
 /*
  * calls:
  *
@@ -225,15 +227,18 @@ extern int setFileError(File file, int err, const char *format, ...);
 extern int updateFileError(File file, int err, const char *format, ...);
 extern int copyFileError(File dst, File src);
 
+/* Some nicer names */
+static inline File FileOpen(const char *name, int fileFlags) {return PathNameOpenFile(name, fileFlags);}
+
 /* Declare a "debug" macro */
 #ifdef DEBUG
 #define debug(...) \
     do {  \
-	    int save_errno = errno; \
-		/* fprintf(stderr, __VA_ARGS__); */ \
-		elog(DEBUG2, args);   \
+        int save_errno = errno; \
+        fprintf(stderr, __VA_ARGS__); \
+        /* elog(DEBUG2, __VA_ARGS__);  */ \
         errno = save_errno;  \
-	while (0)
+    } while (0)
 
 #else
 #define debug(...) ((void)0)
