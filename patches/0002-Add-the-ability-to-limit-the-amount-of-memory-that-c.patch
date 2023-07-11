@@ -1,0 +1,1004 @@
+From f5a7a2ccfd975cb29b47af4fff563947085e1748 Mon Sep 17 00:00:00 2001
+From: Reid Thompson <jreidthompson@nc.rr.com>
+Date: Sat, 4 Jun 2022 22:23:59 -0400
+Subject: [PATCH 2/2] Add the ability to limit the amount of memory that can be
+ allocated to backends.
+
+This builds on the work that adds backend memory allocated tracking.
+
+Add GUC variable max_total_backend_memory.
+
+Specifies a limit to the amount of memory (in MB) that may be allocated to
+backends in total (i.e. this is not a per user or per backend limit). If unset,
+or set to 0 it is disabled. It is intended as a resource to help avoid the OOM
+killer on LINUX and manage resources in general. A backend request that would
+exhaust max_total_backend_memory memory will be denied with an out of memory
+error causing that backend's current query/transaction to fail.  Further
+requests will not be allocated until dropping below the limit. Keep this in
+mind when setting this value. Due to the dynamic nature of memory allocations,
+this limit is not exact. This limit does not affect auxiliary backend
+processes. Backend memory allocations are displayed in the
+pg_stat_memory_allocation and pg_stat_global_memory_allocation views.
+---
+ doc/src/sgml/config.sgml                      |  30 ++++
+ doc/src/sgml/monitoring.sgml                  |  38 ++++-
+ src/backend/catalog/system_views.sql          |   2 +
+ src/backend/port/sysv_shmem.c                 |   9 ++
+ src/backend/postmaster/postmaster.c           |   5 +
+ src/backend/storage/ipc/dsm_impl.c            |  18 +++
+ src/backend/storage/lmgr/proc.c               |  45 ++++++
+ src/backend/utils/activity/backend_status.c   | 147 ++++++++++++++++++
+ src/backend/utils/adt/pgstatfuncs.c           |  16 +-
+ src/backend/utils/hash/dynahash.c             |   3 +-
+ src/backend/utils/init/miscinit.c             |   8 +
+ src/backend/utils/misc/guc_tables.c           |  11 ++
+ src/backend/utils/misc/postgresql.conf.sample |   3 +
+ src/backend/utils/mmgr/aset.c                 |  33 ++++
+ src/backend/utils/mmgr/generation.c           |  16 ++
+ src/backend/utils/mmgr/slab.c                 |  15 +-
+ src/include/catalog/pg_proc.dat               |   6 +-
+ src/include/storage/proc.h                    |   7 +
+ src/include/utils/backend_status.h            | 102 +++++++++++-
+ src/test/regress/expected/rules.out           |   4 +-
+ 20 files changed, 498 insertions(+), 20 deletions(-)
+
+diff --git a/doc/src/sgml/config.sgml b/doc/src/sgml/config.sgml
+index 5da74b3c40..397661d4b2 100644
+--- a/doc/src/sgml/config.sgml
++++ b/doc/src/sgml/config.sgml
+@@ -2180,6 +2180,36 @@ include_dir 'conf.d'
+       </listitem>
+      </varlistentry>
+ 
++     <varlistentry id="guc-max-total-backend-memory" xreflabel="max_total_backend_memory">
++      <term><varname>max_total_backend_memory</varname> (<type>integer</type>)
++      <indexterm>
++       <primary><varname>max_total_backend_memory</varname> configuration parameter</primary>
++      </indexterm>
++      </term>
++      <listitem>
++       <para>
++        Specifies a limit to the amount of memory (MB) that may be allocated to
++        backends in total (i.e. this is not a per user or per backend limit).
++        If unset, or set to 0 it is disabled.  At databse startup
++        max_total_backend_memory is reduced by shared_memory_size_mb
++        (includes shared buffers and other memory required for initialization).
++        Each backend process is intialized with a 1MB local allowance which
++        also reduces total_bkend_mem_bytes_available. Keep this in mind when
++        setting this value. A backend request that would exhaust the limit will
++        be denied with an out of memory error causing that backend's current
++        query/transaction to fail. Further requests will not be allocated until
++        dropping below the limit.  This limit does not affect auxiliary backend
++        processes
++        <xref linkend="glossary-auxiliary-proc"/> or the postmaster process.
++        Backend memory allocations (<varname>allocated_bytes</varname>) are
++        displayed in the
++        <link linkend="monitoring-pg-stat-memory-allocation-view"><structname>pg_stat_memory_allocation</structname></link>
++        view.  Due to the dynamic nature of memory allocations, this limit is
++        not exact.
++       </para>
++      </listitem>
++     </varlistentry>
++
+      </variablelist>
+      </sect2>
+ 
+diff --git a/doc/src/sgml/monitoring.sgml b/doc/src/sgml/monitoring.sgml
+index cfc221fb2e..aa53e0be3e 100644
+--- a/doc/src/sgml/monitoring.sgml
++++ b/doc/src/sgml/monitoring.sgml
+@@ -5817,10 +5817,7 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
+       </para>
+      <para>
+       Memory currently allocated to this backend in bytes. This is the balance
+-      of bytes allocated and freed by this backend. Dynamic shared memory
+-      allocations are included only in the value displayed for the backend that
+-      created them, they are not included in the value for backends that are
+-      attached to them to avoid double counting.
++      of bytes allocated and freed by this backend.
+      </para></entry>
+      </row>
+ 
+@@ -5937,6 +5934,39 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
+      </para></entry>
+      </row>
+ 
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>max_total_backend_memory_bytes</structfield> <type>bigint</type>
++      </para>
++     <para>
++      Reports the user defined backend maximum allowed shared memory in bytes.
++      0 if disabled or not set. See
++      <xref linkend="guc-max-total-backend-memory"/>.
++     </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>total_bkend_mem_bytes_available</structfield> <type>bigint</type>
++      </para>
++     <para>
++      Tracks max_total_backend_memory (in bytes) available for allocation. At
++      database startup, total_bkend_mem_bytes_available is reduced by the
++      byte equivalent of shared_memory_size_mb. Each backend process is
++      intialized with a 1MB local allowance which also reduces
++      total_bkend_mem_bytes_available. A process's allocation requests reduce
++      it's local allowance. If a process's allocation request exceeds it's
++      remaining allowance, an attempt is made to refill the local allowance
++      from total_bkend_mem_bytes_available. If the refill request fails, then
++      the requesting process will fail with an out of memory error resulting
++      in the cancellation of that process's active query/transaction.  The
++      default refill allocation quantity is 1MB.  If a request is greater than
++      1MB, an attempt will be made to allocate the full amount. If
++      max_total_backend_memory is disabled, this will be -1.
++      <xref linkend="guc-max-total-backend-memory"/>.
++     </para></entry>
++     </row>
++
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>global_dsm_allocated_bytes</structfield> <type>bigint</type>
+diff --git a/src/backend/catalog/system_views.sql b/src/backend/catalog/system_views.sql
+index cc8219c665..0832027727 100644
+--- a/src/backend/catalog/system_views.sql
++++ b/src/backend/catalog/system_views.sql
+@@ -1368,6 +1368,8 @@ SELECT
+         S.datid AS datid,
+         current_setting('shared_memory_size', true) as shared_memory_size,
+         (current_setting('shared_memory_size_in_huge_pages', true))::integer as shared_memory_size_in_huge_pages,
++        pg_size_bytes(current_setting('max_total_backend_memory', true)) as max_total_backend_memory_bytes,
++        S.total_bkend_mem_bytes_available,
+         S.global_dsm_allocated_bytes,
+         sums.total_aset_allocated_bytes,
+         sums.total_dsm_allocated_bytes,
+diff --git a/src/backend/port/sysv_shmem.c b/src/backend/port/sysv_shmem.c
+index eaba244bc9..463bf2e90f 100644
+--- a/src/backend/port/sysv_shmem.c
++++ b/src/backend/port/sysv_shmem.c
+@@ -34,6 +34,7 @@
+ #include "storage/fd.h"
+ #include "storage/ipc.h"
+ #include "storage/pg_shmem.h"
++#include "utils/backend_status.h"
+ #include "utils/guc_hooks.h"
+ #include "utils/pidfile.h"
+ 
+@@ -903,6 +904,14 @@ PGSharedMemoryReAttach(void)
+ 	dsm_set_control_handle(hdr->dsm_control);
+ 
+ 	UsedShmemSegAddr = hdr;		/* probably redundant */
++
++	/*
++	 * Init allocated bytes to avoid double counting parent allocation for
++	 * fork/exec processes. Forked processes perform this action in
++	 * InitPostmasterChild. For EXEC_BACKEND processes we have to wait for
++	 * shared memory to be reattached.
++	 */
++	pgstat_init_allocated_bytes();
+ }
+ 
+ /*
+diff --git a/src/backend/postmaster/postmaster.c b/src/backend/postmaster/postmaster.c
+index 4c49393fc5..06a773c8bb 100644
+--- a/src/backend/postmaster/postmaster.c
++++ b/src/backend/postmaster/postmaster.c
+@@ -540,6 +540,7 @@ typedef struct
+ #endif
+ 	char		my_exec_path[MAXPGPATH];
+ 	char		pkglib_path[MAXPGPATH];
++	int			max_total_bkend_mem;
+ } BackendParameters;
+ 
+ static void read_backend_variables(char *id, Port *port);
+@@ -6122,6 +6123,8 @@ save_backend_variables(BackendParameters *param, Port *port,
+ 
+ 	strlcpy(param->pkglib_path, pkglib_path, MAXPGPATH);
+ 
++	param->max_total_bkend_mem = max_total_bkend_mem;
++
+ 	return true;
+ }
+ 
+@@ -6352,6 +6355,8 @@ restore_backend_variables(BackendParameters *param, Port *port)
+ 
+ 	strlcpy(pkglib_path, param->pkglib_path, MAXPGPATH);
+ 
++	max_total_bkend_mem = param->max_total_bkend_mem;
++
+ 	/*
+ 	 * We need to restore fd.c's counts of externally-opened FDs; to avoid
+ 	 * confusion, be sure to do this after restoring max_safe_fds.  (Note:
+diff --git a/src/backend/storage/ipc/dsm_impl.c b/src/backend/storage/ipc/dsm_impl.c
+index f43bad4439..41ffe48aa3 100644
+--- a/src/backend/storage/ipc/dsm_impl.c
++++ b/src/backend/storage/ipc/dsm_impl.c
+@@ -254,6 +254,16 @@ dsm_impl_posix(dsm_op op, dsm_handle handle, Size request_size,
+ 		return true;
+ 	}
+ 
++	/* Do not exceed maximum allowed memory allocation */
++	if (op == DSM_OP_CREATE && exceeds_max_total_bkend_mem(request_size))
++	{
++		ereport(elevel,
++				(errcode_for_dynamic_shared_memory(),
++				 errmsg("out of memory for segment \"%s\" - exceeds max_total_backend_memory: %m",
++						name)));
++		return false;
++	}
++
+ 	/*
+ 	 * Create new segment or open an existing one for attach.
+ 	 *
+@@ -523,6 +533,10 @@ dsm_impl_sysv(dsm_op op, dsm_handle handle, Size request_size,
+ 		int			flags = IPCProtection;
+ 		size_t		segsize;
+ 
++		/* Do not exceed maximum allowed memory allocation */
++		if (op == DSM_OP_CREATE && exceeds_max_total_bkend_mem(request_size))
++			return false;
++
+ 		/*
+ 		 * Allocate the memory BEFORE acquiring the resource, so that we don't
+ 		 * leak the resource if memory allocation fails.
+@@ -717,6 +731,10 @@ dsm_impl_windows(dsm_op op, dsm_handle handle, Size request_size,
+ 		return true;
+ 	}
+ 
++	/* Do not exceed maximum allowed memory allocation */
++	if (op == DSM_OP_CREATE && exceeds_max_total_bkend_mem(request_size))
++		return false;
++
+ 	/* Create new segment or open an existing one for attach. */
+ 	if (op == DSM_OP_CREATE)
+ 	{
+diff --git a/src/backend/storage/lmgr/proc.c b/src/backend/storage/lmgr/proc.c
+index d798c05180..8493ca1dbf 100644
+--- a/src/backend/storage/lmgr/proc.c
++++ b/src/backend/storage/lmgr/proc.c
+@@ -51,6 +51,7 @@
+ #include "storage/procsignal.h"
+ #include "storage/spin.h"
+ #include "storage/standby.h"
++#include "utils/guc.h"
+ #include "utils/timeout.h"
+ #include "utils/timestamp.h"
+ 
+@@ -182,6 +183,50 @@ InitProcGlobal(void)
+ 	pg_atomic_init_u32(&ProcGlobal->clogGroupFirst, INVALID_PGPROCNO);
+ 	pg_atomic_init_u64(&ProcGlobal->global_dsm_allocation, 0);
+ 
++	/* Setup backend memory limiting if configured */
++	if (max_total_bkend_mem > 0)
++	{
++		/*
++		 * Convert max_total_bkend_mem to bytes, account for
++		 * shared_memory_size, and initialize total_bkend_mem_bytes.
++		 */
++		int			result = 0;
++
++		/* Get integer value of shared_memory_size */
++		if (parse_int(GetConfigOption("shared_memory_size", true, false), &result, 0, NULL))
++		{
++			/*
++			 * Error on startup if backend memory limit is less than shared
++			 * memory size. Warn on startup if backend memory available is
++			 * less than arbitrarily picked value of 100MB.
++			 */
++
++			if (max_total_bkend_mem - result <= 0)
++			{
++				ereport(ERROR,
++						errmsg("configured max_total_backend_memory %dMB is <= shared_memory_size %dMB",
++							   max_total_bkend_mem, result),
++						errhint("Disable or increase the configuration parameter \"max_total_backend_memory\"."));
++			}
++			else if (max_total_bkend_mem - result <= 100)
++			{
++				ereport(WARNING,
++						errmsg("max_total_backend_memory %dMB - shared_memory_size %dMB is <= 100MB",
++							   max_total_bkend_mem, result),
++						errhint("Consider increasing the configuration parameter \"max_total_backend_memory\"."));
++			}
++
++			/*
++			 * Account for shared memory size and initialize
++			 * total_bkend_mem_bytes.
++			 */
++			pg_atomic_init_u64(&ProcGlobal->total_bkend_mem_bytes,
++							   (uint64) max_total_bkend_mem * 1024 * 1024 - (uint64) result * 1024 * 1024);
++		}
++		else
++			ereport(ERROR, errmsg("max_total_backend_memory initialization is unable to parse shared_memory_size"));
++	}
++
+ 	/*
+ 	 * Create and initialize all the PGPROC structures we'll need.  There are
+ 	 * five separate consumers: (1) normal backends, (2) autovacuum workers
+diff --git a/src/backend/utils/activity/backend_status.c b/src/backend/utils/activity/backend_status.c
+index 50b36ba5f7..cad50b2a06 100644
+--- a/src/backend/utils/activity/backend_status.c
++++ b/src/backend/utils/activity/backend_status.c
+@@ -45,6 +45,12 @@
+ bool		pgstat_track_activities = false;
+ int			pgstat_track_activity_query_size = 1024;
+ 
++/*
++ * Max backend memory allocation allowed (MB). 0 = disabled.
++ * Centralized bucket ProcGlobal->max_total_bkend_mem is initialized
++ * as a byte representation of this value in InitProcGlobal().
++ */
++int			max_total_bkend_mem = 0;
+ 
+ /* exposed so that backend_progress.c can access it */
+ PgBackendStatus *MyBEEntry = NULL;
+@@ -68,6 +74,31 @@ uint64	   *my_generation_allocated_bytes = &local_my_generation_allocated_bytes;
+ uint64		local_my_slab_allocated_bytes = 0;
+ uint64	   *my_slab_allocated_bytes = &local_my_slab_allocated_bytes;
+ 
++/*
++ * Define initial allocation allowance for a backend.
++ *
++ * NOTE: initial_allocation_allowance && allocation_allowance_refill_qty
++ * may be candidates for future GUC variables. Arbitrary 1MB selected initially.
++ */
++uint64		initial_allocation_allowance = 1024 * 1024;
++uint64		allocation_allowance_refill_qty = 1024 * 1024;
++
++/*
++ * Local counter to manage shared memory allocations. At backend startup, set to
++ * initial_allocation_allowance via pgstat_init_allocated_bytes(). Decrease as
++ * memory is malloc'd. When exhausted, atomically refill if available from
++ * ProcGlobal->max_total_bkend_mem via exceeds_max_total_bkend_mem().
++ */
++uint64		allocation_allowance = 0;
++
++/*
++ * Local counter of free'd shared memory. Return to global
++ * max_total_bkend_mem when return threshold is met. Arbitrary 1MB bytes
++ * selected initially.
++ */
++uint64		allocation_return = 0;
++uint64		allocation_return_threshold = 1024 * 1024;
++
+ static PgBackendStatus *BackendStatusArray = NULL;
+ static char *BackendAppnameBuffer = NULL;
+ static char *BackendClientHostnameBuffer = NULL;
+@@ -1272,6 +1303,8 @@ pgstat_set_allocated_bytes_storage(uint64 *allocated_bytes,
+ 
+ 	my_slab_allocated_bytes = slab_allocated_bytes;
+ 	*slab_allocated_bytes = local_my_slab_allocated_bytes;
++
++	return;
+ }
+ 
+ /*
+@@ -1295,6 +1328,23 @@ pgstat_reset_allocated_bytes_storage(void)
+ 								*my_dsm_allocated_bytes);
+ 	}
+ 
++	/*
++	 * When limiting maximum backend memory, return this backend's memory
++	 * allocations to global.
++	 */
++	if (max_total_bkend_mem)
++	{
++		volatile PROC_HDR *procglobal = ProcGlobal;
++
++		pg_atomic_add_fetch_u64(&procglobal->total_bkend_mem_bytes,
++								*my_allocated_bytes + allocation_allowance +
++								allocation_return);
++
++		/* Reset memory allocation variables */
++		allocation_allowance = 0;
++		allocation_return = 0;
++	}
++
+ 	/* Reset memory allocation variables */
+ 	*my_allocated_bytes = local_my_allocated_bytes = 0;
+ 	*my_aset_allocated_bytes = local_my_aset_allocated_bytes = 0;
+@@ -1308,4 +1358,101 @@ pgstat_reset_allocated_bytes_storage(void)
+ 	my_dsm_allocated_bytes = &local_my_dsm_allocated_bytes;
+ 	my_generation_allocated_bytes = &local_my_generation_allocated_bytes;
+ 	my_slab_allocated_bytes = &local_my_slab_allocated_bytes;
++
++	return;
++}
++
++/*
++ * Determine if allocation request will exceed max backend memory allowed.
++ * Do not apply to auxiliary processes.
++ * Refill allocation request bucket when needed/possible.
++ */
++bool
++exceeds_max_total_bkend_mem(uint64 allocation_request)
++{
++	bool		result = false;
++
++	/*
++	 * When limiting maximum backend memory, attempt to refill allocation
++	 * request bucket if needed.
++	 */
++	if (max_total_bkend_mem && allocation_request > allocation_allowance &&
++		ProcGlobal != NULL)
++	{
++		volatile PROC_HDR *procglobal = ProcGlobal;
++		uint64		available_max_total_bkend_mem = 0;
++		bool		sts = false;
++
++		/*
++		 * If allocation request is larger than memory refill quantity then
++		 * attempt to increase allocation allowance with requested amount,
++		 * otherwise fall through. If this refill fails we do not have enough
++		 * memory to meet the request.
++		 */
++		if (allocation_request >= allocation_allowance_refill_qty)
++		{
++			while ((available_max_total_bkend_mem = pg_atomic_read_u64(&procglobal->total_bkend_mem_bytes)) >= allocation_request)
++			{
++				if ((result = pg_atomic_compare_exchange_u64(&procglobal->total_bkend_mem_bytes,
++															 &available_max_total_bkend_mem,
++															 available_max_total_bkend_mem - allocation_request)))
++				{
++					allocation_allowance = allocation_allowance + allocation_request;
++					break;
++				}
++			}
++
++			/*
++			 * Exclude auxiliary and Postmaster processes from the check.
++			 * Return false. While we want to exclude them from the check, we
++			 * do not want to exclude them from the above allocation handling.
++			 */
++			if (MyAuxProcType != NotAnAuxProcess || MyProcPid == PostmasterPid)
++				return false;
++
++			/*
++			 * If the atomic exchange fails (result == false), we do not have
++			 * enough reserve memory to meet the request. Negate result to
++			 * return the proper value.
++			 */
++
++			return !result;
++		}
++
++		/*
++		 * Attempt to increase allocation allowance by memory refill quantity.
++		 * If available memory is/becomes less than memory refill quantity,
++		 * fall through to attempt to allocate remaining available memory.
++		 */
++		while ((available_max_total_bkend_mem = pg_atomic_read_u64(&procglobal->total_bkend_mem_bytes)) >= allocation_allowance_refill_qty)
++		{
++			if ((sts = pg_atomic_compare_exchange_u64(&procglobal->total_bkend_mem_bytes,
++													  &available_max_total_bkend_mem,
++													  available_max_total_bkend_mem - allocation_allowance_refill_qty)))
++			{
++				allocation_allowance = allocation_allowance + allocation_allowance_refill_qty;
++				break;
++			}
++		}
++
++		/* Do not attempt to increase allocation if available memory is below
++		 * allocation_allowance_refill_qty .
++		 */
++
++		/*
++		 * If refill is not successful, we return true, memory limit exceeded
++		 */
++		if (!sts)
++			result = true;
++	}
++
++	/*
++	 * Exclude auxiliary and postmaster processes from the check. Return false.
++	 * While we want to exclude them from the check, we do not want to exclude
++	 * them from the above allocation handling.
++	 */
++	if (MyAuxProcType != NotAnAuxProcess || MyProcPid == PostmasterPid)
++		result = false;
++
++	return result;
+ }
+diff --git a/src/backend/utils/adt/pgstatfuncs.c b/src/backend/utils/adt/pgstatfuncs.c
+index 35f2d2bffe..4bcdfc91bf 100644
+--- a/src/backend/utils/adt/pgstatfuncs.c
++++ b/src/backend/utils/adt/pgstatfuncs.c
+@@ -2123,7 +2123,7 @@ pg_stat_get_memory_allocation(PG_FUNCTION_ARGS)
+ Datum
+ pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
+ {
+-#define PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS	2
++#define PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS	3
+ 	TupleDesc	tupdesc;
+ 	Datum		values[PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS] = {0};
+ 	bool		nulls[PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS] = {0};
+@@ -2133,15 +2133,23 @@ pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
+ 	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS);
+ 	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "datid",
+ 					   OIDOID, -1, 0);
+-	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "global_dsm_allocated_bytes",
++	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "total_bkend_mem_bytes_available",
++					   INT8OID, -1, 0);
++	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "global_dsm_allocated_bytes",
+ 					   INT8OID, -1, 0);
+ 	BlessTupleDesc(tupdesc);
+ 
+ 	/* datid */
+ 	values[0] = ObjectIdGetDatum(MyDatabaseId);
+ 
+-	/* get global_dsm_allocated_bytes */
+-	values[1] = Int64GetDatum(pg_atomic_read_u64(&procglobal->global_dsm_allocation));
++	/* Get total_bkend_mem_bytes - return -1 if disabled */
++	if (max_total_bkend_mem == 0)
++		values[1] = Int64GetDatum(-1);
++	else
++		values[1] = Int64GetDatum(pg_atomic_read_u64(&procglobal->total_bkend_mem_bytes));
++
++	/* Get global_dsm_allocated_bytes */
++	values[2] = Int64GetDatum(pg_atomic_read_u64(&procglobal->global_dsm_allocation));
+ 
+ 	/* Returns the record as Datum */
+ 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+diff --git a/src/backend/utils/hash/dynahash.c b/src/backend/utils/hash/dynahash.c
+index 012d4a0b1f..cd68e5265a 100644
+--- a/src/backend/utils/hash/dynahash.c
++++ b/src/backend/utils/hash/dynahash.c
+@@ -104,7 +104,6 @@
+ #include "utils/dynahash.h"
+ #include "utils/memutils.h"
+ 
+-
+ /*
+  * Constants
+  *
+@@ -359,7 +358,6 @@ hash_create(const char *tabname, long nelem, const HASHCTL *info, int flags)
+ 	Assert(flags & HASH_ELEM);
+ 	Assert(info->keysize > 0);
+ 	Assert(info->entrysize >= info->keysize);
+-
+ 	/*
+ 	 * For shared hash tables, we have a local hash header (HTAB struct) that
+ 	 * we allocate in TopMemoryContext; all else is in shared memory.
+@@ -377,6 +375,7 @@ hash_create(const char *tabname, long nelem, const HASHCTL *info, int flags)
+ 	}
+ 	else
+ 	{
++		/* Set up to allocate the hash header */
+ 		/* Create the hash table's private memory context */
+ 		if (flags & HASH_CONTEXT)
+ 			CurrentDynaHashCxt = info->hcxt;
+diff --git a/src/backend/utils/init/miscinit.c b/src/backend/utils/init/miscinit.c
+index 7b8eeb7dbb..a7df801f77 100644
+--- a/src/backend/utils/init/miscinit.c
++++ b/src/backend/utils/init/miscinit.c
+@@ -172,8 +172,16 @@ InitPostmasterChild(void)
+ 				 errmsg_internal("could not set postmaster death monitoring pipe to FD_CLOEXEC mode: %m")));
+ #endif
+ 
++	/*
++	 * Init pgstat allocated bytes counters here for forked backends.
++	 * Fork/exec backends have not yet reattached to shared memory at this
++	 * point. They will init pgstat allocated bytes counters in
++	 * PGSharedMemoryReAttach.
++	 */
++#ifndef EXEC_BACKEND
+ 	/* Init allocated bytes to avoid double counting parent allocation */
+ 	pgstat_init_allocated_bytes();
++#endif
+ }
+ 
+ /*
+diff --git a/src/backend/utils/misc/guc_tables.c b/src/backend/utils/misc/guc_tables.c
+index 68aecad66f..eacd1a6043 100644
+--- a/src/backend/utils/misc/guc_tables.c
++++ b/src/backend/utils/misc/guc_tables.c
+@@ -3510,6 +3510,17 @@ struct config_int ConfigureNamesInt[] =
+ 		NULL, NULL, NULL
+ 	},
+ 
++	{
++		{"max_total_backend_memory", PGC_SU_BACKEND, RESOURCES_MEM,
++			gettext_noop("Restrict total backend memory allocations to this max."),
++			gettext_noop("0 turns this feature off."),
++			GUC_UNIT_MB
++		},
++		&max_total_bkend_mem,
++		0, 0, INT_MAX,
++		NULL, NULL, NULL
++	},
++
+ 	/* End-of-list marker */
+ 	{
+ 		{NULL, 0, 0, NULL, NULL}, NULL, 0, 0, 0, NULL, NULL, NULL
+diff --git a/src/backend/utils/misc/postgresql.conf.sample b/src/backend/utils/misc/postgresql.conf.sample
+index b090ec5245..5466234d64 100644
+--- a/src/backend/utils/misc/postgresql.conf.sample
++++ b/src/backend/utils/misc/postgresql.conf.sample
+@@ -161,6 +161,9 @@
+ #vacuum_buffer_usage_limit = 256kB	# size of vacuum and analyze buffer access strategy ring.
+ 					# 0 to disable vacuum buffer access strategy
+ 					# range 128kB to 16GB
++#max_total_backend_memory = 0MB		# Restrict total backend memory allocations
++									# to this max (in MB). 0 turns this feature
++									# off.
+ 
+ # - Disk -
+ 
+diff --git a/src/backend/utils/mmgr/aset.c b/src/backend/utils/mmgr/aset.c
+index 4146831d75..a3891a607b 100644
+--- a/src/backend/utils/mmgr/aset.c
++++ b/src/backend/utils/mmgr/aset.c
+@@ -432,6 +432,18 @@ AllocSetContextCreateInternal(MemoryContext parent,
+ 	else
+ 		firstBlockSize = Max(firstBlockSize, initBlockSize);
+ 
++	/* Do not exceed maximum allowed memory allocation */
++	if (exceeds_max_total_bkend_mem(firstBlockSize))
++	{
++		if (TopMemoryContext)
++			MemoryContextStats(TopMemoryContext);
++		ereport(ERROR,
++				(errcode(ERRCODE_OUT_OF_MEMORY),
++				 errmsg("out of memory - exceeds max_total_backend_memory"),
++				 errdetail("Failed while creating memory context \"%s\".",
++						   name)));
++	}
++
+ 	/*
+ 	 * Allocate the initial block.  Unlike other aset.c blocks, it starts with
+ 	 * the context header and its block header follows that.
+@@ -733,6 +745,11 @@ AllocSetAlloc(MemoryContext context, Size size)
+ #endif
+ 
+ 		blksize = chunk_size + ALLOC_BLOCKHDRSZ + ALLOC_CHUNKHDRSZ;
++
++		/* Do not exceed maximum allowed memory allocation */
++		if (exceeds_max_total_bkend_mem(blksize))
++			return NULL;
++
+ 		block = (AllocBlock) malloc(blksize);
+ 		if (block == NULL)
+ 			return NULL;
+@@ -933,6 +950,10 @@ AllocSetAlloc(MemoryContext context, Size size)
+ 		while (blksize < required_size)
+ 			blksize <<= 1;
+ 
++		/* Do not exceed maximum allowed memory allocation */
++		if (exceeds_max_total_bkend_mem(blksize))
++			return NULL;
++
+ 		/* Try to allocate it */
+ 		block = (AllocBlock) malloc(blksize);
+ 
+@@ -1171,6 +1192,18 @@ AllocSetRealloc(void *pointer, Size size)
+ 		blksize = chksize + ALLOC_BLOCKHDRSZ + ALLOC_CHUNKHDRSZ;
+ 		oldblksize = block->endptr - ((char *) block);
+ 
++		/*
++		 * Do not exceed maximum allowed memory allocation. NOTE: checking for
++		 * the full size here rather than just the amount of increased
++		 * allocation to prevent a potential underflow of *my_allocation
++		 * allowance in cases where blksize - oldblksize does not trigger a
++		 * refill but blksize is greater than *my_allocation_allowance.
++		 * Underflow would occur with the call below to
++		 * pgstat_report_allocated_bytes_increase()
++		 */
++		if (blksize > oldblksize && exceeds_max_total_bkend_mem(blksize))
++			return NULL;
++
+ 		block = (AllocBlock) realloc(block, blksize);
+ 		if (block == NULL)
+ 		{
+diff --git a/src/backend/utils/mmgr/generation.c b/src/backend/utils/mmgr/generation.c
+index 502f877855..b4c9b40766 100644
+--- a/src/backend/utils/mmgr/generation.c
++++ b/src/backend/utils/mmgr/generation.c
+@@ -193,6 +193,16 @@ GenerationContextCreate(MemoryContext parent,
+ 	else
+ 		allocSize = Max(allocSize, initBlockSize);
+ 
++	if (exceeds_max_total_bkend_mem(allocSize))
++	{
++		MemoryContextStats(TopMemoryContext);
++		ereport(ERROR,
++				(errcode(ERRCODE_OUT_OF_MEMORY),
++				 errmsg("out of memory - exceeds max_total_backend_memory"),
++				 errdetail("Failed while creating memory context \"%s\".",
++						   name)));
++	}
++
+ 	/*
+ 	 * Allocate the initial block.  Unlike other generation.c blocks, it
+ 	 * starts with the context header and its block header follows that.
+@@ -372,6 +382,9 @@ GenerationAlloc(MemoryContext context, Size size)
+ 	{
+ 		Size		blksize = required_size + Generation_BLOCKHDRSZ;
+ 
++		if (exceeds_max_total_bkend_mem(blksize))
++			return NULL;
++
+ 		block = (GenerationBlock *) malloc(blksize);
+ 		if (block == NULL)
+ 			return NULL;
+@@ -475,6 +488,9 @@ GenerationAlloc(MemoryContext context, Size size)
+ 			if (blksize < required_size)
+ 				blksize = pg_nextpower2_size_t(required_size);
+ 
++			if (exceeds_max_total_bkend_mem(blksize))
++				return NULL;
++
+ 			block = (GenerationBlock *) malloc(blksize);
+ 
+ 			if (block == NULL)
+diff --git a/src/backend/utils/mmgr/slab.c b/src/backend/utils/mmgr/slab.c
+index 913787dba8..00a10f3c11 100644
+--- a/src/backend/utils/mmgr/slab.c
++++ b/src/backend/utils/mmgr/slab.c
+@@ -356,7 +356,16 @@ SlabContextCreate(MemoryContext parent,
+ 		elog(ERROR, "block size %zu for slab is too small for %zu-byte chunks",
+ 			 blockSize, chunkSize);
+ 
+-
++	/* Do not exceed maximum allowed memory allocation */
++	if (exceeds_max_total_bkend_mem(Slab_CONTEXT_HDRSZ(chunksPerBlock)))
++	{
++		MemoryContextStats(TopMemoryContext);
++		ereport(ERROR,
++				(errcode(ERRCODE_OUT_OF_MEMORY),
++				 errmsg("out of memory - exceeds max_total_backend_memory"),
++				 errdetail("Failed while creating memory context \"%s\".",
++						   name)));
++	}
+ 
+ 	slab = (SlabContext *) malloc(Slab_CONTEXT_HDRSZ(chunksPerBlock));
+ 	if (slab == NULL)
+@@ -559,6 +568,10 @@ SlabAlloc(MemoryContext context, Size size)
+ 		}
+ 		else
+ 		{
++			/* Do not exceed maximum allowed memory allocation */
++			if (exceeds_max_total_bkend_mem(slab->blockSize))
++				return NULL;
++
+ 			block = (SlabBlock *) malloc(slab->blockSize);
+ 
+ 			if (unlikely(block == NULL))
+diff --git a/src/include/catalog/pg_proc.dat b/src/include/catalog/pg_proc.dat
+index b095740f8a..4bef1ac428 100644
+--- a/src/include/catalog/pg_proc.dat
++++ b/src/include/catalog/pg_proc.dat
+@@ -5421,9 +5421,9 @@
+   descr => 'statistics: global memory allocation information',
+   proname => 'pg_stat_get_global_memory_allocation', proisstrict => 'f',
+   provolatile => 's', proparallel => 'r', prorettype => 'record',
+-  proargtypes => '', proallargtypes => '{oid,int8}',
+-  proargmodes => '{o,o}',
+-  proargnames => '{datid,global_dsm_allocated_bytes}',
++  proargtypes => '', proallargtypes => '{oid,int8,int8}',
++  proargmodes => '{o,o,o}',
++  proargnames => '{datid,total_bkend_mem_bytes_available,global_dsm_allocated_bytes}',
+   prosrc =>'pg_stat_get_global_memory_allocation' },
+ { oid => '2022',
+   descr => 'statistics: information about currently active backends',
+diff --git a/src/include/storage/proc.h b/src/include/storage/proc.h
+index e6be67de2a..f62ea132ff 100644
+--- a/src/include/storage/proc.h
++++ b/src/include/storage/proc.h
+@@ -406,6 +406,13 @@ typedef struct PROC_HDR
+ 	int			startupBufferPinWaitBufId;
+ 	/* Global dsm allocations */
+ 	pg_atomic_uint64 global_dsm_allocation;
++
++	/*
++	 * Max backend memory allocation tracker. Used/Initialized when
++	 * max_total_bkend_mem > 0 as max_total_bkend_mem (MB) converted to bytes.
++	 * Decreases/increases with free/malloc of backend memory.
++	 */
++	pg_atomic_uint64 total_bkend_mem_bytes;
+ } PROC_HDR;
+ 
+ extern PGDLLIMPORT PROC_HDR *ProcGlobal;
+diff --git a/src/include/utils/backend_status.h b/src/include/utils/backend_status.h
+index 9b75fc5223..068b96dd09 100644
+--- a/src/include/utils/backend_status.h
++++ b/src/include/utils/backend_status.h
+@@ -15,6 +15,7 @@
+ #include "libpq/pqcomm.h"
+ #include "miscadmin.h"			/* for BackendType */
+ #include "storage/backendid.h"
++#include "storage/proc.h"
+ #include "utils/backend_progress.h"
+ 
+ 
+@@ -305,6 +306,7 @@ typedef struct LocalPgBackendStatus
+  */
+ extern PGDLLIMPORT bool pgstat_track_activities;
+ extern PGDLLIMPORT int pgstat_track_activity_query_size;
++extern PGDLLIMPORT int max_total_bkend_mem;
+ 
+ 
+ /* ----------
+@@ -317,6 +319,10 @@ extern PGDLLIMPORT uint64 *my_aset_allocated_bytes;
+ extern PGDLLIMPORT uint64 *my_dsm_allocated_bytes;
+ extern PGDLLIMPORT uint64 *my_generation_allocated_bytes;
+ extern PGDLLIMPORT uint64 *my_slab_allocated_bytes;
++extern PGDLLIMPORT uint64 allocation_allowance;
++extern PGDLLIMPORT uint64 initial_allocation_allowance;
++extern PGDLLIMPORT uint64 allocation_return;
++extern PGDLLIMPORT uint64 allocation_return_threshold;
+ 
+ 
+ /* ----------
+@@ -364,6 +370,7 @@ extern int	pgstat_fetch_stat_numbackends(void);
+ extern PgBackendStatus *pgstat_fetch_stat_beentry(BackendId beid);
+ extern LocalPgBackendStatus *pgstat_fetch_stat_local_beentry(int beid);
+ extern char *pgstat_clip_activity(const char *raw_activity);
++extern bool exceeds_max_total_bkend_mem(uint64 allocation_request);
+ 
+ /* ----------
+  * pgstat_report_allocated_bytes_decrease() -
+@@ -379,7 +386,7 @@ pgstat_report_allocated_bytes_decrease(int64 proc_allocated_bytes,
+ {
+ 	uint64		temp;
+ 
+-	/* Avoid allocated_bytes unsigned integer overflow on decrease */
++	/* Sanity check: my allocated bytes should never drop below zero */
+ 	if (pg_sub_u64_overflow(*my_allocated_bytes, proc_allocated_bytes, &temp))
+ 	{
+ 		/* On overflow, set allocated bytes and allocator type bytes to zero */
+@@ -388,13 +395,35 @@ pgstat_report_allocated_bytes_decrease(int64 proc_allocated_bytes,
+ 		*my_dsm_allocated_bytes = 0;
+ 		*my_generation_allocated_bytes = 0;
+ 		*my_slab_allocated_bytes = 0;
++
++		/* Add freed memory to allocation return counter. */
++		allocation_return += proc_allocated_bytes;
++
++		/*
++		 * Return freed memory to the global counter if return threshold is
++		 * met.
++		 */
++		if (max_total_bkend_mem && allocation_return >= allocation_return_threshold)
++		{
++			if (ProcGlobal)
++			{
++				volatile PROC_HDR *procglobal = ProcGlobal;
++
++				/* Add to global tracker */
++				pg_atomic_add_fetch_u64(&procglobal->total_bkend_mem_bytes,
++										allocation_return);
++
++				/* Restart the count */
++				allocation_return = 0;
++			}
++		}
+ 	}
+ 	else
+ 	{
+-		/* decrease allocation */
+-		*my_allocated_bytes -= proc_allocated_bytes;
++		/* Add freed memory to allocation return counter */
++		allocation_return += proc_allocated_bytes;
+ 
+-		/* Decrease allocator type allocated bytes. */
++		/* Decrease allocator type allocated bytes */
+ 		switch (pg_allocator_type)
+ 		{
+ 			case PG_ALLOC_ASET:
+@@ -416,6 +445,30 @@ pgstat_report_allocated_bytes_decrease(int64 proc_allocated_bytes,
+ 				*my_slab_allocated_bytes -= proc_allocated_bytes;
+ 				break;
+ 		}
++
++		/* decrease allocation */
++		*my_allocated_bytes = *my_aset_allocated_bytes +
++			*my_dsm_allocated_bytes + *my_generation_allocated_bytes +
++			*my_slab_allocated_bytes;
++
++		/*
++		 * Return freed memory to the global counter if return threshold is
++		 * met.
++		 */
++		if (max_total_bkend_mem && allocation_return >= allocation_return_threshold)
++		{
++			if (ProcGlobal)
++			{
++				volatile PROC_HDR *procglobal = ProcGlobal;
++
++				/* Add to global tracker */
++				pg_atomic_add_fetch_u64(&procglobal->total_bkend_mem_bytes,
++										allocation_return);
++
++				/* Restart the count */
++				allocation_return = 0;
++			}
++		}
+ 	}
+ 
+ 	return;
+@@ -433,7 +486,13 @@ static inline void
+ pgstat_report_allocated_bytes_increase(int64 proc_allocated_bytes,
+ 									   int pg_allocator_type)
+ {
+-	*my_allocated_bytes += proc_allocated_bytes;
++	uint64		temp;
++
++	/* Sanity check: my allocated bytes should never drop below zero */
++	if (pg_sub_u64_overflow(allocation_allowance, proc_allocated_bytes, &temp))
++		allocation_allowance = 0;
++	else
++		allocation_allowance -= proc_allocated_bytes;
+ 
+ 	/* Increase allocator type allocated bytes */
+ 	switch (pg_allocator_type)
+@@ -458,6 +517,9 @@ pgstat_report_allocated_bytes_increase(int64 proc_allocated_bytes,
+ 			break;
+ 	}
+ 
++	*my_allocated_bytes = *my_aset_allocated_bytes + *my_dsm_allocated_bytes +
++		*my_generation_allocated_bytes + *my_slab_allocated_bytes;
++
+ 	return;
+ }
+ 
+@@ -477,6 +539,36 @@ pgstat_init_allocated_bytes(void)
+ 	*my_generation_allocated_bytes = 0;
+ 	*my_slab_allocated_bytes = 0;
+ 
++	/* If we're limiting backend memory */
++	if (max_total_bkend_mem)
++	{
++		volatile PROC_HDR *procglobal = ProcGlobal;
++		uint64		available_max_total_bkend_mem = 0;
++
++		allocation_return = 0;
++		allocation_allowance = 0;
++
++		/* Account for the initial allocation allowance */
++		while ((available_max_total_bkend_mem = pg_atomic_read_u64(&procglobal->total_bkend_mem_bytes)) >= initial_allocation_allowance)
++		{
++			/*
++			 * On success populate allocation_allowance. Failure here will
++			 * result in the backend's first invocation of
++			 * exceeds_max_total_bkend_mem allocating requested, default, or
++			 * available memory or result in an out of memory error.
++			 */
++			if (pg_atomic_compare_exchange_u64(&procglobal->total_bkend_mem_bytes,
++											   &available_max_total_bkend_mem,
++											   available_max_total_bkend_mem -
++											   initial_allocation_allowance))
++			{
++				allocation_allowance = initial_allocation_allowance;
++
++				break;
++			}
++		}
++	}
++
+ 	return;
+ }
+ 
+diff --git a/src/test/regress/expected/rules.out b/src/test/regress/expected/rules.out
+index ff76aa99a2..4f96cf4436 100644
+--- a/src/test/regress/expected/rules.out
++++ b/src/test/regress/expected/rules.out
+@@ -1883,13 +1883,15 @@ pg_stat_global_memory_allocation| WITH sums AS (
+  SELECT s.datid,
+     current_setting('shared_memory_size'::text, true) AS shared_memory_size,
+     (current_setting('shared_memory_size_in_huge_pages'::text, true))::integer AS shared_memory_size_in_huge_pages,
++    pg_size_bytes(current_setting('max_total_backend_memory'::text, true)) AS max_total_backend_memory_bytes,
++    s.total_bkend_mem_bytes_available,
+     s.global_dsm_allocated_bytes,
+     sums.total_aset_allocated_bytes,
+     sums.total_dsm_allocated_bytes,
+     sums.total_generation_allocated_bytes,
+     sums.total_slab_allocated_bytes
+    FROM sums,
+-    (pg_stat_get_global_memory_allocation() s(datid, global_dsm_allocated_bytes)
++    (pg_stat_get_global_memory_allocation() s(datid, total_bkend_mem_bytes_available, global_dsm_allocated_bytes)
+      LEFT JOIN pg_database d ON ((s.datid = d.oid)));
+ pg_stat_gssapi| SELECT pid,
+     gss_auth AS gss_authenticated,
+-- 
+2.25.1
+

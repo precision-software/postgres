@@ -1,0 +1,1410 @@
+From e6f8499e0270f2291494260bc341e8ad1411c2ae Mon Sep 17 00:00:00 2001
+From: Reid Thompson <jreidthompson@nc.rr.com>
+Date: Thu, 11 Aug 2022 12:01:25 -0400
+Subject: [PATCH 1/2] Add tracking of backend memory allocated
+
+Add tracking of backend memory allocated in total and by allocation
+type (aset, dsm, generation, slab) by process.
+
+allocated_bytes tracks the current bytes of memory allocated to the
+backend process. aset_allocated_bytes, dsm_allocated_bytes,
+generation_allocated_bytes and slab_allocated_bytes track the
+allocation by type for the backend process. They are updated for the
+process as memory is malloc'd/freed.  Memory allocated to items on
+the freelist is included.  Dynamic shared memory allocations are
+included only in the value displayed for the backend that created
+them, they are not included in the value for backends that are
+attached to them to avoid double counting. DSM allocations that are
+not destroyed by the creating process prior to it's exit are
+considered long lived and are tracked in a global counter
+global_dsm_allocated_bytes. We limit the floor of allocation
+counters to zero. Created views pg_stat_global_memory_allocation and
+pg_stat_memory_allocation for access to these trackers.
+---
+ doc/src/sgml/monitoring.sgml                | 246 ++++++++++++++++++++
+ src/backend/catalog/system_views.sql        |  34 +++
+ src/backend/storage/ipc/dsm.c               |  11 +-
+ src/backend/storage/ipc/dsm_impl.c          |  78 +++++++
+ src/backend/storage/lmgr/proc.c             |   1 +
+ src/backend/utils/activity/backend_status.c | 114 +++++++++
+ src/backend/utils/adt/pgstatfuncs.c         |  84 +++++++
+ src/backend/utils/init/miscinit.c           |   3 +
+ src/backend/utils/mmgr/aset.c               |  17 ++
+ src/backend/utils/mmgr/generation.c         |  15 ++
+ src/backend/utils/mmgr/slab.c               |  22 ++
+ src/include/catalog/pg_proc.dat             |  17 ++
+ src/include/storage/proc.h                  |   2 +
+ src/include/utils/backend_status.h          | 144 +++++++++++-
+ src/test/regress/expected/rules.out         |  27 +++
+ src/test/regress/expected/stats.out         |  36 +++
+ src/test/regress/sql/stats.sql              |  20 ++
+ 17 files changed, 869 insertions(+), 2 deletions(-)
+
+diff --git a/doc/src/sgml/monitoring.sgml b/doc/src/sgml/monitoring.sgml
+index df5242fa80..cfc221fb2e 100644
+--- a/doc/src/sgml/monitoring.sgml
++++ b/doc/src/sgml/monitoring.sgml
+@@ -5757,6 +5757,252 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
+ 
+  </sect2>
+ 
++ <sect2 id="monitoring-pg-stat-memory-allocation-view">
++  <title><structname>pg_stat_memory_allocation</structname></title>
++
++  <indexterm>
++   <primary>pg_stat_memory_allocation</primary>
++  </indexterm>
++
++  <para>
++   The <structname>pg_stat_memory_allocation</structname> view will have one
++   row per server process, showing information related to the current memory
++   allocation of that process in total and by allocator type. Due to the
++   dynamic nature of memory allocations the allocated bytes values may not be
++   exact but should be sufficient for the intended purposes. Dynamic shared
++   memory allocations are included only in the value displayed for the backend
++   that created them, they are not included in the value for backends that are
++   attached to them to avoid double counting.  Use
++   <function>pg_size_pretty</function> described in
++   <xref linkend="functions-admin-dbsize"/> to make these values more easily
++   readable.
++  </para>
++
++  <table id="pg-stat-memory-allocation-view" xreflabel="pg_stat_memory_allocation">
++   <title><structname>pg_stat_memory_allocation</structname> View</title>
++   <tgroup cols="1">
++    <thead>
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       Column Type
++      </para>
++      <para>
++       Description
++      </para></entry>
++     </row>
++    </thead>
++
++    <tbody>
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>datid</structfield> <type>oid</type>
++      </para>
++      <para>
++       OID of the database this backend is connected to
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>pid</structfield> <type>integer</type>
++      </para>
++      <para>
++       Process ID of this backend
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>allocated_bytes</structfield> <type>bigint</type>
++      </para>
++     <para>
++      Memory currently allocated to this backend in bytes. This is the balance
++      of bytes allocated and freed by this backend. Dynamic shared memory
++      allocations are included only in the value displayed for the backend that
++      created them, they are not included in the value for backends that are
++      attached to them to avoid double counting.
++     </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>aset_allocated_bytes</structfield> <type>bigint</type>
++      </para>
++      <para>
++       Memory currently allocated to this backend in bytes via the allocation
++       set allocator.
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>dsm_allocated_bytes</structfield> <type>bigint</type>
++      </para>
++      <para>
++       Memory currently allocated to this backend in bytes via the dynamic
++       shared memory allocator. Upon process exit, dsm allocations that have
++       not been freed are considered long lived and added to
++       <structfield>global_dsm_allocated_bytes</structfield> found in the
++       <link linkend="monitoring-pg-stat-global-memory-allocation-view">
++       <structname>pg_stat_global_memory_allocation</structname></link> view.
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>generation_allocated_bytes</structfield> <type>bigint</type>
++      </para>
++      <para>
++       Memory currently allocated to this backend in bytes via the generation
++       allocator.
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>slab_allocated_bytes</structfield> <type>bigint</type>
++      </para>
++      <para>
++       Memory currently allocated to this backend in bytes via the slab
++       allocator.
++      </para></entry>
++     </row>
++
++    </tbody>
++   </tgroup>
++  </table>
++
++ </sect2>
++
++ <sect2 id="monitoring-pg-stat-global-memory-allocation-view">
++  <title><structname>pg_stat_global_memory_allocation</structname></title>
++
++  <indexterm>
++   <primary>pg_stat_global-memory_allocation</primary>
++  </indexterm>
++
++  <para>
++   The <structname>pg_stat_global_memory_allocation</structname> view will
++   have one row showing information related to current shared memory
++   allocations. Due to the dynamic nature of memory allocations the allocated
++   bytes values may not be exact but should be sufficient for the intended
++   purposes. Use <function>pg_size_pretty</function> described in
++   <xref linkend="functions-admin-dbsize"/> to make the byte populated values
++   more easily readable.
++  </para>
++
++  <table id="pg-stat-global-memory-allocation-view" xreflabel="pg_stat_global_memory_allocation">
++   <title><structname>pg_stat_global_memory_allocation</structname> View</title>
++   <tgroup cols="1">
++    <thead>
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       Column Type
++      </para>
++      <para>
++       Description
++      </para></entry>
++     </row>
++    </thead>
++
++    <tbody>
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>datid</structfield> <type>oid</type>
++      </para>
++      <para>
++       OID of the database this backend is connected to
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>shared_memory_size_mb</structfield> <type>integer</type>
++      </para>
++      <para>
++       Reports the size of the main shared memory area, rounded up to the
++       nearest megabyte. See <xref linkend="guc-shared-memory-size"/>.
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>shared_memory_size_in_huge_pages</structfield> <type>bigint</type>
++      </para>
++     <para>
++      Reports the number of huge pages that are needed for the main shared
++      memory area based on the specified huge_page_size. If huge pages are not
++      supported, this will be -1. See
++      <xref linkend="guc-shared-memory-size-in-huge-pages"/>.
++     </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>global_dsm_allocated_bytes</structfield> <type>bigint</type>
++      </para>
++      <para>
++       Long lived dynamically allocated memory currently allocated to the
++       database. Upon process exit, dsm allocations that have not been freed
++       are considered long lived and added to
++       <structfield>global_dsm_allocated_bytes</structfield>.
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>total_aset_allocated_bytes</structfield> <type>bigint</type>
++      </para>
++      <para>
++       Sum total of <structfield>aset_allocated_bytes</structfield> for all
++       backend processes from
++       <link linkend="monitoring-pg-stat-memory-allocation-view">
++       <structname>pg_stat_memory_allocation</structname></link> view.
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>total_dsm_allocated_bytes</structfield> <type>bigint</type>
++      </para>
++      <para>
++       Sum total of <structfield>dsm_allocated_bytes</structfield> for all
++       backend processes from
++       <link linkend="monitoring-pg-stat-memory-allocation-view">
++       <structname>pg_stat_memory_allocation</structname></link> view.
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>total_generation_allocated_bytes</structfield> <type>bigint</type>
++      </para>
++      <para>
++       Sum total of <structfield>generation_allocated_bytes</structfield> for
++       all backend processes from
++       <link linkend="monitoring-pg-stat-memory-allocation-view">
++       <structname>pg_stat_memory_allocation</structname></link> view.
++      </para></entry>
++     </row>
++
++     <row>
++      <entry role="catalog_table_entry"><para role="column_definition">
++       <structfield>total_slab_allocated_bytes</structfield> <type>bigint</type>
++      </para>
++      <para>
++       Sum total of <structfield>slab_allocated_bytes</structfield> for all
++       backend processes from
++       <link linkend="monitoring-pg-stat-memory-allocation-view">
++       <structname>pg_stat_memory_allocation</structname></link> view.
++      </para></entry>
++     </row>
++
++    </tbody>
++   </tgroup>
++  </table>
++
++ </sect2>
++
+  <sect2 id="monitoring-stats-functions">
+   <title>Statistics Functions</title>
+ 
+diff --git a/src/backend/catalog/system_views.sql b/src/backend/catalog/system_views.sql
+index c18fea8362..cc8219c665 100644
+--- a/src/backend/catalog/system_views.sql
++++ b/src/backend/catalog/system_views.sql
+@@ -1341,3 +1341,37 @@ CREATE VIEW pg_stat_subscription_stats AS
+         ss.stats_reset
+     FROM pg_subscription as s,
+          pg_stat_get_subscription_stats(s.oid) as ss;
++
++CREATE VIEW pg_stat_memory_allocation AS
++    SELECT
++        S.datid AS datid,
++        S.pid,
++        S.allocated_bytes,
++        S.aset_allocated_bytes,
++        S.dsm_allocated_bytes,
++        S.generation_allocated_bytes,
++        S.slab_allocated_bytes
++    FROM pg_stat_get_memory_allocation(NULL) AS S
++        LEFT JOIN pg_database AS D ON (S.datid = D.oid);
++
++CREATE VIEW pg_stat_global_memory_allocation AS
++WITH sums AS (
++    SELECT
++        SUM(aset_allocated_bytes) AS total_aset_allocated_bytes,
++        SUM(dsm_allocated_bytes) AS total_dsm_allocated_bytes,
++        SUM(generation_allocated_bytes) AS total_generation_allocated_bytes,
++        SUM(slab_allocated_bytes) AS total_slab_allocated_bytes
++    FROM
++        pg_stat_memory_allocation
++)
++SELECT
++        S.datid AS datid,
++        current_setting('shared_memory_size', true) as shared_memory_size,
++        (current_setting('shared_memory_size_in_huge_pages', true))::integer as shared_memory_size_in_huge_pages,
++        S.global_dsm_allocated_bytes,
++        sums.total_aset_allocated_bytes,
++        sums.total_dsm_allocated_bytes,
++        sums.total_generation_allocated_bytes,
++        sums.total_slab_allocated_bytes
++    FROM sums, pg_stat_get_global_memory_allocation() AS S
++        LEFT JOIN pg_database AS D ON (S.datid = D.oid);
+diff --git a/src/backend/storage/ipc/dsm.c b/src/backend/storage/ipc/dsm.c
+index 10b029bb16..64b1fecd1c 100644
+--- a/src/backend/storage/ipc/dsm.c
++++ b/src/backend/storage/ipc/dsm.c
+@@ -775,6 +775,15 @@ dsm_detach_all(void)
+ void
+ dsm_detach(dsm_segment *seg)
+ {
++	/*
++	 * Retain mapped_size to pass into destroy call in cases where the detach
++	 * is the last reference. mapped_size is zeroed as part of the detach
++	 * process, but is needed later in these cases for dsm_allocated_bytes
++	 * accounting.
++	 */
++	Size		local_seg_mapped_size = seg->mapped_size;
++	Size	   *ptr_local_seg_mapped_size = &local_seg_mapped_size;
++
+ 	/*
+ 	 * Invoke registered callbacks.  Just in case one of those callbacks
+ 	 * throws a further error that brings us back here, pop the callback
+@@ -855,7 +864,7 @@ dsm_detach(dsm_segment *seg)
+ 			 */
+ 			if (is_main_region_dsm_handle(seg->handle) ||
+ 				dsm_impl_op(DSM_OP_DESTROY, seg->handle, 0, &seg->impl_private,
+-							&seg->mapped_address, &seg->mapped_size, WARNING))
++							&seg->mapped_address, ptr_local_seg_mapped_size, WARNING))
+ 			{
+ 				LWLockAcquire(DynamicSharedMemoryControlLock, LW_EXCLUSIVE);
+ 				if (is_main_region_dsm_handle(seg->handle))
+diff --git a/src/backend/storage/ipc/dsm_impl.c b/src/backend/storage/ipc/dsm_impl.c
+index 6399fa2ad5..f43bad4439 100644
+--- a/src/backend/storage/ipc/dsm_impl.c
++++ b/src/backend/storage/ipc/dsm_impl.c
+@@ -66,6 +66,7 @@
+ #include "postmaster/postmaster.h"
+ #include "storage/dsm_impl.h"
+ #include "storage/fd.h"
++#include "utils/backend_status.h"
+ #include "utils/guc.h"
+ #include "utils/memutils.h"
+ 
+@@ -232,6 +233,14 @@ dsm_impl_posix(dsm_op op, dsm_handle handle, Size request_size,
+ 							name)));
+ 			return false;
+ 		}
++
++		/*
++		 * Detach and destroy pass through here, only decrease the memory
++		 * shown allocated in pg_stat_activity when the creator destroys the
++		 * allocation.
++		 */
++		if (op == DSM_OP_DESTROY)
++			pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
+ 		*mapped_address = NULL;
+ 		*mapped_size = 0;
+ 		if (op == DSM_OP_DESTROY && shm_unlink(name) != 0)
+@@ -332,6 +341,33 @@ dsm_impl_posix(dsm_op op, dsm_handle handle, Size request_size,
+ 						name)));
+ 		return false;
+ 	}
++
++	/*
++	 * Attach and create pass through here, only update backend memory
++	 * allocated in pg_stat_activity for the creator process.
++	 */
++	if (op == DSM_OP_CREATE)
++	{
++		/*
++		 * Posix creation calls dsm_impl_posix_resize implying that resizing
++		 * occurs or may be added in the future. As implemented
++		 * dsm_impl_posix_resize utilizes fallocate or truncate, passing the
++		 * whole new size as input, growing the allocation as needed (only
++		 * truncate supports shrinking). We update by replacing the old
++		 * allocation with the new.
++		 */
++#if defined(HAVE_POSIX_FALLOCATE) && defined(__linux__)
++		/*
++		 * posix_fallocate does not shrink allocations, adjust only on
++		 * allocation increase.
++		 */
++		if (request_size > *mapped_size)
++			pgstat_report_allocated_bytes_increase(request_size - *mapped_size, PG_ALLOC_DSM);
++#else
++		pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
++		pgstat_report_allocated_bytes_increase(request_size, PG_ALLOC_DSM);
++#endif
++	}
+ 	*mapped_address = address;
+ 	*mapped_size = request_size;
+ 	close(fd);
+@@ -538,6 +574,14 @@ dsm_impl_sysv(dsm_op op, dsm_handle handle, Size request_size,
+ 							name)));
+ 			return false;
+ 		}
++
++		/*
++		 * Detach and destroy pass through here, only decrease the memory
++		 * shown allocated in pg_stat_activity when the creator destroys the
++		 * allocation.
++		 */
++		if (op == DSM_OP_DESTROY)
++			pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
+ 		*mapped_address = NULL;
+ 		*mapped_size = 0;
+ 		if (op == DSM_OP_DESTROY && shmctl(ident, IPC_RMID, NULL) < 0)
+@@ -585,6 +629,13 @@ dsm_impl_sysv(dsm_op op, dsm_handle handle, Size request_size,
+ 						name)));
+ 		return false;
+ 	}
++
++	/*
++	 * Attach and create pass through here, only update backend memory
++	 * allocated in pg_stat_activity for the creator process.
++	 */
++	if (op == DSM_OP_CREATE)
++		pgstat_report_allocated_bytes_increase(request_size, PG_ALLOC_DSM);
+ 	*mapped_address = address;
+ 	*mapped_size = request_size;
+ 
+@@ -653,6 +704,13 @@ dsm_impl_windows(dsm_op op, dsm_handle handle, Size request_size,
+ 			return false;
+ 		}
+ 
++		/*
++		 * Detach and destroy pass through here, only decrease the memory
++		 * shown allocated in pg_stat_activity when the creator destroys the
++		 * allocation.
++		 */
++		if (op == DSM_OP_DESTROY)
++			pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
+ 		*impl_private = NULL;
+ 		*mapped_address = NULL;
+ 		*mapped_size = 0;
+@@ -769,6 +827,12 @@ dsm_impl_windows(dsm_op op, dsm_handle handle, Size request_size,
+ 		return false;
+ 	}
+ 
++	/*
++	 * Attach and create pass through here, only update backend memory
++	 * allocated in pg_stat_activity for the creator process.
++	 */
++	if (op == DSM_OP_CREATE)
++		pgstat_report_allocated_bytes_increase(info.RegionSize, PG_ALLOC_DSM);
+ 	*mapped_address = address;
+ 	*mapped_size = info.RegionSize;
+ 	*impl_private = hmap;
+@@ -813,6 +877,13 @@ dsm_impl_mmap(dsm_op op, dsm_handle handle, Size request_size,
+ 							name)));
+ 			return false;
+ 		}
++
++		/*
++		 * Detach and destroy pass through here, only decrease the memory
++		 * shown allocated in pg_stat_activity when the creator destroys the
++		 * allocation.
++		 */
++		pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
+ 		*mapped_address = NULL;
+ 		*mapped_size = 0;
+ 		if (op == DSM_OP_DESTROY && unlink(name) != 0)
+@@ -934,6 +1005,13 @@ dsm_impl_mmap(dsm_op op, dsm_handle handle, Size request_size,
+ 						name)));
+ 		return false;
+ 	}
++
++	/*
++	 * Attach and create pass through here, only update backend memory
++	 * allocated in pg_stat_activity for the creator process.
++	 */
++	if (op == DSM_OP_CREATE)
++		pgstat_report_allocated_bytes_increase(request_size, PG_ALLOC_DSM);
+ 	*mapped_address = address;
+ 	*mapped_size = request_size;
+ 
+diff --git a/src/backend/storage/lmgr/proc.c b/src/backend/storage/lmgr/proc.c
+index dac921219f..d798c05180 100644
+--- a/src/backend/storage/lmgr/proc.c
++++ b/src/backend/storage/lmgr/proc.c
+@@ -180,6 +180,7 @@ InitProcGlobal(void)
+ 	ProcGlobal->checkpointerLatch = NULL;
+ 	pg_atomic_init_u32(&ProcGlobal->procArrayGroupFirst, INVALID_PGPROCNO);
+ 	pg_atomic_init_u32(&ProcGlobal->clogGroupFirst, INVALID_PGPROCNO);
++	pg_atomic_init_u64(&ProcGlobal->global_dsm_allocation, 0);
+ 
+ 	/*
+ 	 * Create and initialize all the PGPROC structures we'll need.  There are
+diff --git a/src/backend/utils/activity/backend_status.c b/src/backend/utils/activity/backend_status.c
+index 38f91a495b..50b36ba5f7 100644
+--- a/src/backend/utils/activity/backend_status.c
++++ b/src/backend/utils/activity/backend_status.c
+@@ -49,6 +49,24 @@ int			pgstat_track_activity_query_size = 1024;
+ /* exposed so that backend_progress.c can access it */
+ PgBackendStatus *MyBEEntry = NULL;
+ 
++/*
++ * Memory allocated to this backend prior to pgstats initialization. Migrated to
++ * shared memory on pgstats initialization.
++ */
++uint64		local_my_allocated_bytes = 0;
++uint64	   *my_allocated_bytes = &local_my_allocated_bytes;
++
++/* Memory allocated to this backend by type prior to pgstats initialization.
++ * Migrated to shared memory on pgstats initialization
++ */
++uint64		local_my_aset_allocated_bytes = 0;
++uint64	   *my_aset_allocated_bytes = &local_my_aset_allocated_bytes;
++uint64		local_my_dsm_allocated_bytes = 0;
++uint64	   *my_dsm_allocated_bytes = &local_my_dsm_allocated_bytes;
++uint64		local_my_generation_allocated_bytes = 0;
++uint64	   *my_generation_allocated_bytes = &local_my_generation_allocated_bytes;
++uint64		local_my_slab_allocated_bytes = 0;
++uint64	   *my_slab_allocated_bytes = &local_my_slab_allocated_bytes;
+ 
+ static PgBackendStatus *BackendStatusArray = NULL;
+ static char *BackendAppnameBuffer = NULL;
+@@ -401,6 +419,32 @@ pgstat_bestart(void)
+ 	lbeentry.st_progress_command_target = InvalidOid;
+ 	lbeentry.st_query_id = UINT64CONST(0);
+ 
++	/* Alter allocation reporting from local storage to shared memory */
++	pgstat_set_allocated_bytes_storage(&MyBEEntry->allocated_bytes,
++									   &MyBEEntry->aset_allocated_bytes,
++									   &MyBEEntry->dsm_allocated_bytes,
++									   &MyBEEntry->generation_allocated_bytes,
++									   &MyBEEntry->slab_allocated_bytes);
++
++	/*
++	 * Populate sum of memory allocated prior to pgstats initialization to
++	 * pgstats and zero the local variable. This is a += assignment because
++	 * InitPostgres allocates memory after pgstat_beinit but prior to
++	 * pgstat_bestart so we have allocations to both local and shared memory
++	 * to combine.
++	 */
++	lbeentry.allocated_bytes += local_my_allocated_bytes;
++	local_my_allocated_bytes = 0;
++	lbeentry.aset_allocated_bytes += local_my_aset_allocated_bytes;
++	local_my_aset_allocated_bytes = 0;
++
++	lbeentry.dsm_allocated_bytes += local_my_dsm_allocated_bytes;
++	local_my_dsm_allocated_bytes = 0;
++	lbeentry.generation_allocated_bytes += local_my_generation_allocated_bytes;
++	local_my_generation_allocated_bytes = 0;
++	lbeentry.slab_allocated_bytes += local_my_slab_allocated_bytes;
++	local_my_slab_allocated_bytes = 0;
++
+ 	/*
+ 	 * we don't zero st_progress_param here to save cycles; nobody should
+ 	 * examine it until st_progress_command has been set to something other
+@@ -460,6 +504,9 @@ pgstat_beshutdown_hook(int code, Datum arg)
+ {
+ 	volatile PgBackendStatus *beentry = MyBEEntry;
+ 
++	/* Stop reporting memory allocation changes to shared memory */
++	pgstat_reset_allocated_bytes_storage();
++
+ 	/*
+ 	 * Clear my status entry, following the protocol of bumping st_changecount
+ 	 * before and after.  We use a volatile pointer here to ensure the
+@@ -1195,3 +1242,70 @@ pgstat_clip_activity(const char *raw_activity)
+ 
+ 	return activity;
+ }
++
++/*
++ * Configure bytes allocated reporting to report allocated bytes to
++ * shared memory.
++ *
++ * Expected to be called during backend startup (in pgstat_bestart), to point
++ * allocated bytes accounting into shared memory.
++ */
++void
++pgstat_set_allocated_bytes_storage(uint64 *allocated_bytes,
++								   uint64 *aset_allocated_bytes,
++								   uint64 *dsm_allocated_bytes,
++								   uint64 *generation_allocated_bytes,
++								   uint64 *slab_allocated_bytes)
++{
++	/* Map allocations to shared memory */
++	my_allocated_bytes = allocated_bytes;
++	*allocated_bytes = local_my_allocated_bytes;
++
++	my_aset_allocated_bytes = aset_allocated_bytes;
++	*aset_allocated_bytes = local_my_aset_allocated_bytes;
++
++	my_dsm_allocated_bytes = dsm_allocated_bytes;
++	*dsm_allocated_bytes = local_my_dsm_allocated_bytes;
++
++	my_generation_allocated_bytes = generation_allocated_bytes;
++	*generation_allocated_bytes = local_my_generation_allocated_bytes;
++
++	my_slab_allocated_bytes = slab_allocated_bytes;
++	*slab_allocated_bytes = local_my_slab_allocated_bytes;
++}
++
++/*
++ * Reset allocated bytes storage location.
++ *
++ * Expected to be called during backend shutdown, before the locations set up
++ * by pgstat_set_allocated_bytes_storage become invalid.
++ */
++void
++pgstat_reset_allocated_bytes_storage(void)
++{
++	if (ProcGlobal)
++	{
++		volatile PROC_HDR *procglobal = ProcGlobal;
++
++		/*
++		 * Add dsm allocations that have not been freed to global dsm
++		 * accounting
++		 */
++		pg_atomic_add_fetch_u64(&procglobal->global_dsm_allocation,
++								*my_dsm_allocated_bytes);
++	}
++
++	/* Reset memory allocation variables */
++	*my_allocated_bytes = local_my_allocated_bytes = 0;
++	*my_aset_allocated_bytes = local_my_aset_allocated_bytes = 0;
++	*my_dsm_allocated_bytes = local_my_dsm_allocated_bytes = 0;
++	*my_generation_allocated_bytes = local_my_generation_allocated_bytes = 0;
++	*my_slab_allocated_bytes = local_my_slab_allocated_bytes = 0;
++
++	/* Point my_{*_}allocated_bytes from shared memory back to local */
++	my_allocated_bytes = &local_my_allocated_bytes;
++	my_aset_allocated_bytes = &local_my_aset_allocated_bytes;
++	my_dsm_allocated_bytes = &local_my_dsm_allocated_bytes;
++	my_generation_allocated_bytes = &local_my_generation_allocated_bytes;
++	my_slab_allocated_bytes = &local_my_slab_allocated_bytes;
++}
+diff --git a/src/backend/utils/adt/pgstatfuncs.c b/src/backend/utils/adt/pgstatfuncs.c
+index 49adc319fc..35f2d2bffe 100644
+--- a/src/backend/utils/adt/pgstatfuncs.c
++++ b/src/backend/utils/adt/pgstatfuncs.c
+@@ -2062,3 +2062,87 @@ pg_stat_have_stats(PG_FUNCTION_ARGS)
+ 
+ 	PG_RETURN_BOOL(pgstat_have_entry(kind, dboid, objoid));
+ }
++
++/*
++ * Get the memory allocation of PG backends.
++ */
++Datum
++pg_stat_get_memory_allocation(PG_FUNCTION_ARGS)
++{
++#define PG_STAT_GET_MEMORY_ALLOCATION_COLS	7
++	int			num_backends = pgstat_fetch_stat_numbackends();
++	int			curr_backend;
++	int			pid = PG_ARGISNULL(0) ? -1 : PG_GETARG_INT32(0);
++	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
++
++	InitMaterializedSRF(fcinfo, 0);
++
++	/* 1-based index */
++	for (curr_backend = 1; curr_backend <= num_backends; curr_backend++)
++	{
++		/* for each row */
++		Datum		values[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
++		bool		nulls[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
++		LocalPgBackendStatus *local_beentry;
++		PgBackendStatus *beentry;
++
++		/* Get the next one in the list */
++		local_beentry = pgstat_fetch_stat_local_beentry(curr_backend);
++		beentry = &local_beentry->backendStatus;
++
++		/* If looking for specific PID, ignore all the others */
++		if (pid != -1 && beentry->st_procpid != pid)
++			continue;
++
++		/* Values available to all callers */
++		if (beentry->st_databaseid != InvalidOid)
++			values[0] = ObjectIdGetDatum(beentry->st_databaseid);
++		else
++			nulls[0] = true;
++
++		values[1] = Int32GetDatum(beentry->st_procpid);
++		values[2] = UInt64GetDatum(beentry->allocated_bytes);
++		values[3] = UInt64GetDatum(beentry->aset_allocated_bytes);
++		values[4] = UInt64GetDatum(beentry->dsm_allocated_bytes);
++		values[5] = UInt64GetDatum(beentry->generation_allocated_bytes);
++		values[6] = UInt64GetDatum(beentry->slab_allocated_bytes);
++
++		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
++
++		/* If only a single backend was requested, and we found it, break. */
++		if (pid != -1)
++			break;
++	}
++
++	return (Datum) 0;
++}
++
++/*
++ * Get the global memory allocation statistics.
++ */
++Datum
++pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
++{
++#define PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS	2
++	TupleDesc	tupdesc;
++	Datum		values[PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS] = {0};
++	bool		nulls[PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS] = {0};
++	volatile PROC_HDR *procglobal = ProcGlobal;
++
++	/* Initialise attributes information in the tuple descriptor */
++	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS);
++	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "datid",
++					   OIDOID, -1, 0);
++	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "global_dsm_allocated_bytes",
++					   INT8OID, -1, 0);
++	BlessTupleDesc(tupdesc);
++
++	/* datid */
++	values[0] = ObjectIdGetDatum(MyDatabaseId);
++
++	/* get global_dsm_allocated_bytes */
++	values[1] = Int64GetDatum(pg_atomic_read_u64(&procglobal->global_dsm_allocation));
++
++	/* Returns the record as Datum */
++	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
++}
+diff --git a/src/backend/utils/init/miscinit.c b/src/backend/utils/init/miscinit.c
+index a604432126..7b8eeb7dbb 100644
+--- a/src/backend/utils/init/miscinit.c
++++ b/src/backend/utils/init/miscinit.c
+@@ -171,6 +171,9 @@ InitPostmasterChild(void)
+ 				(errcode_for_socket_access(),
+ 				 errmsg_internal("could not set postmaster death monitoring pipe to FD_CLOEXEC mode: %m")));
+ #endif
++
++	/* Init allocated bytes to avoid double counting parent allocation */
++	pgstat_init_allocated_bytes();
+ }
+ 
+ /*
+diff --git a/src/backend/utils/mmgr/aset.c b/src/backend/utils/mmgr/aset.c
+index 0bbbf93672..4146831d75 100644
+--- a/src/backend/utils/mmgr/aset.c
++++ b/src/backend/utils/mmgr/aset.c
+@@ -47,6 +47,7 @@
+ #include "postgres.h"
+ 
+ #include "port/pg_bitutils.h"
++#include "utils/backend_status.h"
+ #include "utils/memdebug.h"
+ #include "utils/memutils.h"
+ #include "utils/memutils_memorychunk.h"
+@@ -513,6 +514,7 @@ AllocSetContextCreateInternal(MemoryContext parent,
+ 						name);
+ 
+ 	((MemoryContext) set)->mem_allocated = firstBlockSize;
++	pgstat_report_allocated_bytes_increase(firstBlockSize, PG_ALLOC_ASET);
+ 
+ 	return (MemoryContext) set;
+ }
+@@ -535,6 +537,7 @@ AllocSetReset(MemoryContext context)
+ 	AllocSet	set = (AllocSet) context;
+ 	AllocBlock	block;
+ 	Size		keepersize PG_USED_FOR_ASSERTS_ONLY;
++	uint64		deallocation = 0;
+ 
+ 	Assert(AllocSetIsValid(set));
+ 
+@@ -577,6 +580,7 @@ AllocSetReset(MemoryContext context)
+ 		{
+ 			/* Normal case, release the block */
+ 			context->mem_allocated -= block->endptr - ((char *) block);
++			deallocation += block->endptr - ((char *) block);
+ 
+ #ifdef CLOBBER_FREED_MEMORY
+ 			wipe_mem(block, block->freeptr - ((char *) block));
+@@ -587,6 +591,7 @@ AllocSetReset(MemoryContext context)
+ 	}
+ 
+ 	Assert(context->mem_allocated == keepersize);
++	pgstat_report_allocated_bytes_decrease(deallocation, PG_ALLOC_ASET);
+ 
+ 	/* Reset block size allocation sequence, too */
+ 	set->nextBlockSize = set->initBlockSize;
+@@ -605,6 +610,7 @@ AllocSetDelete(MemoryContext context)
+ 	AllocSet	set = (AllocSet) context;
+ 	AllocBlock	block = set->blocks;
+ 	Size		keepersize PG_USED_FOR_ASSERTS_ONLY;
++	uint64		deallocation = 0;
+ 
+ 	Assert(AllocSetIsValid(set));
+ 
+@@ -643,11 +649,13 @@ AllocSetDelete(MemoryContext context)
+ 
+ 				freelist->first_free = (AllocSetContext *) oldset->header.nextchild;
+ 				freelist->num_free--;
++				deallocation += oldset->header.mem_allocated;
+ 
+ 				/* All that remains is to free the header/initial block */
+ 				free(oldset);
+ 			}
+ 			Assert(freelist->num_free == 0);
++			pgstat_report_allocated_bytes_decrease(deallocation, PG_ALLOC_ASET);
+ 		}
+ 
+ 		/* Now add the just-deleted context to the freelist. */
+@@ -664,7 +672,10 @@ AllocSetDelete(MemoryContext context)
+ 		AllocBlock	next = block->next;
+ 
+ 		if (block != set->keeper)
++		{
+ 			context->mem_allocated -= block->endptr - ((char *) block);
++			deallocation += block->endptr - ((char *) block);
++		}
+ 
+ #ifdef CLOBBER_FREED_MEMORY
+ 		wipe_mem(block, block->freeptr - ((char *) block));
+@@ -677,6 +688,7 @@ AllocSetDelete(MemoryContext context)
+ 	}
+ 
+ 	Assert(context->mem_allocated == keepersize);
++	pgstat_report_allocated_bytes_decrease(deallocation + context->mem_allocated, PG_ALLOC_ASET);
+ 
+ 	/* Finally, free the context header, including the keeper block */
+ 	free(set);
+@@ -726,6 +738,7 @@ AllocSetAlloc(MemoryContext context, Size size)
+ 			return NULL;
+ 
+ 		context->mem_allocated += blksize;
++		pgstat_report_allocated_bytes_increase(blksize, PG_ALLOC_ASET);
+ 
+ 		block->aset = set;
+ 		block->freeptr = block->endptr = ((char *) block) + blksize;
+@@ -939,6 +952,7 @@ AllocSetAlloc(MemoryContext context, Size size)
+ 			return NULL;
+ 
+ 		context->mem_allocated += blksize;
++		pgstat_report_allocated_bytes_increase(blksize, PG_ALLOC_ASET);
+ 
+ 		block->aset = set;
+ 		block->freeptr = ((char *) block) + ALLOC_BLOCKHDRSZ;
+@@ -1036,6 +1050,7 @@ AllocSetFree(void *pointer)
+ 			block->next->prev = block->prev;
+ 
+ 		set->header.mem_allocated -= block->endptr - ((char *) block);
++		pgstat_report_allocated_bytes_decrease(block->endptr - ((char *) block), PG_ALLOC_ASET);
+ 
+ #ifdef CLOBBER_FREED_MEMORY
+ 		wipe_mem(block, block->freeptr - ((char *) block));
+@@ -1166,7 +1181,9 @@ AllocSetRealloc(void *pointer, Size size)
+ 
+ 		/* updated separately, not to underflow when (oldblksize > blksize) */
+ 		set->header.mem_allocated -= oldblksize;
++		pgstat_report_allocated_bytes_decrease(oldblksize, PG_ALLOC_ASET);
+ 		set->header.mem_allocated += blksize;
++		pgstat_report_allocated_bytes_increase(blksize, PG_ALLOC_ASET);
+ 
+ 		block->freeptr = block->endptr = ((char *) block) + blksize;
+ 
+diff --git a/src/backend/utils/mmgr/generation.c b/src/backend/utils/mmgr/generation.c
+index 4fb8663cd6..502f877855 100644
+--- a/src/backend/utils/mmgr/generation.c
++++ b/src/backend/utils/mmgr/generation.c
+@@ -37,6 +37,7 @@
+ 
+ #include "lib/ilist.h"
+ #include "port/pg_bitutils.h"
++#include "utils/backend_status.h"
+ #include "utils/memdebug.h"
+ #include "utils/memutils.h"
+ #include "utils/memutils_memorychunk.h"
+@@ -259,6 +260,7 @@ GenerationContextCreate(MemoryContext parent,
+ 						name);
+ 
+ 	((MemoryContext) set)->mem_allocated = firstBlockSize;
++	pgstat_report_allocated_bytes_increase(firstBlockSize, PG_ALLOC_GENERATION);
+ 
+ 	return (MemoryContext) set;
+ }
+@@ -275,6 +277,7 @@ GenerationReset(MemoryContext context)
+ {
+ 	GenerationContext *set = (GenerationContext *) context;
+ 	dlist_mutable_iter miter;
++	uint64		deallocation = 0;
+ 
+ 	Assert(GenerationIsValid(set));
+ 
+@@ -297,9 +300,14 @@ GenerationReset(MemoryContext context)
+ 		if (block == set->keeper)
+ 			GenerationBlockMarkEmpty(block);
+ 		else
++		{
++			deallocation += block->blksize;
+ 			GenerationBlockFree(set, block);
++		}
+ 	}
+ 
++	pgstat_report_allocated_bytes_decrease(deallocation, PG_ALLOC_GENERATION);
++
+ 	/* set it so new allocations to make use of the keeper block */
+ 	set->block = set->keeper;
+ 
+@@ -320,6 +328,9 @@ GenerationDelete(MemoryContext context)
+ {
+ 	/* Reset to release all releasable GenerationBlocks */
+ 	GenerationReset(context);
++
++	pgstat_report_allocated_bytes_decrease(context->mem_allocated, PG_ALLOC_GENERATION);
++
+ 	/* And free the context header and keeper block */
+ 	free(context);
+ }
+@@ -366,6 +377,7 @@ GenerationAlloc(MemoryContext context, Size size)
+ 			return NULL;
+ 
+ 		context->mem_allocated += blksize;
++		pgstat_report_allocated_bytes_increase(blksize, PG_ALLOC_GENERATION);
+ 
+ 		/* block with a single (used) chunk */
+ 		block->context = set;
+@@ -469,6 +481,7 @@ GenerationAlloc(MemoryContext context, Size size)
+ 				return NULL;
+ 
+ 			context->mem_allocated += blksize;
++			pgstat_report_allocated_bytes_increase(blksize, PG_ALLOC_GENERATION);
+ 
+ 			/* initialize the new block */
+ 			GenerationBlockInit(set, block, blksize);
+@@ -721,6 +734,8 @@ GenerationFree(void *pointer)
+ 	dlist_delete(&block->node);
+ 
+ 	set->header.mem_allocated -= block->blksize;
++	pgstat_report_allocated_bytes_decrease(block->blksize, PG_ALLOC_GENERATION);
++
+ 	free(block);
+ }
+ 
+diff --git a/src/backend/utils/mmgr/slab.c b/src/backend/utils/mmgr/slab.c
+index 718dd2ba03..913787dba8 100644
+--- a/src/backend/utils/mmgr/slab.c
++++ b/src/backend/utils/mmgr/slab.c
+@@ -69,6 +69,7 @@
+ #include "postgres.h"
+ 
+ #include "lib/ilist.h"
++#include "utils/backend_status.h"
+ #include "utils/memdebug.h"
+ #include "utils/memutils.h"
+ #include "utils/memutils_memorychunk.h"
+@@ -413,6 +414,13 @@ SlabContextCreate(MemoryContext parent,
+ 						parent,
+ 						name);
+ 
++	/*
++	 * If SlabContextCreate is updated to add context header size to
++	 * context->mem_allocated, then update here and SlabDelete appropriately
++	 */
++	pgstat_report_allocated_bytes_increase(Slab_CONTEXT_HDRSZ(slab->chunksPerBlock),
++										   PG_ALLOC_SLAB);
++
+ 	return (MemoryContext) slab;
+ }
+ 
+@@ -429,6 +437,7 @@ SlabReset(MemoryContext context)
+ 	SlabContext *slab = (SlabContext *) context;
+ 	dlist_mutable_iter miter;
+ 	int			i;
++	uint64		deallocation = 0;
+ 
+ 	Assert(SlabIsValid(slab));
+ 
+@@ -449,6 +458,7 @@ SlabReset(MemoryContext context)
+ #endif
+ 		free(block);
+ 		context->mem_allocated -= slab->blockSize;
++		deallocation += slab->blockSize;
+ 	}
+ 
+ 	/* walk over blocklist and free the blocks */
+@@ -465,9 +475,11 @@ SlabReset(MemoryContext context)
+ #endif
+ 			free(block);
+ 			context->mem_allocated -= slab->blockSize;
++			deallocation += slab->blockSize;
+ 		}
+ 	}
+ 
++	pgstat_report_allocated_bytes_decrease(deallocation, PG_ALLOC_SLAB);
+ 	slab->curBlocklistIndex = 0;
+ 
+ 	Assert(context->mem_allocated == 0);
+@@ -482,6 +494,14 @@ SlabDelete(MemoryContext context)
+ {
+ 	/* Reset to release all the SlabBlocks */
+ 	SlabReset(context);
++
++	/*
++	 * Until context header allocation is included in context->mem_allocated,
++	 * cast to slab and decrement the header allocation
++	 */
++	pgstat_report_allocated_bytes_decrease(Slab_CONTEXT_HDRSZ(((SlabContext *) context)->chunksPerBlock),
++										   PG_ALLOC_SLAB);
++
+ 	/* And free the context header */
+ 	free(context);
+ }
+@@ -546,6 +566,7 @@ SlabAlloc(MemoryContext context, Size size)
+ 
+ 			block->slab = slab;
+ 			context->mem_allocated += slab->blockSize;
++			pgstat_report_allocated_bytes_increase(slab->blockSize, PG_ALLOC_SLAB);
+ 
+ 			/* use the first chunk in the new block */
+ 			chunk = SlabBlockGetChunk(slab, block, 0);
+@@ -740,6 +761,7 @@ SlabFree(void *pointer)
+ #endif
+ 			free(block);
+ 			slab->header.mem_allocated -= slab->blockSize;
++			pgstat_report_allocated_bytes_decrease(slab->blockSize, PG_ALLOC_SLAB);
+ 		}
+ 
+ 		/*
+diff --git a/src/include/catalog/pg_proc.dat b/src/include/catalog/pg_proc.dat
+index 6996073989..b095740f8a 100644
+--- a/src/include/catalog/pg_proc.dat
++++ b/src/include/catalog/pg_proc.dat
+@@ -5408,6 +5408,23 @@
+   proname => 'pg_stat_get_backend_idset', prorows => '100', proretset => 't',
+   provolatile => 's', proparallel => 'r', prorettype => 'int4',
+   proargtypes => '', prosrc => 'pg_stat_get_backend_idset' },
++{ oid => '9890',
++  descr => 'statistics: memory allocation information for backends',
++  proname => 'pg_stat_get_memory_allocation', prorows => '100', proisstrict => 'f',
++  proretset => 't', provolatile => 's', proparallel => 'r',
++  prorettype => 'record', proargtypes => 'int4',
++  proallargtypes => '{int4,oid,int4,int8,int8,int8,int8,int8}',
++  proargmodes => '{i,o,o,o,o,o,o,o}',
++  proargnames => '{pid,datid,pid,allocated_bytes,aset_allocated_bytes,dsm_allocated_bytes,generation_allocated_bytes,slab_allocated_bytes}',
++  prosrc => 'pg_stat_get_memory_allocation' },
++{ oid => '9891',
++  descr => 'statistics: global memory allocation information',
++  proname => 'pg_stat_get_global_memory_allocation', proisstrict => 'f',
++  provolatile => 's', proparallel => 'r', prorettype => 'record',
++  proargtypes => '', proallargtypes => '{oid,int8}',
++  proargmodes => '{o,o}',
++  proargnames => '{datid,global_dsm_allocated_bytes}',
++  prosrc =>'pg_stat_get_global_memory_allocation' },
+ { oid => '2022',
+   descr => 'statistics: information about currently active backends',
+   proname => 'pg_stat_get_activity', prorows => '100', proisstrict => 'f',
+diff --git a/src/include/storage/proc.h b/src/include/storage/proc.h
+index ef74f32693..e6be67de2a 100644
+--- a/src/include/storage/proc.h
++++ b/src/include/storage/proc.h
+@@ -404,6 +404,8 @@ typedef struct PROC_HDR
+ 	int			spins_per_delay;
+ 	/* Buffer id of the buffer that Startup process waits for pin on, or -1 */
+ 	int			startupBufferPinWaitBufId;
++	/* Global dsm allocations */
++	pg_atomic_uint64 global_dsm_allocation;
+ } PROC_HDR;
+ 
+ extern PGDLLIMPORT PROC_HDR *ProcGlobal;
+diff --git a/src/include/utils/backend_status.h b/src/include/utils/backend_status.h
+index 16500d53b2..9b75fc5223 100644
+--- a/src/include/utils/backend_status.h
++++ b/src/include/utils/backend_status.h
+@@ -10,6 +10,7 @@
+ #ifndef BACKEND_STATUS_H
+ #define BACKEND_STATUS_H
+ 
++#include "common/int.h"
+ #include "datatype/timestamp.h"
+ #include "libpq/pqcomm.h"
+ #include "miscadmin.h"			/* for BackendType */
+@@ -32,6 +33,14 @@ typedef enum BackendState
+ 	STATE_DISABLED
+ } BackendState;
+ 
++/* Enum helper for reporting memory allocator type */
++enum pg_allocator_type
++{
++	PG_ALLOC_ASET = 1,
++	PG_ALLOC_DSM,
++	PG_ALLOC_GENERATION,
++	PG_ALLOC_SLAB
++};
+ 
+ /* ----------
+  * Shared-memory data structures
+@@ -170,6 +179,15 @@ typedef struct PgBackendStatus
+ 
+ 	/* query identifier, optionally computed using post_parse_analyze_hook */
+ 	uint64		st_query_id;
++
++	/* Current memory allocated to this backend */
++	uint64		allocated_bytes;
++
++	/* Current memory allocated to this backend by type */
++	uint64		aset_allocated_bytes;
++	uint64		dsm_allocated_bytes;
++	uint64		generation_allocated_bytes;
++	uint64		slab_allocated_bytes;
+ } PgBackendStatus;
+ 
+ 
+@@ -294,6 +312,11 @@ extern PGDLLIMPORT int pgstat_track_activity_query_size;
+  * ----------
+  */
+ extern PGDLLIMPORT PgBackendStatus *MyBEEntry;
++extern PGDLLIMPORT uint64 *my_allocated_bytes;
++extern PGDLLIMPORT uint64 *my_aset_allocated_bytes;
++extern PGDLLIMPORT uint64 *my_dsm_allocated_bytes;
++extern PGDLLIMPORT uint64 *my_generation_allocated_bytes;
++extern PGDLLIMPORT uint64 *my_slab_allocated_bytes;
+ 
+ 
+ /* ----------
+@@ -325,7 +348,12 @@ extern const char *pgstat_get_backend_current_activity(int pid, bool checkUser);
+ extern const char *pgstat_get_crashed_backend_activity(int pid, char *buffer,
+ 													   int buflen);
+ extern uint64 pgstat_get_my_query_id(void);
+-
++extern void pgstat_set_allocated_bytes_storage(uint64 *allocated_bytes,
++											   uint64 *aset_allocated_bytes,
++											   uint64 *dsm_allocated_bytes,
++											   uint64 *generation_allocated_bytes,
++											   uint64 *slab_allocated_bytes);
++extern void pgstat_reset_allocated_bytes_storage(void);
+ 
+ /* ----------
+  * Support functions for the SQL-callable functions to
+@@ -337,5 +365,119 @@ extern PgBackendStatus *pgstat_fetch_stat_beentry(BackendId beid);
+ extern LocalPgBackendStatus *pgstat_fetch_stat_local_beentry(int beid);
+ extern char *pgstat_clip_activity(const char *raw_activity);
+ 
++/* ----------
++ * pgstat_report_allocated_bytes_decrease() -
++ *  Called to report decrease in memory allocated for this backend.
++ *
++ * my_{*_}allocated_bytes initially points to local memory, making it safe to
++ * call this before pgstats has been initialized.
++ * ----------
++ */
++static inline void
++pgstat_report_allocated_bytes_decrease(int64 proc_allocated_bytes,
++									   int pg_allocator_type)
++{
++	uint64		temp;
++
++	/* Avoid allocated_bytes unsigned integer overflow on decrease */
++	if (pg_sub_u64_overflow(*my_allocated_bytes, proc_allocated_bytes, &temp))
++	{
++		/* On overflow, set allocated bytes and allocator type bytes to zero */
++		*my_allocated_bytes = 0;
++		*my_aset_allocated_bytes = 0;
++		*my_dsm_allocated_bytes = 0;
++		*my_generation_allocated_bytes = 0;
++		*my_slab_allocated_bytes = 0;
++	}
++	else
++	{
++		/* decrease allocation */
++		*my_allocated_bytes -= proc_allocated_bytes;
++
++		/* Decrease allocator type allocated bytes. */
++		switch (pg_allocator_type)
++		{
++			case PG_ALLOC_ASET:
++				*my_aset_allocated_bytes -= proc_allocated_bytes;
++				break;
++			case PG_ALLOC_DSM:
++
++				/*
++				 * Some dsm allocations live beyond process exit. These are
++				 * accounted for in a global counter in
++				 * pgstat_reset_allocated_bytes_storage at process exit.
++				 */
++				*my_dsm_allocated_bytes -= proc_allocated_bytes;
++				break;
++			case PG_ALLOC_GENERATION:
++				*my_generation_allocated_bytes -= proc_allocated_bytes;
++				break;
++			case PG_ALLOC_SLAB:
++				*my_slab_allocated_bytes -= proc_allocated_bytes;
++				break;
++		}
++	}
++
++	return;
++}
++
++/* ----------
++ * pgstat_report_allocated_bytes_increase() -
++ *  Called to report increase in memory allocated for this backend.
++ *
++ * my_allocated_bytes initially points to local memory, making it safe to call
++ * this before pgstats has been initialized.
++ * ----------
++ */
++static inline void
++pgstat_report_allocated_bytes_increase(int64 proc_allocated_bytes,
++									   int pg_allocator_type)
++{
++	*my_allocated_bytes += proc_allocated_bytes;
++
++	/* Increase allocator type allocated bytes */
++	switch (pg_allocator_type)
++	{
++		case PG_ALLOC_ASET:
++			*my_aset_allocated_bytes += proc_allocated_bytes;
++			break;
++		case PG_ALLOC_DSM:
++
++			/*
++			 * Some dsm allocations live beyond process exit. These are
++			 * accounted for in a global counter in
++			 * pgstat_reset_allocated_bytes_storage at process exit.
++			 */
++			*my_dsm_allocated_bytes += proc_allocated_bytes;
++			break;
++		case PG_ALLOC_GENERATION:
++			*my_generation_allocated_bytes += proc_allocated_bytes;
++			break;
++		case PG_ALLOC_SLAB:
++			*my_slab_allocated_bytes += proc_allocated_bytes;
++			break;
++	}
++
++	return;
++}
++
++/* ---------
++ * pgstat_init_allocated_bytes() -
++ *
++ * Called to initialize allocated bytes variables after fork and to
++ * avoid double counting allocations.
++ * ---------
++ */
++static inline void
++pgstat_init_allocated_bytes(void)
++{
++	*my_allocated_bytes = 0;
++	*my_aset_allocated_bytes = 0;
++	*my_dsm_allocated_bytes = 0;
++	*my_generation_allocated_bytes = 0;
++	*my_slab_allocated_bytes = 0;
++
++	return;
++}
+ 
+ #endif							/* BACKEND_STATUS_H */
+diff --git a/src/test/regress/expected/rules.out b/src/test/regress/expected/rules.out
+index 7fd81e6a7d..ff76aa99a2 100644
+--- a/src/test/regress/expected/rules.out
++++ b/src/test/regress/expected/rules.out
+@@ -1873,6 +1873,24 @@ pg_stat_database_conflicts| SELECT oid AS datid,
+     pg_stat_get_db_conflict_startup_deadlock(oid) AS confl_deadlock,
+     pg_stat_get_db_conflict_logicalslot(oid) AS confl_active_logicalslot
+    FROM pg_database d;
++pg_stat_global_memory_allocation| WITH sums AS (
++         SELECT sum(pg_stat_memory_allocation.aset_allocated_bytes) AS total_aset_allocated_bytes,
++            sum(pg_stat_memory_allocation.dsm_allocated_bytes) AS total_dsm_allocated_bytes,
++            sum(pg_stat_memory_allocation.generation_allocated_bytes) AS total_generation_allocated_bytes,
++            sum(pg_stat_memory_allocation.slab_allocated_bytes) AS total_slab_allocated_bytes
++           FROM pg_stat_memory_allocation
++        )
++ SELECT s.datid,
++    current_setting('shared_memory_size'::text, true) AS shared_memory_size,
++    (current_setting('shared_memory_size_in_huge_pages'::text, true))::integer AS shared_memory_size_in_huge_pages,
++    s.global_dsm_allocated_bytes,
++    sums.total_aset_allocated_bytes,
++    sums.total_dsm_allocated_bytes,
++    sums.total_generation_allocated_bytes,
++    sums.total_slab_allocated_bytes
++   FROM sums,
++    (pg_stat_get_global_memory_allocation() s(datid, global_dsm_allocated_bytes)
++     LEFT JOIN pg_database d ON ((s.datid = d.oid)));
+ pg_stat_gssapi| SELECT pid,
+     gss_auth AS gss_authenticated,
+     gss_princ AS principal,
+@@ -1899,6 +1917,15 @@ pg_stat_io| SELECT backend_type,
+     fsync_time,
+     stats_reset
+    FROM pg_stat_get_io() b(backend_type, object, context, reads, read_time, writes, write_time, writebacks, writeback_time, extends, extend_time, op_bytes, hits, evictions, reuses, fsyncs, fsync_time, stats_reset);
++pg_stat_memory_allocation| SELECT s.datid,
++    s.pid,
++    s.allocated_bytes,
++    s.aset_allocated_bytes,
++    s.dsm_allocated_bytes,
++    s.generation_allocated_bytes,
++    s.slab_allocated_bytes
++   FROM (pg_stat_get_memory_allocation(NULL::integer) s(datid, pid, allocated_bytes, aset_allocated_bytes, dsm_allocated_bytes, generation_allocated_bytes, slab_allocated_bytes)
++     LEFT JOIN pg_database d ON ((s.datid = d.oid)));
+ pg_stat_progress_analyze| SELECT s.pid,
+     s.datid,
+     d.datname,
+diff --git a/src/test/regress/expected/stats.out b/src/test/regress/expected/stats.out
+index 8e63340782..748c337ee7 100644
+--- a/src/test/regress/expected/stats.out
++++ b/src/test/regress/expected/stats.out
+@@ -1572,4 +1572,40 @@ SELECT COUNT(*) FROM brin_hot_3 WHERE a = 2;
+ 
+ DROP TABLE brin_hot_3;
+ SET enable_seqscan = on;
++-- ensure that allocated_bytes exist for backends
++SELECT
++    allocated_bytes > 0 AS result
++FROM
++    pg_stat_activity ps
++    JOIN pg_stat_memory_allocation pa ON (pa.pid = ps.pid)
++WHERE
++    backend_type IN ('checkpointer', 'background writer', 'walwriter', 'autovacuum launcher');
++ result 
++--------
++ t
++ t
++ t
++ t
++(4 rows)
++
++-- ensure that pg_stat_global_memory_allocation view exists
++SELECT
++    datid > 0, pg_size_bytes(shared_memory_size) >= 0, shared_memory_size_in_huge_pages >= -1, global_dsm_allocated_bytes >= 0
++FROM
++    pg_stat_global_memory_allocation;
++ ?column? | ?column? | ?column? | ?column? 
++----------+----------+----------+----------
++ t        | t        | t        | t
++(1 row)
++
++-- ensure that pg_stat_memory_allocation view exists
++SELECT
++    pid > 0, allocated_bytes >= 0, aset_allocated_bytes >= 0, dsm_allocated_bytes >= 0, generation_allocated_bytes >= 0, slab_allocated_bytes >= 0
++FROM
++    pg_stat_memory_allocation limit 1;
++ ?column? | ?column? | ?column? | ?column? | ?column? | ?column? 
++----------+----------+----------+----------+----------+----------
++ t        | t        | t        | t        | t        | t
++(1 row)
++
+ -- End of Stats Test
+diff --git a/src/test/regress/sql/stats.sql b/src/test/regress/sql/stats.sql
+index fddf5a8277..a01f2545ba 100644
+--- a/src/test/regress/sql/stats.sql
++++ b/src/test/regress/sql/stats.sql
+@@ -805,4 +805,24 @@ DROP TABLE brin_hot_3;
+ 
+ SET enable_seqscan = on;
+ 
++-- ensure that allocated_bytes exist for backends
++SELECT
++    allocated_bytes > 0 AS result
++FROM
++    pg_stat_activity ps
++    JOIN pg_stat_memory_allocation pa ON (pa.pid = ps.pid)
++WHERE
++    backend_type IN ('checkpointer', 'background writer', 'walwriter', 'autovacuum launcher');
++
++-- ensure that pg_stat_global_memory_allocation view exists
++SELECT
++    datid > 0, pg_size_bytes(shared_memory_size) >= 0, shared_memory_size_in_huge_pages >= -1, global_dsm_allocated_bytes >= 0
++FROM
++    pg_stat_global_memory_allocation;
++
++-- ensure that pg_stat_memory_allocation view exists
++SELECT
++    pid > 0, allocated_bytes >= 0, aset_allocated_bytes >= 0, dsm_allocated_bytes >= 0, generation_allocated_bytes >= 0, slab_allocated_bytes >= 0
++FROM
++    pg_stat_memory_allocation limit 1;
+ -- End of Stats Test
+-- 
+2.25.1
+
