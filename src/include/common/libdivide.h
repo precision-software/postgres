@@ -1,3 +1,7 @@
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+#undef __cplusplus
+
 // libdivide.h - Optimized integer division
 // https://libdivide.com
 //
