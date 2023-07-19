@@ -90,6 +90,7 @@
 #include "access/visibilitymap.h"
 #include "access/xloginsert.h"
 #include "access/xlogutils.h"
+#include "common/libdivide.h"
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "storage/bufmgr.h"
@@ -111,17 +112,18 @@
 #define HEAPBLOCKS_PER_BYTE(blocksize) (BITS_PER_BYTE / BITS_PER_HEAPBLOCK)
 
 /* Init routine for our fastmath */
-#define MAPBLOCK_INIT if (unlikely(!mapblock_size))		\
-	{													\
-		mapblock_size = MAPSIZE(cluster_block_size);	\
-		mapblock_inv = pg_fastinverse(mapblock_size);	\
+#define MAPBLOCK_INIT if (unlikely(!mapblock_size))			\
+	{														\
+		mapblock_size = MAPSIZE(cluster_block_size);		\
+		mapblock_div = libdivide_u32_gen(mapblock_size);	\
+		mapblock_inv = pg_fastinverse(mapblock_size);		\
 	}
 
 /* Number of heap blocks we can represent in one visibility map page. */
 #define HEAPBLOCKS_PER_PAGE(blocksize) (MAPSIZE(blocksize) << BITS_PER_HEAPBLOCK)
 
 /* Mapping from heap block number to the right bit in the visibility map */
-#define HEAPBLK_TO_MAPBLOCK(x) (pg_fastdiv((x),mapblock_size,mapblock_inv))
+#define HEAPBLK_TO_MAPBLOCK(x) (libdivide_u32_do((x),&mapblock_div))
 #define HEAPBLK_TO_MAPBYTE(x) (pg_fastmod((x),mapblock_size,mapblock_inv) >> 2) /* always 4 blocks per byte */
 #define HEAPBLK_TO_OFFSET(x) (((x) & 0x3) << 1) /* always 2 bits per entry */
 
@@ -136,8 +138,9 @@ static Buffer vm_readbuf(Relation rel, BlockNumber blkno, bool extend);
 static Buffer vm_extend(Relation rel, BlockNumber vm_nblocks);
 
 /* storage for the fast div/mod inverse */
-static uint64 mapblock_inv = 0;
 static uint32 mapblock_size = 0;
+static uint64 mapblock_inv;
+static struct libdivide_u32_t mapblock_div;
 
 /*
  *	visibilitymap_clear - clear specified bits for one page in visibility map
