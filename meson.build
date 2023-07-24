@@ -88,7 +88,6 @@ postgres_inc_d += get_option('extra_include_dirs')
 postgres_lib_d = get_option('extra_lib_dirs')
 
 cppflags = []
-
 cflags = []
 cxxflags = []
 cflags_warn = []
@@ -1802,6 +1801,8 @@ common_functional_flags = [
   # Disable optimizations that assume no overflow; needed for gcc 4.3+
   '-fwrapv',
   '-fexcess-precision=standard',
+  # For stack traces in perf
+  '-fno-omit-frame-pointer',
 ]
 
 cflags += cc.get_supported_arguments(common_functional_flags)
