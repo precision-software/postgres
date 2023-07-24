@@ -1802,6 +1802,7 @@ common_functional_flags = [
   # Disable optimizations that assume no overflow; needed for gcc 4.3+
   '-fwrapv',
   '-fexcess-precision=standard',
+  '-fno-omit-frame-pointer',
 ]
 
 cflags += cc.get_supported_arguments(common_functional_flags)
