@@ -80,8 +80,8 @@ uint64	   *my_slab_allocated_bytes = &local_my_slab_allocated_bytes;
  * NOTE: initial_allocation_allowance && allocation_allowance_refill_qty
  * may be candidates for future GUC variables. Arbitrary 1MB selected initially.
  */
-uint64		initial_allocation_allowance = 1024 * 1024;
-uint64		allocation_allowance_refill_qty = 1024 * 1024;
+uint64		initial_allocation_allowance = 64* 1024 * 1024;
+uint64		allocation_allowance_refill_qty = 64 * 1024 * 1024;
 
 /*
  * Local counter to manage shared memory allocations. At backend startup, set to
@@ -97,7 +97,7 @@ uint64		allocation_allowance = 0;
  * selected initially.
  */
 uint64		allocation_return = 0;
-uint64		allocation_return_threshold = 1024 * 1024;
+uint64		allocation_return_threshold = 64 *1024 * 1024;
 
 static PgBackendStatus *BackendStatusArray = NULL;
 static char *BackendAppnameBuffer = NULL;
