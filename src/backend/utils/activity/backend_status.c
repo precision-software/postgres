@@ -57,7 +57,7 @@ PgBackendStatus *MyBEEntry = NULL;
 
 /*
  * Total memory reserved by this backend.
- *   Used to limit how much memory is by all backends.
+ *   Used to limit how much memory is used by all backends.
  */
 uint64	   my_allocated_bytes = 0;
 uint64     allocation_upper_bound = 0;
@@ -80,8 +80,6 @@ uint64		my_slab_allocated_bytes = 0;
  */
 uint64		initial_allocation_allowance = 1024 * 1024;
 uint64		allocation_allowance_refill_qty = 1024 * 1024;
-
-
 
 static PgBackendStatus *BackendStatusArray = NULL;
 static char *BackendAppnameBuffer = NULL;
@@ -1274,19 +1272,26 @@ pgstat_init_allocated_bytes(void)
 void
 pgstat_reset_allocated_bytes_storage(void)
 {
-    /*
-     * Reset these values to no memory used.
-     */
-     my_allocated_bytes = 0;
-     my_aset_allocated_bytes = 0;
-     my_dsm_allocated_bytes = 0;
-     my_generation_allocated_bytes = 0;
-     my_slab_allocated_bytes = 0;
-     allocation_lower_bound = 0;
-     allocation_upper_bound = 0;
+    /* DSM memory at exit gets special handling */
+    uint64 dsmAtExit = MyBEEntry->dsm_allocated_bytes
 
-     /* Update the shmem values, effectively returning all reservations */
-     update_allocated_shmem();
+    /* Reset these values to no memory used. */
+    my_allocated_bytes = 0;
+    my_aset_allocated_bytes = 0;
+    my_dsm_allocated_bytes = 0;
+    my_generation_allocated_bytes = 0;
+    my_slab_allocated_bytes = 0;
+
+    /* Update the shmem values, effectively returning all reservations */
+    update_allocated_shmem();
+
+    /* Add the dsm back into the global counters. (It doesn't go away) TODO: verify! */
+    pg_atomic_add_fetch_u64(&ProcGlobal->total_bkend_mem_bytes, _bytes, dsmAtExit);
+    pg_atomic_add_fetch_u64(&ProcGlobal->global_dsm_allocation, dsmAtExit);
+
+    /* No more fast path */
+    allocation_lower_bound = 0;
+    allocation_upper_bound = 0;
 
     return;
 }

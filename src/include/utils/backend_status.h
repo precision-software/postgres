@@ -376,11 +376,14 @@ inline static bool
 exceeds_max_total_bkend_mem(uint64 allocation_request)
 {
     uint64 newTotal;
+    uint64 newGlobalTotal;
 
     /* If we are within bounds, return success. */
     newTotal = my_allocated_bytes + allocation_request;
-    if (newTotal > allocation_upper_bound)
+    if (newTotal <= allocation_upper_bound)
         return false;
+
+//fprintf(stderr, "newTotal=%zu  upper_bound=%zu\n", newTotal, allocation_upper_bound);
 
     /*
     * Set new upper and lower bounds so our new allocation is in the middle.
@@ -392,21 +395,31 @@ exceeds_max_total_bkend_mem(uint64 allocation_request)
     allocation_upper_bound = newTotal + allocation_allowance_refill_qty;
     allocation_lower_bound = Max(newTotal, allocation_allowance_refill_qty) -
                              allocation_allowance_refill_qty;
-    update_allocated_shmem();
+
+    /*
+     * If we are postmaster, an auxiliary process, or if max_backend_mem is not set,
+     * then we don't need to check the bounds.
+     */
+    if (max_total_bkend_mem == 0 ||
+        MyProcPid == PostmasterPid ||
+        MyAuxProcType != NotAnAuxProcess)
+        return false;
+
+    /* If we are not initialized yet, then we have exhausted the initial allocation. */
+    if (ProcGlobal == NULL || MyBEEntry == NULL)
+        return true;
 
     /*
      * If we are about to exceed the global allowance, then exit with "true".
-     * The global allowance does not apply to the postmaster or auxiliary processes.
-     *
-     * Note there is a race condition between now and the time we update our alloc
-     * ation.
+     * Note there is a race condition between now and the time we
+     * update our allocation.
      * The global allowance is an approximation, so it is OK if we are a bit off.
      * The alternative is to increase the global totals here, but we would need
      * to explicitly decrease them if we failed to allocate. TODO: consider it.
      */
-    return (newTotal > pg_atomic_read_u64(&ProcGlobal->total_bkend_mem_bytes) &&
-            MyAuxProcType != NotAnAuxProcess &&
-            MyProcPid != PostmasterPid);
+    newGlobalTotal = pg_atomic_read_u64(&ProcGlobal->total_bkend_mem_bytes) +
+                     newTotal - MyBEEntry->allocated_bytes;
+    return (newGlobalTotal > ProcGlobal->max_total_bkend_mem);
 }
 
 /* ----------
@@ -430,10 +443,11 @@ pgstat_report_allocated_bytes_increase(int64 proc_allocated_bytes,
                                  my_generation_allocated_bytes +
                                  my_slab_allocated_bytes);
 
-    /* Make note we have allocated more memory */
+    /* Make note we have allocated more memory */ // TODO: DRY
     my_allocated_bytes += proc_allocated_bytes;
 
     /* Update the corresponding subtotal */
+
     switch (pg_allocator_type)
     {
         case PG_ALLOC_ASET:
@@ -511,9 +525,6 @@ update_allocated_shmem(void)
 {
     if (MyBEEntry == NULL || ProcGlobal == NULL)
         return;
-
-    Assert(ProcGlobal->total_bkend_mem_bytes >= my_allocated_bytes - MyBEEntry->allocated_bytes);
-    Assert(ProcGlobal->dsm_allocted_bytes >= my_dsm_allocated_bytes - MyBEEntry->allocated_dsm_bytes);
 
     /* Update the global sums for total and dsm allocation. */
     pg_atomic_add_fetch_u64(&ProcGlobal->total_bkend_mem_bytes, my_allocated_bytes - MyBEEntry->allocated_bytes);

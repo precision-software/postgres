@@ -201,14 +201,14 @@ InitProcGlobal(void)
 			 * less than arbitrarily picked value of 100MB.
 			 */
 
-			if (max_total_bkend_mem - result <= 0)
+			if (max_total_bkend_mem <= result)
 			{
 				ereport(ERROR,
 						errmsg("configured max_total_backend_memory %dMB is <= shared_memory_size %dMB",
 							   max_total_bkend_mem, result),
 						errhint("Disable or increase the configuration parameter \"max_total_backend_memory\"."));
 			}
-			else if (max_total_bkend_mem - result <= 100)
+			else if (max_total_bkend_mem < result + 100)
 			{
 				ereport(WARNING,
 						errmsg("max_total_backend_memory %dMB - shared_memory_size %dMB is <= 100MB",
@@ -218,10 +218,10 @@ InitProcGlobal(void)
 
 			/*
 			 * Account for shared memory size and initialize
-			 * total_bkend_mem_bytes.
+			 * the globals max_total_bkend_mem and total_bkend_mem_bytes.
 			 */
-			pg_atomic_init_u64(&ProcGlobal->total_bkend_mem_bytes,
-							   (uint64) max_total_bkend_mem * 1024 * 1024 - (uint64) result * 1024 * 1024);
+			pg_atomic_init_u64(&ProcGlobal->total_bkend_mem_bytes, 0);
+            ProcGlobal->max_total_bkend_mem = (max_total_bkend_mem - result) * 1024 * 1024;
 		}
 		else
 			ereport(ERROR, errmsg("max_total_backend_memory initialization is unable to parse shared_memory_size"));
