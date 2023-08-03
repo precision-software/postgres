@@ -56,8 +56,17 @@ int			max_total_bkend_mem = 0;
 PgBackendStatus *MyBEEntry = NULL;
 
 /*
+ * Define initial allocation allowance for a backend.
+ *
+ * NOTE: initial_allocation_allowance && allocation_allowance_refill_qty
+ * may be candidates for future GUC variables. Arbitrary 1MB selected initially.
+ */
+uint64		initial_allocation_allowance = 1024 * 1024;
+uint64		allocation_allowance_refill_qty = 1024 * 1024;
+/*
  * Total memory reserved by this backend.
  *   Used to limit how much memory is used by all backends.
+ *   However, each process starts with some memory
  */
 uint64	   my_allocated_bytes = 0;
 uint64     allocation_upper_bound = 0;
@@ -71,15 +80,6 @@ uint64		my_aset_allocated_bytes = 0;
 uint64		my_dsm_allocated_bytes = 0;
 uint64		my_generation_allocated_bytes = 0;
 uint64		my_slab_allocated_bytes = 0;
-
-/*
- * Define initial allocation allowance for a backend.
- *
- * NOTE: initial_allocation_allowance && allocation_allowance_refill_qty
- * may be candidates for future GUC variables. Arbitrary 1MB selected initially.
- */
-uint64		initial_allocation_allowance = 1024 * 1024;
-uint64		allocation_allowance_refill_qty = 1024 * 1024;
 
 static PgBackendStatus *BackendStatusArray = NULL;
 static char *BackendAppnameBuffer = NULL;
@@ -432,12 +432,12 @@ pgstat_bestart(void)
 	lbeentry.st_progress_command_target = InvalidOid;
 	lbeentry.st_query_id = UINT64CONST(0);
 
-	/* Copy memory allocated so far to the process's pgstats. Will be updated periodically. */
-	lbeentry.allocated_bytes = my_allocated_bytes;
-	lbeentry.aset_allocated_bytes = my_aset_allocated_bytes;
-	lbeentry.dsm_allocated_bytes = my_dsm_allocated_bytes;
-	lbeentry.generation_allocated_bytes = my_generation_allocated_bytes;
-	lbeentry.slab_allocated_bytes = my_slab_allocated_bytes;
+	/* No allocations have been reported yet  */
+	lbeentry.allocated_bytes = 0;
+	lbeentry.aset_allocated_bytes = 0;
+	lbeentry.dsm_allocated_bytes = 0;
+	lbeentry.generation_allocated_bytes = 0;
+	lbeentry.slab_allocated_bytes = 0;
 
 	/*
 	 * we don't zero st_progress_param here to save cycles; nobody should
@@ -1256,11 +1256,7 @@ pgstat_init_allocated_bytes(void)
 
     /* Allocate the initial memory without paying attention to limits */
     allocation_lower_bound = 0;
-    my_allocated_bytes = initial_allocation_allowance;
     allocation_upper_bound = my_allocated_bytes;
-
-    /* Post initial values to shared memory */
-    update_allocated_shmem();
 
     return;
 }
@@ -1273,7 +1269,7 @@ void
 pgstat_reset_allocated_bytes_storage(void)
 {
     /* DSM memory at exit gets special handling */
-    uint64 dsmAtExit = MyBEEntry->dsm_allocated_bytes
+    uint64 dsmAtExit = MyBEEntry->dsm_allocated_bytes;
 
     /* Reset these values to no memory used. */
     my_allocated_bytes = 0;
@@ -1285,13 +1281,14 @@ pgstat_reset_allocated_bytes_storage(void)
     /* Update the shmem values, effectively returning all reservations */
     update_allocated_shmem();
 
-    /* Add the dsm back into the global counters. (It doesn't go away) TODO: verify! */
-    pg_atomic_add_fetch_u64(&ProcGlobal->total_bkend_mem_bytes, _bytes, dsmAtExit);
-    pg_atomic_add_fetch_u64(&ProcGlobal->global_dsm_allocation, dsmAtExit);
-
     /* No more fast path */
     allocation_lower_bound = 0;
     allocation_upper_bound = 0;
+
+    /* Add the dsm back into the global counters. (It doesn't go away) TODO: verify! */
+    //pg_atomic_add_fetch_u64(&ProcGlobal->total_bkend_mem_bytes, dsmAtExit);
+    pg_atomic_add_fetch_u64(&ProcGlobal->global_dsm_allocation, dsmAtExit);
+
 
     return;
 }

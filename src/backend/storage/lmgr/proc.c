@@ -181,6 +181,7 @@ InitProcGlobal(void)
 	ProcGlobal->checkpointerLatch = NULL;
 	pg_atomic_init_u32(&ProcGlobal->procArrayGroupFirst, INVALID_PGPROCNO);
 	pg_atomic_init_u32(&ProcGlobal->clogGroupFirst, INVALID_PGPROCNO);
+    pg_atomic_init_u64(&ProcGlobal->total_bkend_mem_bytes, 0);
 	pg_atomic_init_u64(&ProcGlobal->global_dsm_allocation, 0);
 
 	/* Setup backend memory limiting if configured */
@@ -201,6 +202,8 @@ InitProcGlobal(void)
 			 * less than arbitrarily picked value of 100MB.
 			 */
 
+            elog(WARNING, "proc init: max_total=%d  result=%d\n", max_total_bkend_mem, result);
+
 			if (max_total_bkend_mem <= result)
 			{
 				ereport(ERROR,
@@ -220,8 +223,7 @@ InitProcGlobal(void)
 			 * Account for shared memory size and initialize
 			 * the globals max_total_bkend_mem and total_bkend_mem_bytes.
 			 */
-			pg_atomic_init_u64(&ProcGlobal->total_bkend_mem_bytes, 0);
-            ProcGlobal->max_total_bkend_mem = (max_total_bkend_mem - result) * 1024 * 1024;
+            ProcGlobal->max_total_bkend_mem = (uint64)(max_total_bkend_mem - result) * 1024 * 1024;
 		}
 		else
 			ereport(ERROR, errmsg("max_total_backend_memory initialization is unable to parse shared_memory_size"));

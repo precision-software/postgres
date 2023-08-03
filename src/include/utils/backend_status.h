@@ -378,12 +378,14 @@ exceeds_max_total_bkend_mem(uint64 allocation_request)
     uint64 newTotal;
     uint64 newGlobalTotal;
 
+    /* Quick optimization */
+    if (allocation_request == 0)
+        return false;
+
     /* If we are within bounds, return success. */
     newTotal = my_allocated_bytes + allocation_request;
     if (newTotal <= allocation_upper_bound)
         return false;
-
-//fprintf(stderr, "newTotal=%zu  upper_bound=%zu\n", newTotal, allocation_upper_bound);
 
     /*
     * Set new upper and lower bounds so our new allocation is in the middle.
@@ -396,6 +398,9 @@ exceeds_max_total_bkend_mem(uint64 allocation_request)
     allocation_lower_bound = Max(newTotal, allocation_allowance_refill_qty) -
                              allocation_allowance_refill_qty;
 
+    /* Update the shared memory values */  /* TODO: DRY */
+    update_allocated_shmem();
+
     /*
      * If we are postmaster, an auxiliary process, or if max_backend_mem is not set,
      * then we don't need to check the bounds.
@@ -407,18 +412,25 @@ exceeds_max_total_bkend_mem(uint64 allocation_request)
 
     /* If we are not initialized yet, then we have exhausted the initial allocation. */
     if (ProcGlobal == NULL || MyBEEntry == NULL)
-        return true;
+        return false; //true;
 
     /*
-     * If we are about to exceed the global allowance, then exit with "true".
+     * If we are about to exceed the global allowance, then exit with "true"
      * Note there is a race condition between now and the time we
      * update our allocation.
      * The global allowance is an approximation, so it is OK if we are a bit off.
      * The alternative is to increase the global totals here, but we would need
      * to explicitly decrease them if we failed to allocate. TODO: consider it.
      */
+    //elog(WARNING, "exceeds...: newTotal=%zd, be->allocated=%zd glob->total_bkend=%zd  max=%zd\n",
+     //      newTotal,
+        //   MyBEEntry->allocated_bytes,
+      //     pg_atomic_read_u64(&ProcGlobal->total_bkend_mem_bytes),
+      //     ProcGlobal->max_total_bkend_mem);
+
     newGlobalTotal = pg_atomic_read_u64(&ProcGlobal->total_bkend_mem_bytes) +
                      newTotal - MyBEEntry->allocated_bytes;
+
     return (newGlobalTotal > ProcGlobal->max_total_bkend_mem);
 }
 
@@ -443,11 +455,14 @@ pgstat_report_allocated_bytes_increase(int64 proc_allocated_bytes,
                                  my_generation_allocated_bytes +
                                  my_slab_allocated_bytes);
 
+    /* quick optimization */
+    if (proc_allocated_bytes == 0)
+        return;
+
     /* Make note we have allocated more memory */ // TODO: DRY
     my_allocated_bytes += proc_allocated_bytes;
 
     /* Update the corresponding subtotal */
-
     switch (pg_allocator_type)
     {
         case PG_ALLOC_ASET:
@@ -477,6 +492,7 @@ static inline void
 pgstat_report_allocated_bytes_decrease(int64 proc_allocated_bytes,
 									   int pg_allocator_type)
 {
+    //return; /* XXXX */
 	Assert(proc_allocated_bytes > 0);
     Assert(my_allocated_bytes >= proc_allocated_bytes);
     Assert(my_allocated_bytes == my_aset_allocated_bytes +
@@ -484,11 +500,15 @@ pgstat_report_allocated_bytes_decrease(int64 proc_allocated_bytes,
                                  my_generation_allocated_bytes +
                                  my_slab_allocated_bytes);
 
-    /* Subtract freed memory from the allocation counter */
+    /* quick optimization */
+    if (proc_allocated_bytes == 0)
+        return;
+
+    /* Subtract freed memory from the allocation counter. TODO DRY. */
     my_allocated_bytes -= proc_allocated_bytes;
 
     /* Decrease allocator type allocated bytes */
-    switch (pg_allocator_type)
+    switch (pg_allocator_type)  /* TODO: index into array? */
     {
         case PG_ALLOC_ASET:
             my_aset_allocated_bytes -= proc_allocated_bytes;
@@ -526,7 +546,10 @@ update_allocated_shmem(void)
     if (MyBEEntry == NULL || ProcGlobal == NULL)
         return;
 
-    /* Update the global sums for total and dsm allocation. */
+    //elog(WARNING, "updateShmem...: global->total=%zd my_allocated=%zd  be->allocated=%zd\n",
+     //    pg_atomic_read_u64(&ProcGlobal->total_bkend_mem_bytes), my_allocated_bytes, MyBEEntry->allocated_bytes);
+
+    /* Update the global sums for total allocation. */
     pg_atomic_add_fetch_u64(&ProcGlobal->total_bkend_mem_bytes, my_allocated_bytes - MyBEEntry->allocated_bytes);
 
     /* Update the process's memory allocation. TODO: use atomics? */
@@ -536,6 +559,5 @@ update_allocated_shmem(void)
     MyBEEntry->generation_allocated_bytes = my_generation_allocated_bytes;
     MyBEEntry->slab_allocated_bytes = my_slab_allocated_bytes;
 }
-
 
 #endif							/* BACKEND_STATUS_H */

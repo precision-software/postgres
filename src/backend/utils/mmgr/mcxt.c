@@ -287,6 +287,8 @@ MemoryContextInit(void)
 {
 	Assert(TopMemoryContext == NULL);
 
+    /* Start the memory tracking */
+    pgstat_init_allocated_bytes();
 	/*
 	 * First, initialize TopMemoryContext, which is the parent of all others.
 	 */
