@@ -120,6 +120,7 @@ int			min_dynamic_shared_memory;
 
 #define SEGMENT_NAME_PREFIX			"Global/PostgreSQL"
 
+
 /*------
  * Perform a low-level shared memory operation in a platform-specific way,
  * as dictated by the selected implementation.  Each implementation is

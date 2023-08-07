@@ -26,6 +26,7 @@
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/procsignal.h"
+#include "utils/backend_status.h"
 #include "utils/fmgrprotos.h"
 #include "utils/memdebug.h"
 #include "utils/memutils.h"
@@ -286,6 +287,9 @@ void
 MemoryContextInit(void)
 {
 	Assert(TopMemoryContext == NULL);
+
+    /* Start the memory tracking */
+    pgstat_init_allocated_bytes();
 
 	/*
 	 * First, initialize TopMemoryContext, which is the parent of all others.

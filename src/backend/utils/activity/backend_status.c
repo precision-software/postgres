@@ -9,6 +9,7 @@
  *	  src/backend/utils/activity/backend_status.c
  * ----------
  */
+#include <unistd.h>
 #include "postgres.h"
 
 #include "access/xact.h"
@@ -56,25 +57,6 @@ int			max_total_bkend_mem = 0;
 PgBackendStatus *MyBEEntry = NULL;
 
 /*
- * Memory allocated to this backend prior to pgstats initialization. Migrated to
- * shared memory on pgstats initialization.
- */
-uint64		local_my_allocated_bytes = 0;
-uint64	   *my_allocated_bytes = &local_my_allocated_bytes;
-
-/* Memory allocated to this backend by type prior to pgstats initialization.
- * Migrated to shared memory on pgstats initialization
- */
-uint64		local_my_aset_allocated_bytes = 0;
-uint64	   *my_aset_allocated_bytes = &local_my_aset_allocated_bytes;
-uint64		local_my_dsm_allocated_bytes = 0;
-uint64	   *my_dsm_allocated_bytes = &local_my_dsm_allocated_bytes;
-uint64		local_my_generation_allocated_bytes = 0;
-uint64	   *my_generation_allocated_bytes = &local_my_generation_allocated_bytes;
-uint64		local_my_slab_allocated_bytes = 0;
-uint64	   *my_slab_allocated_bytes = &local_my_slab_allocated_bytes;
-
-/*
  * Define initial allocation allowance for a backend.
  *
  * NOTE: initial_allocation_allowance && allocation_allowance_refill_qty
@@ -82,22 +64,24 @@ uint64	   *my_slab_allocated_bytes = &local_my_slab_allocated_bytes;
  */
 uint64		initial_allocation_allowance = 1024 * 1024;
 uint64		allocation_allowance_refill_qty = 1024 * 1024;
+/*
+ * Total memory reserved by this backend.
+ *   Used to limit how much memory is used by all backends.
+ *   However, each process starts with some memory
+ */
+uint64	   my_allocated_bytes = 0;
+uint64     allocation_upper_bound = 0;
+uint64     allocation_lower_bound = 0;
+uint64     max_total_bkend_bytes = 0;
 
 /*
- * Local counter to manage shared memory allocations. At backend startup, set to
- * initial_allocation_allowance via pgstat_init_allocated_bytes(). Decrease as
- * memory is malloc'd. When exhausted, atomically refill if available from
- * ProcGlobal->max_total_bkend_mem via exceeds_max_total_bkend_mem().
+ * Memory allocated to this backend by type.
+ * Periodically reported to pgstats.
  */
-uint64		allocation_allowance = 0;
-
-/*
- * Local counter of free'd shared memory. Return to global
- * max_total_bkend_mem when return threshold is met. Arbitrary 1MB bytes
- * selected initially.
- */
-uint64		allocation_return = 0;
-uint64		allocation_return_threshold = 1024 * 1024;
+uint64		my_aset_allocated_bytes = 0;
+uint64		my_dsm_allocated_bytes = 0;
+uint64		my_generation_allocated_bytes = 0;
+uint64		my_slab_allocated_bytes = 0;
 
 static PgBackendStatus *BackendStatusArray = NULL;
 static char *BackendAppnameBuffer = NULL;
@@ -450,31 +434,12 @@ pgstat_bestart(void)
 	lbeentry.st_progress_command_target = InvalidOid;
 	lbeentry.st_query_id = UINT64CONST(0);
 
-	/* Alter allocation reporting from local storage to shared memory */
-	pgstat_set_allocated_bytes_storage(&MyBEEntry->allocated_bytes,
-									   &MyBEEntry->aset_allocated_bytes,
-									   &MyBEEntry->dsm_allocated_bytes,
-									   &MyBEEntry->generation_allocated_bytes,
-									   &MyBEEntry->slab_allocated_bytes);
-
-	/*
-	 * Populate sum of memory allocated prior to pgstats initialization to
-	 * pgstats and zero the local variable. This is a += assignment because
-	 * InitPostgres allocates memory after pgstat_beinit but prior to
-	 * pgstat_bestart so we have allocations to both local and shared memory
-	 * to combine.
-	 */
-	lbeentry.allocated_bytes += local_my_allocated_bytes;
-	local_my_allocated_bytes = 0;
-	lbeentry.aset_allocated_bytes += local_my_aset_allocated_bytes;
-	local_my_aset_allocated_bytes = 0;
-
-	lbeentry.dsm_allocated_bytes += local_my_dsm_allocated_bytes;
-	local_my_dsm_allocated_bytes = 0;
-	lbeentry.generation_allocated_bytes += local_my_generation_allocated_bytes;
-	local_my_generation_allocated_bytes = 0;
-	lbeentry.slab_allocated_bytes += local_my_slab_allocated_bytes;
-	local_my_slab_allocated_bytes = 0;
+	/* No allocations have been reported yet  */
+	lbeentry.allocated_bytes = 0;
+	lbeentry.aset_allocated_bytes = 0;
+	lbeentry.dsm_allocated_bytes = 0;
+	lbeentry.generation_allocated_bytes = 0;
+	lbeentry.slab_allocated_bytes = 0;
 
 	/*
 	 * we don't zero st_progress_param here to save cycles; nobody should
@@ -535,9 +500,6 @@ pgstat_beshutdown_hook(int code, Datum arg)
 {
 	volatile PgBackendStatus *beentry = MyBEEntry;
 
-	/* Stop reporting memory allocation changes to shared memory */
-	pgstat_reset_allocated_bytes_storage();
-
 	/*
 	 * Clear my status entry, following the protocol of bumping st_changecount
 	 * before and after.  We use a volatile pointer here to ensure the
@@ -548,6 +510,9 @@ pgstat_beshutdown_hook(int code, Datum arg)
 	beentry->st_procpid = 0;	/* mark invalid */
 
 	PGSTAT_END_WRITE_ACTIVITY(beentry);
+
+	/* Stop reporting memory allocation changes to shared memory */
+	pgstat_reset_allocated_bytes_storage();
 
 	/* so that functions can check if backend_status.c is up via MyBEEntry */
 	MyBEEntry = NULL;
@@ -1274,185 +1239,211 @@ pgstat_clip_activity(const char *raw_activity)
 	return activity;
 }
 
-/*
- * Configure bytes allocated reporting to report allocated bytes to
- * shared memory.
+
+/* ---------
+ * pgstat_init_allocated_bytes() -
  *
- * Expected to be called during backend startup (in pgstat_bestart), to point
- * allocated bytes accounting into shared memory.
+ * Called to initialize local allocation variables during backend startup
+ * (initialization or after fork)
+ * TODO: rename to exit_reserved_memory() and init_reserved_memory()
+ * ---------
  */
 void
-pgstat_set_allocated_bytes_storage(uint64 *allocated_bytes,
-								   uint64 *aset_allocated_bytes,
-								   uint64 *dsm_allocated_bytes,
-								   uint64 *generation_allocated_bytes,
-								   uint64 *slab_allocated_bytes)
+init_backend_memory(void)
 {
-	/* Map allocations to shared memory */
-	my_allocated_bytes = allocated_bytes;
-	*allocated_bytes = local_my_allocated_bytes;
+    /* Start out with nothing allocated. */
+    my_allocated_bytes = 0;
+    my_aset_allocated_bytes = 0;
+    my_dsm_allocated_bytes = 0;
+    my_generation_allocated_bytes = 0;
+    my_slab_allocated_bytes = 0;
 
-	my_aset_allocated_bytes = aset_allocated_bytes;
-	*aset_allocated_bytes = local_my_aset_allocated_bytes;
+    /* Allocate the initial memory without paying attention to limits */
+    allocation_lower_bound = 0;
+    allocation_upper_bound = 0;   /* Forces an initial slowpath allocation */
 
-	my_dsm_allocated_bytes = dsm_allocated_bytes;
-	*dsm_allocated_bytes = local_my_dsm_allocated_bytes;
-
-	my_generation_allocated_bytes = generation_allocated_bytes;
-	*generation_allocated_bytes = local_my_generation_allocated_bytes;
-
-	my_slab_allocated_bytes = slab_allocated_bytes;
-	*slab_allocated_bytes = local_my_slab_allocated_bytes;
-
-	return;
+    return;
 }
 
 /*
- * Reset allocated bytes storage location.
+ * Return all non-dsm allocated bytes to the global pool as we are shutting down.
+ * Note dsm memory lives beyond process exit, so we don't dsm memory to the global pool.
  *
- * Expected to be called during backend shutdown, before the locations set up
- * by pgstat_set_allocated_bytes_storage become invalid.
+ * Ideally, this function would be called last, but in practice there are some
+ * late memory releases that happen after it is called.
+ * To handle any late requests, if they are returning dsm memory, update the globals.
+ * Otherwise, ignore returns, and generate an error if allocations are attempted.
  */
+void
+exit_backend_memory(void)
+{
+	/*
+	 * Return all non-dsm bytes to the global pool,
+	 * and add dsm bytes to the global dsm allocation.
+	 * dsm memory is still active so we don't return it to the global pool.
+	 */
+	update_global_reservation(MyBEEntry->allocated_bytes, 0); /* TODO ??? */
+	pg_atomic_add_fetch_u64(&ProcGlobal->global_dsm_allocation, my_dsm_allocated_bytes);
+
+	/* Clear the subtotals and free all allocated memory */
+    my_aset_allocated_bytes = 0;
+    my_dsm_allocated_bytes = 0;
+    my_generation_allocated_bytes = 0;
+    my_slab_allocated_bytes = 0;
+
+    /*
+     * Note We are now in shutdown mode.
+     * All future reservations will be rejected, and set the bounds
+     * so we always take the slower "global" path.
+     * We will update the global reservation only if we are returning dsm memory.
+     */
+    allocation_lower_bound = 0;
+    allocation_upper_bound = 0;
+}
+
+
+/* TODO: verify total doesn't go negative. If so, error message and disable bounds checking */
+/*
+ * Update memory reservations for a new request.
+ *
+ * There are two versions of this function. This one, which updates
+ * global values in shared memory, and an optimized update_local_reservatioh
+ * which only updates local values.
+ *
+ * This version is the "slow path". We invoke it periodically to update
+ * the global values and the pgstat statistics.
+ */
+bool update_global_reservation(int64 size, int pg_allocator_type)
+{
+	int64 new_allocated_bytes;
+	int64 new_upper_bound;
+	int64 new_lower_bound;
+
+	/* If we are still initializing ... */
+	if (ProcGlobal == NULL || MyBEEntry == NULL)
+	{
+		/* If we are limiting memory and we exceed the initial_allocation, then fail */
+		if (max_total_bkend_bytes != 0 && my_allocated_bytes + size > initial_allocation_allowance)
+			return false;
+
+		/* Update our local reservation. The values will be copied to shmem later on */
+		return update_local_allocation(size, pg_allocator_type);
+	}
+
+	/* Otherwise, normal reservation/release. Continue on. */
+
+	/* Calculate new upper and lower bounds to reflect the reservation/release */
+	new_allocated_bytes = my_allocated_bytes + size;
+	Assert(new_allocated_bytes >= 0);
+	new_upper_bound = new_allocated_bytes + allocation_allowance_refill_qty;
+	new_lower_bound = Max(0, new_allocated_bytes - allocation_allowance_refill_qty);
+
+	//fprintf(stderr,
+	//		"update_global_reservation: size=%zd  my_allocated=%zd total_bkend=%zd  new_upper_bound=%zd  allocation_upper_bound=%zd  max=%zd\n",
+	//		size, my_allocated_bytes, pg_atomic_read_u64(&ProcGlobal->total_bkend_mem_bytes), new_upper_bound,
+	//		allocation_upper_bound, max_total_bkend_bytes);
+
+	/* If reserving new memory and we are limited by max_total_bkend ... */
+	if (size > 0 && MyAuxProcType == NotAnAuxProcess && MyProcPid != PostmasterPid && max_total_bkend_bytes > 0)
+	{
+		/* Update the bytes allocated. MyBEEntry contains the last reported value. */
+		if (!atomic_add_within_bounds_i64(&ProcGlobal->total_bkend_mem_bytes, new_allocated_bytes - MyBEEntry->allocated_bytes,
+										  0, max_total_bkend_bytes))
+			return false;
+	}
+
+	/* Otherwise, update the reservation with no max limit checking */
+	else
+		pg_atomic_add_fetch_u64(&ProcGlobal->total_bkend_mem_bytes, new_allocated_bytes - MyBEEntry->allocated_bytes);
+
+	Assert((int64) pg_atomic_read_u64(&ProcGlobal->total_bkend_mem_bytes) >= 0);
+
+	/* Update the bounds for invoking the fast path */
+	allocation_upper_bound = new_upper_bound;
+	allocation_lower_bound = new_lower_bound;
+
+	/* Update the local memory reservation */
+	update_local_allocation(size, pg_allocator_type);
+
+	/* Update pgstat statistics. TODO: Should we use atomics or a spinlock? */
+	MyBEEntry->allocated_bytes = my_allocated_bytes;
+	MyBEEntry->aset_allocated_bytes = my_aset_allocated_bytes;
+	MyBEEntry->dsm_allocated_bytes = my_dsm_allocated_bytes;
+	MyBEEntry->generation_allocated_bytes = my_generation_allocated_bytes;
+	MyBEEntry->slab_allocated_bytes = my_slab_allocated_bytes;
+
+	return true;
+}
+
+
+/*
+ * For compatibility with memtrack_v2.
+ * These are quick hacks go get the code to compile and run.
+ * They work around issues where memory is released immediately after
+ * the exit and startup routines are called.
+ *
+ * There shouldn't be any memory allocated at that point, but apparently there is.
+ */
+
+static bool allocation_is_initializing = true;
+static bool allocation_is_shutting_down = false;
+
+
+void pgstat_report_allocated_bytes_decrease(int64 amount, int type)
+{
+	fprintf(stderr, "pgstat_decrease: amount %ld total %ld type %d  pid %d\n", amount, my_allocated_bytes, type, getpid());
+
+	if (allocation_is_initializing)
+		return;
+
+	if (allocation_is_shutting_down)
+	{
+		if (type == PG_ALLOC_DSM)
+		{
+			pg_atomic_add_fetch_u64(&ProcGlobal->total_bkend_mem_bytes, -amount);
+			pg_atomic_add_fetch_u64(&ProcGlobal->global_dsm_allocation, -amount);
+		}
+		return;
+	}
+
+	unreserve_memory(amount, type);
+}
+
+void
+pgstat_report_allocated_bytes_increase(int64 amount, int type)
+{
+	fprintf(stderr, "pgstat_increase: amount %ld total %ld  type %d pid %d\n", amount, my_allocated_bytes, type, getpid());
+	allocation_is_initializing = false;
+	reserve_memory(amount, type);
+}
+
+bool
+exceeds_max_total_bkend_mem(int64 size)
+{
+	bool exceeds;
+	fprintf(stderr, "exceeds_max: size %ld total %ld pid %d\n", size, my_allocated_bytes, getpid());
+
+	exceeds = !reserve_memory(size, 0);
+	unreserve_memory(size, 0);
+
+	return exceeds;
+}
+
+
 void
 pgstat_reset_allocated_bytes_storage(void)
 {
-	if (ProcGlobal)
-	{
-		volatile PROC_HDR *procglobal = ProcGlobal;
-
-		/*
-		 * Add dsm allocations that have not been freed to global dsm
-		 * accounting
-		 */
-		pg_atomic_add_fetch_u64(&procglobal->global_dsm_allocation,
-								*my_dsm_allocated_bytes);
-	}
-
-	/*
-	 * When limiting maximum backend memory, return this backend's memory
-	 * allocations to global.
-	 */
-	if (max_total_bkend_mem)
-	{
-		volatile PROC_HDR *procglobal = ProcGlobal;
-
-		pg_atomic_add_fetch_u64(&procglobal->total_bkend_mem_bytes,
-								*my_allocated_bytes + allocation_allowance +
-								allocation_return);
-
-		/* Reset memory allocation variables */
-		allocation_allowance = 0;
-		allocation_return = 0;
-	}
-
-	/* Reset memory allocation variables */
-	*my_allocated_bytes = local_my_allocated_bytes = 0;
-	*my_aset_allocated_bytes = local_my_aset_allocated_bytes = 0;
-	*my_dsm_allocated_bytes = local_my_dsm_allocated_bytes = 0;
-	*my_generation_allocated_bytes = local_my_generation_allocated_bytes = 0;
-	*my_slab_allocated_bytes = local_my_slab_allocated_bytes = 0;
-
-	/* Point my_{*_}allocated_bytes from shared memory back to local */
-	my_allocated_bytes = &local_my_allocated_bytes;
-	my_aset_allocated_bytes = &local_my_aset_allocated_bytes;
-	my_dsm_allocated_bytes = &local_my_dsm_allocated_bytes;
-	my_generation_allocated_bytes = &local_my_generation_allocated_bytes;
-	my_slab_allocated_bytes = &local_my_slab_allocated_bytes;
-
-	return;
+	fprintf(stderr, "pgstat_reset: BEallocated=%ld my_dsm=%ld  pid=%d\n", MyBEEntry->allocated_bytes, my_dsm_allocated_bytes, getpid()	);
+	allocation_is_initializing = false;
+	allocation_is_shutting_down = true;
+	exit_backend_memory();
 }
 
-/*
- * Determine if allocation request will exceed max backend memory allowed.
- * Do not apply to auxiliary processes.
- * Refill allocation request bucket when needed/possible.
- */
-bool
-exceeds_max_total_bkend_mem(uint64 allocation_request)
+void
+pgstat_init_allocated_bytes(void)
 {
-	bool		result = false;
-
-	/*
-	 * When limiting maximum backend memory, attempt to refill allocation
-	 * request bucket if needed.
-	 */
-	if (max_total_bkend_mem && allocation_request > allocation_allowance &&
-		ProcGlobal != NULL)
-	{
-		volatile PROC_HDR *procglobal = ProcGlobal;
-		uint64		available_max_total_bkend_mem = 0;
-		bool		sts = false;
-
-		/*
-		 * If allocation request is larger than memory refill quantity then
-		 * attempt to increase allocation allowance with requested amount,
-		 * otherwise fall through. If this refill fails we do not have enough
-		 * memory to meet the request.
-		 */
-		if (allocation_request >= allocation_allowance_refill_qty)
-		{
-			while ((available_max_total_bkend_mem = pg_atomic_read_u64(&procglobal->total_bkend_mem_bytes)) >= allocation_request)
-			{
-				if ((result = pg_atomic_compare_exchange_u64(&procglobal->total_bkend_mem_bytes,
-															 &available_max_total_bkend_mem,
-															 available_max_total_bkend_mem - allocation_request)))
-				{
-					allocation_allowance = allocation_allowance + allocation_request;
-					break;
-				}
-			}
-
-			/*
-			 * Exclude auxiliary and Postmaster processes from the check.
-			 * Return false. While we want to exclude them from the check, we
-			 * do not want to exclude them from the above allocation handling.
-			 */
-			if (MyAuxProcType != NotAnAuxProcess || MyProcPid == PostmasterPid)
-				return false;
-
-			/*
-			 * If the atomic exchange fails (result == false), we do not have
-			 * enough reserve memory to meet the request. Negate result to
-			 * return the proper value.
-			 */
-
-			return !result;
-		}
-
-		/*
-		 * Attempt to increase allocation allowance by memory refill quantity.
-		 * If available memory is/becomes less than memory refill quantity,
-		 * fall through to attempt to allocate remaining available memory.
-		 */
-		while ((available_max_total_bkend_mem = pg_atomic_read_u64(&procglobal->total_bkend_mem_bytes)) >= allocation_allowance_refill_qty)
-		{
-			if ((sts = pg_atomic_compare_exchange_u64(&procglobal->total_bkend_mem_bytes,
-													  &available_max_total_bkend_mem,
-													  available_max_total_bkend_mem - allocation_allowance_refill_qty)))
-			{
-				allocation_allowance = allocation_allowance + allocation_allowance_refill_qty;
-				break;
-			}
-		}
-
-		/* Do not attempt to increase allocation if available memory is below
-		 * allocation_allowance_refill_qty .
-		 */
-
-		/*
-		 * If refill is not successful, we return true, memory limit exceeded
-		 */
-		if (!sts)
-			result = true;
-	}
-
-	/*
-	 * Exclude auxiliary and postmaster processes from the check. Return false.
-	 * While we want to exclude them from the check, we do not want to exclude
-	 * them from the above allocation handling.
-	 */
-	if (MyAuxProcType != NotAnAuxProcess || MyProcPid == PostmasterPid)
-		result = false;
-
-	return result;
+	fprintf(stderr, "pgstat_init_allocated_bytes  pid=%d\n",getpid());
+	allocation_is_initializing = true;
+	allocation_is_shutting_down = false;
+	init_backend_memory();
 }
