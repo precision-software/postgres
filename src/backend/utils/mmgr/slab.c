@@ -502,11 +502,8 @@ SlabDelete(MemoryContext context)
 	 * Until context header allocation is included in context->mem_allocated,
 	 * cast to slab and decrement the header allocation
 	 */
-	pgstat_report_allocated_bytes_decrease(Slab_CONTEXT_HDRSZ(((SlabContext *) context)->chunksPerBlock),
+	free_reserved(context, Slab_CONTEXT_HDRSZ(((SlabContext *) context)->chunksPerBlock),
 										   PG_ALLOC_SLAB);
-
-	/* And free the context header */
-	free(context);
 }
 
 /*
@@ -562,18 +559,12 @@ SlabAlloc(MemoryContext context, Size size)
 		}
 		else
 		{
-			/* Do not exceed maximum allowed memory allocation */
-			if (exceeds_max_total_bkend_mem(slab->blockSize))
-				return NULL;
-
-			block = (SlabBlock *) malloc(slab->blockSize);
-
+			block = (SlabBlock *) malloc_reserved(slab->blockSize, PG_ALLOC_SLAB);
 			if (unlikely(block == NULL))
 				return NULL;
 
 			block->slab = slab;
 			context->mem_allocated += slab->blockSize;
-			pgstat_report_allocated_bytes_increase(slab->blockSize, PG_ALLOC_SLAB);
 
 			/* use the first chunk in the new block */
 			chunk = SlabBlockGetChunk(slab, block, 0);
@@ -769,8 +760,7 @@ SlabFree(void *pointer)
 			free(block);
 			slab->header.mem_allocated -= slab->blockSize;
 
-			if (slab->blockSize > 0)
-				pgstat_report_allocated_bytes_decrease(slab->blockSize, PG_ALLOC_SLAB);
+			unreserve_memory(slab->blockSize, PG_ALLOC_SLAB);
 		}
 
 		/*

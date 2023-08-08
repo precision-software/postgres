@@ -438,10 +438,21 @@ AllocSetContextCreateInternal(MemoryContext parent,
 	else
 		firstBlockSize = Max(firstBlockSize, initBlockSize);
 
+	/* Do not exceed maximum allowed memory allocation TODO: removing this block of code fails regression test */
+	if (exceeds_max_total_bkend_mem(firstBlockSize))
+	{
+		if (TopMemoryContext)
+			MemoryContextStats(TopMemoryContext);
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("out of memory - exceeds max_total_backend_memory"),
+				 errdetail("Failed while creating memory context \"%s\".",
+						   name)));
+	}
+
 	/*
 	 * Allocate the initial block.  Unlike other aset.c blocks, it starts with
 	 * the context header and its block header follows that.
-	 * We don't want to exit unexpectedly or we could leak the initial block.
 	 */
 	set = (AllocSet) malloc_reserved(firstBlockSize, PG_ALLOC_ASET);
 	if (set == NULL)
@@ -1054,11 +1065,9 @@ AllocSetFree(void *pointer)
 
 		set->header.mem_allocated -= block->endptr - ((char *) block);
 
-
 #ifdef CLOBBER_FREED_MEMORY
 		wipe_mem(block, block->freeptr - ((char *) block));
 #endif
-		/* Free the block */
 		free_reserved(block, block->endptr - ((char *) block), PG_ALLOC_ASET);
 	}
 	else
@@ -1171,7 +1180,7 @@ AllocSetRealloc(void *pointer, Size size)
 		chksize = MAXALIGN(size);
 #endif
 
-		/* Do the realloc, subject to backend memory limits */
+		/* Do the realloc */
 		blksize = chksize + ALLOC_BLOCKHDRSZ + ALLOC_CHUNKHDRSZ;
 		oldblksize = block->endptr - ((char *) block);
 		block = (AllocBlock) realloc_reserved(block, blksize, oldblksize, PG_ALLOC_ASET);
