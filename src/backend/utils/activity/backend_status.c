@@ -1277,13 +1277,8 @@ init_backend_memory(void)
 void
 exit_backend_memory(void)
 {
-	/*
-	 * Return all non-dsm bytes to the global pool,
-	 * and add dsm bytes to the global dsm allocation.
-	 * dsm memory is still active so we don't return it to the global pool.
-	 */
-	update_global_reservation(MyBEEntry->allocated_bytes, 0); /* TODO ??? */
-	pg_atomic_add_fetch_u64(&ProcGlobal->global_dsm_allocation, my_dsm_allocated_bytes);
+	/* Post the local values to the global totals */
+	update_global_reservation(0, 0);
 
 	/* Clear the subtotals and free all allocated memory */
     my_aset_allocated_bytes = 0;
@@ -1302,7 +1297,6 @@ exit_backend_memory(void)
 }
 
 
-/* TODO: verify total doesn't go negative. If so, error message and disable bounds checking */
 /*
  * Update memory reservations for a new request.
  *
@@ -1316,8 +1310,6 @@ exit_backend_memory(void)
 bool update_global_reservation(int64 size, int pg_allocator_type)
 {
 	int64 new_allocated_bytes;
-	int64 new_upper_bound;
-	int64 new_lower_bound;
 
 	/* If we are still initializing ... */
 	if (ProcGlobal == NULL || MyBEEntry == NULL)
@@ -1335,8 +1327,6 @@ bool update_global_reservation(int64 size, int pg_allocator_type)
 	/* Calculate new upper and lower bounds to reflect the reservation/release */
 	new_allocated_bytes = my_allocated_bytes + size;
 	Assert(new_allocated_bytes >= 0);
-	new_upper_bound = new_allocated_bytes + allocation_allowance_refill_qty;
-	new_lower_bound = Max(0, new_allocated_bytes - allocation_allowance_refill_qty);
 
 	//fprintf(stderr,
 	//		"update_global_reservation: size=%zd  my_allocated=%zd total_bkend=%zd  new_upper_bound=%zd  allocation_upper_bound=%zd  max=%zd\n",
@@ -1346,7 +1336,7 @@ bool update_global_reservation(int64 size, int pg_allocator_type)
 	/* If reserving new memory and we are limited by max_total_bkend ... */
 	if (size > 0 && MyAuxProcType == NotAnAuxProcess && MyProcPid != PostmasterPid && max_total_bkend_bytes > 0)
 	{
-		/* Update the bytes allocated. MyBEEntry contains the last reported value. */
+		/* Update global bytes allocated subject to the upper limit. */
 		if (!atomic_add_within_bounds_i64(&ProcGlobal->total_bkend_mem_bytes, new_allocated_bytes - MyBEEntry->allocated_bytes,
 										  0, max_total_bkend_bytes))
 			return false;
@@ -1356,14 +1346,14 @@ bool update_global_reservation(int64 size, int pg_allocator_type)
 	else
 		pg_atomic_add_fetch_u64(&ProcGlobal->total_bkend_mem_bytes, new_allocated_bytes - MyBEEntry->allocated_bytes);
 
-	Assert((int64) pg_atomic_read_u64(&ProcGlobal->total_bkend_mem_bytes) >= 0);
+	Assert((int64)pg_atomic_read_u64(&ProcGlobal->total_bkend_mem_bytes) >= 0);
+	Assert((int64)pg_atomic_read_u64(&ProcGlobal->global_dsm_allocation) >= 0);
 
-	/* Update the bounds for invoking the fast path */
-	allocation_upper_bound = new_upper_bound;
-	allocation_lower_bound = new_lower_bound;
-
-	/* Update the local memory reservation */
+	/* Update the local memory counters */
 	update_local_allocation(size, pg_allocator_type);
+
+	/* Update the global dsm memory counter to reflect our local counter */
+	pg_atomic_add_fetch_u64(&ProcGlobal->global_dsm_allocation, my_dsm_allocated_bytes - MyBEEntry->dsm_allocated_bytes);
 
 	/* Update pgstat statistics. TODO: Should we use atomics or a spinlock? */
 	MyBEEntry->allocated_bytes = my_allocated_bytes;
@@ -1371,6 +1361,10 @@ bool update_global_reservation(int64 size, int pg_allocator_type)
 	MyBEEntry->dsm_allocated_bytes = my_dsm_allocated_bytes;
 	MyBEEntry->generation_allocated_bytes = my_generation_allocated_bytes;
 	MyBEEntry->slab_allocated_bytes = my_slab_allocated_bytes;
+
+	/* Update the bounds to reflect the new values. */
+	allocation_upper_bound = my_allocated_bytes + allocation_allowance_refill_qty;
+	allocation_lower_bound = Max(0, my_allocated_bytes - allocation_allowance_refill_qty);
 
 	return true;
 }
@@ -1381,30 +1375,15 @@ bool update_global_reservation(int64 size, int pg_allocator_type)
  * These are quick hacks go get the code to compile and run.
  * They work around issues where memory is released immediately after
  * the exit and startup routines are called.
- *
- * There shouldn't be any memory allocated at that point, but apparently there is.
  */
-
-static bool allocation_is_initializing = true;
-static bool allocation_is_shutting_down = false;
-
 
 void pgstat_report_allocated_bytes_decrease(int64 amount, int type)
 {
 	fprintf(stderr, "pgstat_decrease: amount %ld total %ld type %d  pid %d\n", amount, my_allocated_bytes, type, getpid());
 
-	if (allocation_is_initializing)
+	/* After a fork() or as we get ready to exit, we may try to deallocate memory. Probably a bug, so ignore it */
+	if (my_allocated_bytes == 0)
 		return;
-
-	if (allocation_is_shutting_down)
-	{
-		if (type == PG_ALLOC_DSM)
-		{
-			pg_atomic_add_fetch_u64(&ProcGlobal->total_bkend_mem_bytes, -amount);
-			pg_atomic_add_fetch_u64(&ProcGlobal->global_dsm_allocation, -amount);
-		}
-		return;
-	}
 
 	unreserve_memory(amount, type);
 }
@@ -1413,7 +1392,6 @@ void
 pgstat_report_allocated_bytes_increase(int64 amount, int type)
 {
 	fprintf(stderr, "pgstat_increase: amount %ld total %ld  type %d pid %d\n", amount, my_allocated_bytes, type, getpid());
-	allocation_is_initializing = false;
 	reserve_memory(amount, type);
 }
 
@@ -1434,8 +1412,6 @@ void
 pgstat_reset_allocated_bytes_storage(void)
 {
 	fprintf(stderr, "pgstat_reset: BEallocated=%ld my_dsm=%ld  pid=%d\n", MyBEEntry->allocated_bytes, my_dsm_allocated_bytes, getpid()	);
-	allocation_is_initializing = false;
-	allocation_is_shutting_down = true;
 	exit_backend_memory();
 }
 
@@ -1443,7 +1419,5 @@ void
 pgstat_init_allocated_bytes(void)
 {
 	fprintf(stderr, "pgstat_init_allocated_bytes  pid=%d\n",getpid());
-	allocation_is_initializing = true;
-	allocation_is_shutting_down = false;
 	init_backend_memory();
 }

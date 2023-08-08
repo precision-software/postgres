@@ -241,7 +241,7 @@ dsm_impl_posix(dsm_op op, dsm_handle handle, Size request_size,
 		 * allocation.
 		 */
 		if (op == DSM_OP_DESTROY && *mapped_size > 0)
-			pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
+			unreserve_memory(*mapped_size, PG_ALLOC_DSM);
 
 		*mapped_address = NULL;
 		*mapped_size = 0;

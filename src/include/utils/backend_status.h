@@ -389,7 +389,6 @@ extern char *pgstat_clip_activity(const char *raw_activity);
  *
  * The following variables are used:
  *  my_allocated_bytes:             total amount of memory allocated by this backend.
- *
  *  my_aset_allocated_bytes:        our subtotals by allocation type.
  *  my_dsm_allocated_bytes:         Note: my_allocated_bytes is the sum of these four.
  *  my_generation_allocated_bytes:
@@ -401,19 +400,17 @@ extern char *pgstat_clip_activity(const char *raw_activity);
  *  allocation_lower_bound:          update global shared memory when my_allocated_bytes drops below this
  *  max_total_bkend_bytes:           maximum amount of memory allowed to be reserved by all backends.
  *
- *  Inside each proc's shared memory structure, we have:
+ * Inside each proc's shared memory structure, we have:
  *  proc->allocated_bytes;           last reported allocated bytes, representing memory reserved by the process.
  *  proc->aset_allocated_bytes;      last reported subtotals for each allocation type, as reported in pgstat.
  *  proc->dsm_allocated_bytes;       Note: proc->allocated_bytes is the sum of these four subtotals.
  *  proc->generation_allocated_bytex;
  *  proc->slab_allocated_bytes;
  *
- *  And globally in shared memory, we have:
- *  ProcGlobal->reserved_bytes:      total amount of memory reserved by all backends.
- *                                   This value is the sum of proc->allocated_bytes for all backends.
- *  ProcGlobal->global_dsm_allocated_bytes:  total amount of detached shared memory allocated by all backends.
- * TODO: rename variables to reflect "reserved" vs "allocated".
- *
+ * And globally in shared memory, we have:
+ *  ProcGlobal->reserved_bytes:              total amount of memory reserved by all backends, including shared memory
+ *  ProcGlobal->global_dsm_allocated_bytes:  total amount of shared memory allocated by all backends.
+ * TODO: rename variables and functions to reflect "reserved" vs "allocated".
  * ----------
  */
 
@@ -602,6 +599,7 @@ atomic_add_within_bounds_i64(pg_atomic_uint64 *ptr, int64 add, int64 lower_bound
 /*
  * For compatibility with memtrack_v2.
  * These are quick hacks go get the code to compile and run.
+ * To be deleted before production.
  */
 extern void pgstat_init_allocated_bytes(void);
 extern void pgstat_reset_allocated_bytes_storage(void);

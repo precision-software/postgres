@@ -416,13 +416,6 @@ SlabContextCreate(MemoryContext parent,
 						parent,
 						name);
 
-	/*
-	 * If SlabContextCreate is updated to add context header size to
-	 * context->mem_allocated, then update here and SlabDelete appropriately
-	 */
-	pgstat_report_allocated_bytes_increase(Slab_CONTEXT_HDRSZ(slab->chunksPerBlock),
-										   PG_ALLOC_SLAB);
-
 	return (MemoryContext) slab;
 }
 
@@ -481,8 +474,7 @@ SlabReset(MemoryContext context)
 		}
 	}
 
-	if (deallocation > 0)
-		pgstat_report_allocated_bytes_decrease(deallocation, PG_ALLOC_SLAB);
+	unreserve_memory(deallocation, PG_ALLOC_SLAB);
 	slab->curBlocklistIndex = 0;
 
 	Assert(context->mem_allocated == 0);

@@ -438,7 +438,8 @@ AllocSetContextCreateInternal(MemoryContext parent,
 	else
 		firstBlockSize = Max(firstBlockSize, initBlockSize);
 
-	/* Do not exceed maximum allowed memory allocation TODO: removing this block of code fails regression test */
+	/* Do not exceed maximum allowed memory allocation
+	 * TODO: removing this block of code fails regression test. Probably the wording of the error message. */
 	if (exceeds_max_total_bkend_mem(firstBlockSize))
 	{
 		if (TopMemoryContext)
