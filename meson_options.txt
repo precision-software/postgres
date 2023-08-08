@@ -27,7 +27,6 @@ option('krb_srvnam', type: 'string', value: 'postgres',
 option('system_tzdata', type: 'string', value: '',
   description: 'Use system time zone data in specified directory')
 
-
 # Defaults
 
 option('pgport', type: 'integer', value: 5432,
