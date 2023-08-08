@@ -516,6 +516,10 @@ update_local_allocation(int64 size, int pg_allocator_type)
 }
 
 
+/*--------------------------------------------
+ * Convenience functions based on malloc/free
+ *------------------------------------------*/
+
 /*
  * Reserve memory from malloc if we can.
  */
@@ -528,7 +532,7 @@ malloc_reserved(int64 size, int pg_allocator_type)
     if (!reserve_memory(size, pg_allocator_type))
 	    return NULL;
 
-	/* Allocate the memory, undoing the reservation if failed */
+	/* Allocate the memory, returning the reservation if failed */
 	ptr = malloc(size);
 	if (ptr == NULL)
 		unreserve_memory(size, pg_allocator_type);
@@ -546,6 +550,27 @@ free_reserved(void *ptr, int64 size, int pg_allocator_type)
 {
 	unreserve_memory(size, pg_allocator_type);
 	free(ptr);
+}
+
+
+/*
+ * Realloc reserved memory.
+ */
+static inline void *
+realloc_reserved(void *block, int64 new_size, int64 old_size, int pg_allocator_type)
+{
+	void *ptr;
+
+	/* reserve the memory if able to */
+	if (!reserve_memory(new_size-old_size, pg_allocator_type))
+		return NULL;
+
+	/* Resize the memory, returning the reservation if failed */
+	ptr = realloc(block, new_size);
+	if (ptr == NULL)
+		unreserve_memory(new_size-old_size, pg_allocator_type);
+
+	return ptr;
 }
 
 

@@ -438,23 +438,12 @@ AllocSetContextCreateInternal(MemoryContext parent,
 	else
 		firstBlockSize = Max(firstBlockSize, initBlockSize);
 
-	/* Do not exceed maximum allowed memory allocation */
-	if (exceeds_max_total_bkend_mem(firstBlockSize))
-	{
-		if (TopMemoryContext)
-			MemoryContextStats(TopMemoryContext);
-		ereport(ERROR,
-				(errcode(ERRCODE_OUT_OF_MEMORY),
-				 errmsg("out of memory - exceeds max_total_backend_memory"),
-				 errdetail("Failed while creating memory context \"%s\".",
-						   name)));
-	}
-
 	/*
 	 * Allocate the initial block.  Unlike other aset.c blocks, it starts with
 	 * the context header and its block header follows that.
+	 * We don't want to exit unexpectedly or we could leak the initial block.
 	 */
-	set = (AllocSet) malloc(firstBlockSize);
+	set = (AllocSet) malloc_reserved(firstBlockSize, PG_ALLOC_ASET);
 	if (set == NULL)
 	{
 		if (TopMemoryContext)
@@ -531,8 +520,6 @@ AllocSetContextCreateInternal(MemoryContext parent,
 
 	((MemoryContext) set)->mem_allocated = firstBlockSize;
 
-	pgstat_report_allocated_bytes_increase(firstBlockSize, PG_ALLOC_ASET);
-
 	return (MemoryContext) set;
 }
 
@@ -608,8 +595,7 @@ AllocSetReset(MemoryContext context)
 	}
 
 	Assert(context->mem_allocated == keepersize);
-	if (deallocation > 0)
-		pgstat_report_allocated_bytes_decrease(deallocation, PG_ALLOC_ASET);
+	unreserve_memory(deallocation, PG_ALLOC_ASET);
 
 	/* Reset block size allocation sequence, too */
 	set->nextBlockSize = set->initBlockSize;
@@ -673,8 +659,7 @@ AllocSetDelete(MemoryContext context)
 				free(oldset);
 			}
 			Assert(freelist->num_free == 0);
-			if (deallocation > 0)
-				pgstat_report_allocated_bytes_decrease(deallocation, PG_ALLOC_ASET);
+			unreserve_memory(deallocation, PG_ALLOC_ASET);
 		}
 
 		/* Now add the just-deleted context to the freelist. */
@@ -707,8 +692,7 @@ AllocSetDelete(MemoryContext context)
 	}
 
 	Assert(context->mem_allocated == keepersize);
-	if (deallocation + context->mem_allocated > 0)
-		pgstat_report_allocated_bytes_decrease(deallocation + context->mem_allocated, PG_ALLOC_ASET);
+	unreserve_memory(deallocation + context->mem_allocated, PG_ALLOC_ASET);
 
 	/* Finally, free the context header, including the keeper block */
 	free(set);
@@ -754,16 +738,11 @@ AllocSetAlloc(MemoryContext context, Size size)
 
 		blksize = chunk_size + ALLOC_BLOCKHDRSZ + ALLOC_CHUNKHDRSZ;
 
-		/* Do not exceed maximum allowed memory allocation */
-		if (exceeds_max_total_bkend_mem(blksize))
-			return NULL;
-
-		block = (AllocBlock) malloc(blksize);
+		block = (AllocBlock) malloc_reserved(blksize, PG_ALLOC_ASET);
 		if (block == NULL)
 			return NULL;
 
 		context->mem_allocated += blksize;
-		pgstat_report_allocated_bytes_increase(blksize, PG_ALLOC_ASET);
 
 		block->aset = set;
 		block->freeptr = block->endptr = ((char *) block) + blksize;
@@ -958,12 +937,8 @@ AllocSetAlloc(MemoryContext context, Size size)
 		while (blksize < required_size)
 			blksize <<= 1;
 
-		/* Do not exceed maximum allowed memory allocation */
-		if (exceeds_max_total_bkend_mem(blksize))
-			return NULL;
-
 		/* Try to allocate it */
-		block = (AllocBlock) malloc(blksize);
+		block = (AllocBlock) malloc_reserved(blksize, PG_ALLOC_ASET);
 
 		/*
 		 * We could be asking for pretty big blocks here, so cope if malloc
@@ -974,14 +949,13 @@ AllocSetAlloc(MemoryContext context, Size size)
 			blksize >>= 1;
 			if (blksize < required_size)
 				break;
-			block = (AllocBlock) malloc(blksize);
+			block = (AllocBlock) malloc_reserved(blksize, PG_ALLOC_ASET);
 		}
 
 		if (block == NULL)
 			return NULL;
 
 		context->mem_allocated += blksize;
-		pgstat_report_allocated_bytes_increase(blksize, PG_ALLOC_ASET);
 
 		block->aset = set;
 		block->freeptr = ((char *) block) + ALLOC_BLOCKHDRSZ;
@@ -1080,13 +1054,12 @@ AllocSetFree(void *pointer)
 
 		set->header.mem_allocated -= block->endptr - ((char *) block);
 
-		if (block->endptr - ((char *) block) > 0)
-			pgstat_report_allocated_bytes_decrease(block->endptr - ((char *) block), PG_ALLOC_ASET);
 
 #ifdef CLOBBER_FREED_MEMORY
 		wipe_mem(block, block->freeptr - ((char *) block));
 #endif
-		free(block);
+		/* Free the block */
+		free_reserved(block, block->endptr - ((char *) block), PG_ALLOC_ASET);
 	}
 	else
 	{
@@ -1198,23 +1171,10 @@ AllocSetRealloc(void *pointer, Size size)
 		chksize = MAXALIGN(size);
 #endif
 
-		/* Do the realloc */
+		/* Do the realloc, subject to backend memory limits */
 		blksize = chksize + ALLOC_BLOCKHDRSZ + ALLOC_CHUNKHDRSZ;
 		oldblksize = block->endptr - ((char *) block);
-
-		/*
-		 * Do not exceed maximum allowed memory allocation. NOTE: checking for
-		 * the full size here rather than just the amount of increased
-		 * allocation to prevent a potential underflow of *my_allocation
-		 * allowance in cases where blksize - oldblksize does not trigger a
-		 * refill but blksize is greater than *my_allocation_allowance.
-		 * Underflow would occur with the call below to
-		 * pgstat_report_allocated_bytes_increase()
-		 */
-		if (blksize > oldblksize && exceeds_max_total_bkend_mem(blksize))
-			return NULL;
-
-		block = (AllocBlock) realloc(block, blksize);
+		block = (AllocBlock) realloc_reserved(block, blksize, oldblksize, PG_ALLOC_ASET);
 		if (block == NULL)
 		{
 			/* Disallow access to the chunk header. */
@@ -1224,10 +1184,7 @@ AllocSetRealloc(void *pointer, Size size)
 
 		/* updated separately, not to underflow when (oldblksize > blksize) */
 		set->header.mem_allocated -= oldblksize;
-		if (oldblksize > 0)
-			pgstat_report_allocated_bytes_decrease(oldblksize, PG_ALLOC_ASET);
 		set->header.mem_allocated += blksize;
-		pgstat_report_allocated_bytes_increase(blksize, PG_ALLOC_ASET);
 
 		block->freeptr = block->endptr = ((char *) block) + blksize;
 

@@ -264,7 +264,6 @@ GenerationContextCreate(MemoryContext parent,
 						name);
 
 	((MemoryContext) set)->mem_allocated = firstBlockSize;
-	reserve_memory(firstBlockSize, PG_ALLOC_GENERATION);
 
 	return (MemoryContext) set;
 }
@@ -332,10 +331,10 @@ GenerationDelete(MemoryContext context)
 {
 	/* Reset to release all releasable GenerationBlocks */
 	GenerationReset(context);
-	unreserve_memory(context->mem_allocated, PG_ALLOC_GENERATION);
+
 
 	/* And free the context header and keeper block */
-	free(context);
+	free_reserved(context, context->mem_allocated, PG_ALLOC_GENERATION);
 }
 
 /*
@@ -732,11 +731,8 @@ GenerationFree(void *pointer)
 	 * list of blocks, then return it to malloc().
 	 */
 	dlist_delete(&block->node);
-
 	set->header.mem_allocated -= block->blksize;
-	unreserve_memory(block->blksize, PG_ALLOC_GENERATION);
-
-	free(block);
+	free_reserved(block, block->blksize, PG_ALLOC_GENERATION);
 }
 
 /*
