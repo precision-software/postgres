@@ -66,7 +66,6 @@
 #include "postmaster/postmaster.h"
 #include "storage/dsm_impl.h"
 #include "storage/fd.h"
-#include "utils/backend_status.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
 
@@ -161,37 +160,62 @@ dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
 			void **impl_private, void **mapped_address, Size *mapped_size,
 			int elevel)
 {
+	bool success;
+	fprintf(stderr, "dsm_impl_op: op=%d size=%zd shm type=%d\n", op, request_size, dynamic_shared_memory_type);
+
 	Assert(op == DSM_OP_CREATE || request_size == 0);
 	Assert((op != DSM_OP_CREATE && op != DSM_OP_ATTACH) ||
 		   (*mapped_address == NULL && *mapped_size == 0));
+
+	/* Try to reserve memory for the backend if we're creating a new segment. */
+	if (op == DSM_OP_CREATE && !reserve_backend_memory(request_size, PG_ALLOC_DSM))
+	{
+		ereport(elevel,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+					errmsg("Unable to reserve backend memory for dynamic shared memory segment.")));
+		return false;
+	}
 
 	switch (dynamic_shared_memory_type)
 	{
 #ifdef USE_DSM_POSIX
 		case DSM_IMPL_POSIX:
-			return dsm_impl_posix(op, handle, request_size, impl_private,
-								  mapped_address, mapped_size, elevel);
+			success = dsm_impl_posix(op, handle, request_size, impl_private,
+									 mapped_address, mapped_size, elevel);
+			break;
 #endif
 #ifdef USE_DSM_SYSV
 		case DSM_IMPL_SYSV:
-			return dsm_impl_sysv(op, handle, request_size, impl_private,
-								 mapped_address, mapped_size, elevel);
+			success = dsm_impl_sysv(op, handle, request_size, impl_private,
+									mapped_address, mapped_size, elevel);
+			break;
 #endif
 #ifdef USE_DSM_WINDOWS
 		case DSM_IMPL_WINDOWS:
-			return dsm_impl_windows(op, handle, request_size, impl_private,
+			success = dsm_impl_windows(op, handle, request_size, impl_private,
 									mapped_address, mapped_size, elevel);
+			breal''
 #endif
 #ifdef USE_DSM_MMAP
 		case DSM_IMPL_MMAP:
-			return dsm_impl_mmap(op, handle, request_size, impl_private,
-								 mapped_address, mapped_size, elevel);
+			success = dsm_impl_mmap(op, handle, request_size, impl_private,
+									mapped_address, mapped_size, elevel);
+			break;
 #endif
 		default:
 			elog(ERROR, "unexpected dynamic shared memory type: %d",
 				 dynamic_shared_memory_type);
-			return false;
+			success = false;
 	}
+
+	/*
+	 * If unsuccessful creation, or successful destruction,
+	 * release the backend memory reservation. TODO: save errno?
+	 */
+	if ( (!success && op == DSM_OP_CREATE) || (success && op == DSM_OP_DESTROY) )
+		release_backend_memory(request_size, PG_ALLOC_DSM);
+
+	return success;
 }
 
 #ifdef USE_DSM_POSIX
@@ -233,15 +257,6 @@ dsm_impl_posix(dsm_op op, dsm_handle handle, Size request_size,
 							name)));
 			return false;
 		}
-
-		/*
-		 * Detach and destroy pass through here, only decrease the memory
-		 * shown allocated in pg_stat_activity when the creator destroys the
-		 * allocation.
-		 */
-		if (op == DSM_OP_DESTROY && *mapped_size > 0)
-			pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
-
 		*mapped_address = NULL;
 		*mapped_size = 0;
 		if (op == DSM_OP_DESTROY && shm_unlink(name) != 0)
@@ -253,16 +268,6 @@ dsm_impl_posix(dsm_op op, dsm_handle handle, Size request_size,
 			return false;
 		}
 		return true;
-	}
-
-	/* Do not exceed maximum allowed memory allocation */
-	if (op == DSM_OP_CREATE && exceeds_max_total_bkend_mem(request_size))
-	{
-		ereport(elevel,
-				(errcode_for_dynamic_shared_memory(),
-				 errmsg("out of memory for segment \"%s\" - exceeds max_total_backend_memory: %m",
-						name)));
-		return false;
 	}
 
 	/*
@@ -351,35 +356,6 @@ dsm_impl_posix(dsm_op op, dsm_handle handle, Size request_size,
 				 errmsg("could not map shared memory segment \"%s\": %m",
 						name)));
 		return false;
-	}
-
-	/*
-	 * Attach and create pass through here, only update backend memory
-	 * allocated in pg_stat_activity for the creator process.
-	 */
-	if (op == DSM_OP_CREATE)
-	{
-		/*
-		 * Posix creation calls dsm_impl_posix_resize implying that resizing
-		 * occurs or may be added in the future. As implemented
-		 * dsm_impl_posix_resize utilizes fallocate or truncate, passing the
-		 * whole new size as input, growing the allocation as needed (only
-		 * truncate supports shrinking). We update by replacing the old
-		 * allocation with the new.
-		 */
-#if defined(HAVE_POSIX_FALLOCATE) && defined(__linux__)
-		/*
-		 * posix_fallocate does not shrink allocations, adjust only on
-		 * allocation increase.
-		 */
-		if (request_size > *mapped_size)
-			pgstat_report_allocated_bytes_increase(request_size - *mapped_size, PG_ALLOC_DSM);
-#else
-		if (*mapped_size > 0)
-			pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
-		if (request_size > 0)
-			pgstat_report_allocated_bytes_increase(request_size, PG_ALLOC_DSM);
-#endif
 	}
 	*mapped_address = address;
 	*mapped_size = request_size;
@@ -536,10 +512,6 @@ dsm_impl_sysv(dsm_op op, dsm_handle handle, Size request_size,
 		int			flags = IPCProtection;
 		size_t		segsize;
 
-		/* Do not exceed maximum allowed memory allocation */
-		if (op == DSM_OP_CREATE && exceeds_max_total_bkend_mem(request_size))
-			return false;
-
 		/*
 		 * Allocate the memory BEFORE acquiring the resource, so that we don't
 		 * leak the resource if memory allocation fails.
@@ -591,15 +563,6 @@ dsm_impl_sysv(dsm_op op, dsm_handle handle, Size request_size,
 							name)));
 			return false;
 		}
-
-		/*
-		 * Detach and destroy pass through here, only decrease the memory
-		 * shown allocated in pg_stat_activity when the creator destroys the
-		 * allocation.
-		 */
-		if (op == DSM_OP_DESTROY && *mapped_size > 0)
-			pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
-
 		*mapped_address = NULL;
 		*mapped_size = 0;
 		if (op == DSM_OP_DESTROY && shmctl(ident, IPC_RMID, NULL) < 0)
@@ -647,14 +610,6 @@ dsm_impl_sysv(dsm_op op, dsm_handle handle, Size request_size,
 						name)));
 		return false;
 	}
-
-	/*
-	 * Attach and create pass through here, only update backend memory
-	 * allocated in pg_stat_activity for the creator process.
-	 */
-	if (op == DSM_OP_CREATE && request_size > 0)
-		pgstat_report_allocated_bytes_increase(request_size, PG_ALLOC_DSM);
-
 	*mapped_address = address;
 	*mapped_size = request_size;
 
@@ -723,23 +678,11 @@ dsm_impl_windows(dsm_op op, dsm_handle handle, Size request_size,
 			return false;
 		}
 
-		/*
-		 * Detach and destroy pass through here, only decrease the memory
-		 * shown allocated in pg_stat_activity when the creator destroys the
-		 * allocation.
-		 */
-		if (op == DSM_OP_DESTROY && *mapped_size > 0)
-			pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
-
 		*impl_private = NULL;
 		*mapped_address = NULL;
 		*mapped_size = 0;
 		return true;
 	}
-
-	/* Do not exceed maximum allowed memory allocation */
-	if (op == DSM_OP_CREATE && exceeds_max_total_bkend_mem(request_size))
-		return false;
 
 	/* Create new segment or open an existing one for attach. */
 	if (op == DSM_OP_CREATE)
@@ -851,13 +794,6 @@ dsm_impl_windows(dsm_op op, dsm_handle handle, Size request_size,
 		return false;
 	}
 
-	/*
-	 * Attach and create pass through here, only update backend memory
-	 * allocated in pg_stat_activity for the creator process.
-	 */
-	if (op == DSM_OP_CREATE && info.RegionSize > 0)
-		pgstat_report_allocated_bytes_increase(info.RegionSize, PG_ALLOC_DSM);
-
 	*mapped_address = address;
 	*mapped_size = info.RegionSize;
 	*impl_private = hmap;
@@ -902,15 +838,6 @@ dsm_impl_mmap(dsm_op op, dsm_handle handle, Size request_size,
 							name)));
 			return false;
 		}
-
-		/*
-		 * Detach and destroy pass through here, only decrease the memory
-		 * shown allocated in pg_stat_activity when the creator destroys the
-		 * allocation.
-		 */
-		if (*mapped_size > 0)
-			pgstat_report_allocated_bytes_decrease(*mapped_size, PG_ALLOC_DSM);
-
 		*mapped_address = NULL;
 		*mapped_size = 0;
 		if (op == DSM_OP_DESTROY && unlink(name) != 0)
@@ -1032,14 +959,6 @@ dsm_impl_mmap(dsm_op op, dsm_handle handle, Size request_size,
 						name)));
 		return false;
 	}
-
-	/*
-	 * Attach and create pass through here, only update backend memory
-	 * allocated in pg_stat_activity for the creator process.
-	 */
-	if (op == DSM_OP_CREATE && request_size > 0)
-		pgstat_report_allocated_bytes_increase(request_size, PG_ALLOC_DSM);
-
 	*mapped_address = address;
 	*mapped_size = request_size;
 

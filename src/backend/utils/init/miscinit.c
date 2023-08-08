@@ -173,15 +173,10 @@ InitPostmasterChild(void)
 #endif
 
 	/*
-	 * Init pgstat allocated bytes counters here for forked backends.
-	 * Fork/exec backends have not yet reattached to shared memory at this
-	 * point. They will init pgstat allocated bytes counters in
-	 * PGSharedMemoryReAttach.
+	 * Init allocated bytes to avoid double counting parent allocation.
+	 * Not needed for EXEC_BACKEND, since the local values are initialized at startup.
 	 */
-#ifndef EXEC_BACKEND
-	/* Init allocated bytes to avoid double counting parent allocation */
-	pgstat_init_allocated_bytes();
-#endif
+	init_backend_memory();
 }
 
 /*

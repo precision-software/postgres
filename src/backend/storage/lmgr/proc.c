@@ -181,6 +181,7 @@ InitProcGlobal(void)
 	ProcGlobal->checkpointerLatch = NULL;
 	pg_atomic_init_u32(&ProcGlobal->procArrayGroupFirst, INVALID_PGPROCNO);
 	pg_atomic_init_u32(&ProcGlobal->clogGroupFirst, INVALID_PGPROCNO);
+    pg_atomic_init_u64(&ProcGlobal->total_bkend_mem_bytes, 0);
 	pg_atomic_init_u64(&ProcGlobal->global_dsm_allocation, 0);
 
 	/* Setup backend memory limiting if configured */
@@ -193,6 +194,7 @@ InitProcGlobal(void)
 		int			result = 0;
 
 		/* Get integer value of shared_memory_size */
+		/* TODO: what if specified as huge pages? or not at all? */
 		if (parse_int(GetConfigOption("shared_memory_size", true, false), &result, 0, NULL))
 		{
 			/*
@@ -201,14 +203,16 @@ InitProcGlobal(void)
 			 * less than arbitrarily picked value of 100MB.
 			 */
 
-			if (max_total_bkend_mem - result <= 0)
+            elog(WARNING, "proc init: max_total=%d  result=%d\n", max_total_bkend_mem, result);
+
+			if (max_total_bkend_mem <= result)
 			{
 				ereport(ERROR,
 						errmsg("configured max_total_backend_memory %dMB is <= shared_memory_size %dMB",
 							   max_total_bkend_mem, result),
 						errhint("Disable or increase the configuration parameter \"max_total_backend_memory\"."));
 			}
-			else if (max_total_bkend_mem - result <= 100)
+			else if (max_total_bkend_mem < result + 100)
 			{
 				ereport(WARNING,
 						errmsg("max_total_backend_memory %dMB - shared_memory_size %dMB is <= 100MB",
@@ -217,11 +221,9 @@ InitProcGlobal(void)
 			}
 
 			/*
-			 * Account for shared memory size and initialize
-			 * total_bkend_mem_bytes.
+			 * We would like to use it as bytes rather than MB.
 			 */
-			pg_atomic_init_u64(&ProcGlobal->total_bkend_mem_bytes,
-							   (uint64) max_total_bkend_mem * 1024 * 1024 - (uint64) result * 1024 * 1024);
+            max_total_bkend_bytes = (uint64)max_total_bkend_mem * 1024 * 1024;
 		}
 		else
 			ereport(ERROR, errmsg("max_total_backend_memory initialization is unable to parse shared_memory_size"));

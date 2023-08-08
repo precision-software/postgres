@@ -26,6 +26,7 @@
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/procsignal.h"
+#include "utils/backend_status.h"
 #include "utils/fmgrprotos.h"
 #include "utils/memdebug.h"
 #include "utils/memutils.h"

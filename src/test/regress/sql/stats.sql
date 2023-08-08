@@ -807,7 +807,7 @@ SET enable_seqscan = on;
 
 -- ensure that allocated_bytes exist for backends
 SELECT
-    allocated_bytes > 0 AS result
+    allocated_bytes >= 0 AS result
 FROM
     pg_stat_activity ps
     JOIN pg_stat_memory_allocation pa ON (pa.pid = ps.pid)

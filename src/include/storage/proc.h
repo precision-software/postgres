@@ -406,12 +406,7 @@ typedef struct PROC_HDR
 	int			startupBufferPinWaitBufId;
 	/* Global dsm allocations */
 	pg_atomic_uint64 global_dsm_allocation;
-
-	/*
-	 * Max backend memory allocation tracker. Used/Initialized when
-	 * max_total_bkend_mem > 0 as max_total_bkend_mem (MB) converted to bytes.
-	 * Decreases/increases with free/malloc of backend memory.
-	 */
+	/* Track how much memory the backends have allocated */
 	pg_atomic_uint64 total_bkend_mem_bytes;
 } PROC_HDR;
 

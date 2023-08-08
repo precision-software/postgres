@@ -154,7 +154,6 @@ InternalIpcMemoryCreate(IpcMemoryKey memKey, Size size)
 #endif
 
 	shmid = shmget(memKey, size, IPC_CREAT | IPC_EXCL | IPCProtection);
-
 	if (shmid < 0)
 	{
 		int			shmget_errno = errno;
