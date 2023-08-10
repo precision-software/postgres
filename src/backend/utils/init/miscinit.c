@@ -171,12 +171,6 @@ InitPostmasterChild(void)
 				(errcode_for_socket_access(),
 				 errmsg_internal("could not set postmaster death monitoring pipe to FD_CLOEXEC mode: %m")));
 #endif
-
-	/*
-	 * Init allocated bytes to avoid double counting parent allocation.
-	 * Not needed for EXEC_BACKEND, since the local values are initialized at startup.
-	 */
-	init_backend_memory();
 }
 
 /*

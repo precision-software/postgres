@@ -2101,11 +2101,11 @@ pg_stat_get_memory_allocation(PG_FUNCTION_ARGS)
 			nulls[0] = true;
 
 		values[1] = Int32GetDatum(beentry->st_procpid);
-		values[2] = UInt64GetDatum(beentry->allocated_bytes);
-		values[3] = UInt64GetDatum(beentry->allocated_bytes_by_type[PG_ALLOC_ASET]);
-		values[4] = UInt64GetDatum(beentry->allocated_bytes_by_type[PG_ALLOC_DSM]);
-		values[5] = UInt64GetDatum(beentry->allocated_bytes_by_type[PG_ALLOC_GENERATION]);
-		values[6] = UInt64GetDatum(beentry->allocated_bytes_by_type[PG_ALLOC_SLAB]);
+		values[2] = UInt64GetDatum(beentry->st_memory.allocated_bytes);
+		values[3] = UInt64GetDatum(beentry->st_memory.allocated_bytes_by_type[PG_ALLOC_ASET]);
+		values[4] = UInt64GetDatum(beentry->st_memory.allocated_bytes_by_type[PG_ALLOC_DSM]);
+		values[5] = UInt64GetDatum(beentry->st_memory.allocated_bytes_by_type[PG_ALLOC_GENERATION]);
+		values[6] = UInt64GetDatum(beentry->st_memory.allocated_bytes_by_type[PG_ALLOC_SLAB]);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 

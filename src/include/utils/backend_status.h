@@ -39,8 +39,9 @@ typedef enum BackendState
 
 /* Various types of memory allocators we are tracking. */
 typedef enum pg_allocator_type
-{                          /* 0 is reserved for "NONE" */
-	PG_ALLOC_ASET = 1,     /* Allocation Set           */
+{
+	PG_ALLOC_OTHER = 0,    /* Not tracked, but part of total memory */
+	PG_ALLOC_ASET,         /* Allocation Set           */
 	PG_ALLOC_DSM,          /* Dynamic shared memory    */
 	PG_ALLOC_GENERATION,   /* Generation Context (all freed at once) */
 	PG_ALLOC_SLAB,         /* Slab allocator 		 */
@@ -95,6 +96,21 @@ typedef struct PgBackendGSSStatus
 
 } PgBackendGSSStatus;
 
+/*
+ * PgBackendMemoryStatus
+ *
+ * For each backend, track how much memory has been allocated.
+ * Note may be possible to have negative values, say if one backend
+ * creates DSM segments and another backend destroys them.
+ */
+typedef struct PgBackendMemoryStatus
+{
+	int64		allocated_bytes;
+	int64       allocated_bytes_by_type[PG_ALLOC_TYPE_MAX];
+} PgBackendMemoryStatus;
+
+/* This is the corresponding initialization value */
+static const PgBackendMemoryStatus INIT_BACKEND_MEMORY = {0, {0}};
 
 /* ----------
  * PgBackendStatus
@@ -185,13 +201,8 @@ typedef struct PgBackendStatus
 	/* query identifier, optionally computed using post_parse_analyze_hook */
 	uint64		st_query_id;
 
-	/*
-	 * Current memory allocated to this backend, both total and subtotals.
-	 * Note it is possible to have negative values, say if one backend
-	 * creates DSM segments and another backend destroys them.
-	 */
-	int64		allocated_bytes;
-	int64       allocated_bytes_by_type[PG_ALLOC_TYPE_MAX];
+	/* Memory allocated to this backend, both total and subtotals by type. */
+	PgBackendMemoryStatus st_memory;
 
 } PgBackendStatus;
 
@@ -317,8 +328,9 @@ extern PGDLLIMPORT int max_total_bkend_mem;
  * ----------
  */
 extern PGDLLIMPORT PgBackendStatus *MyBEEntry;
-extern PGDLLIMPORT int64 my_allocated_bytes;
-extern PGDLLIMPORT int64 my_allocated_bytes_by_type[PG_ALLOC_TYPE_MAX];
+
+/* Manage memory allocation for backends. */
+extern PGDLLIMPORT PgBackendMemoryStatus my_memory;
 extern PGDLLIMPORT int64 allocation_allowance_refill_qty;
 extern PGDLLIMPORT int64 initial_allocation_allowance;
 extern PGDLLIMPORT int64 allocation_upper_bound;
@@ -431,7 +443,7 @@ reserve_backend_memory(int64 size, pg_allocator_type type)
 		 return true;
 
 	/* CASE: the new allocation is within bounds. Take the fast path. */
-	else if (my_allocated_bytes + size <= allocation_upper_bound)
+	else if (my_memory.allocated_bytes + size <= allocation_upper_bound)
 		return update_local_allocation(size, type);
 
 	/* CASE: out of bounds. Update pgstat and check memory limits */
@@ -455,7 +467,7 @@ release_backend_memory(int64 size, pg_allocator_type type)
 		 return;
 
 	/* CASE: In bounds, take the fast path */
-	else if (my_allocated_bytes - size >= allocation_lower_bound)
+	else if (my_memory.allocated_bytes - size >= allocation_lower_bound)
 		update_local_allocation(-size, type);
 
 	/* CASE: Out of bounds. Update pgstat and memory totals */
@@ -474,8 +486,8 @@ static inline bool
 update_local_allocation(int64 size, pg_allocator_type type)
 {
 	/* Update our local memory counters. */
-	my_allocated_bytes += size;
-	my_allocated_bytes_by_type[type] += size;
+	my_memory.allocated_bytes += size;
+	my_memory.allocated_bytes_by_type[type] += size;
 
 	return true;
 }
