@@ -398,23 +398,23 @@ extern char *pgstat_clip_activity(const char *raw_activity);
  * the cluster-wide limits on backend memory.
  *
  * The following counters represent the "TRUTH" of this backend's memory allocations.
- *   my_allocated_bytes:               total amount of memory allocated by this backend.
- *   my_allocated_bytes_by_type[type]: subtotals by allocation type.
+ *   my_memory.allocated_bytes:               total amount of memory allocated by this backend.
+ *   my_memory.allocated_bytes_by_type[type]: subtotals by allocator type.
 
  * These counters are the values reported to pgstat. They are a snapshot of the above values.
- *   proc->allocated_bytes:               last total reported to pgstat
- *   proc->allocated_bytes_by_type[type]: last reported subtotals reported to pgstat
+ *   proc->st_memory.allocated_bytes:               last total reported to pgstat
+ *   proc->st_memory.allocated_bytes_by_type[type]: last reported subtotals reported to pgstat
  *
  * When to update pgstat and check memory limits.
- *   allocation_upper_bound:          update when my_allocated_bytes exceeds this
- *   allocation_lower_bound:          update when my_allocated_bytes drops below this
+ *   allocation_upper_bound:          update when my_memory.allocated_bytes exceeds this
+ *   allocation_lower_bound:          update when my_memory.allocated_bytes drops below this
  *   allocation_allowance_refill_qty  amount of memory to allocate or release before updating again.
  *
  * Bounds checking on backend memory. Limits how much memory the cluster can use.
  *   ProcGlobal->total_bkend_mem_bytes:       total amount of memory reserved by all backends, including shared memory
  *   ProcGlobal->global_dsm_allocated_bytes:  total amount of shared memory allocated by all backends.
  *   max_total_bkend_bytes:                   maximum amount of memory allowed to be reserved by all backends.
- *   initial_allocation_allowance:            each backend is allowed this much memory at startup
+ *   initial_allocation_allowance:            each backend consumes this much memory simply by existing.
  * ----------
  */
 
@@ -537,15 +537,28 @@ static inline void *
 realloc_backend(void *block, int64 new_size, int64 old_size, pg_allocator_type type)
 {
 	void *ptr;
+	bool success;
 
-	/* reserve the memory if able to */
-	if (!reserve_backend_memory(new_size - old_size, type))
+	/* Update the reservation to the new size */
+	release_backend_memory(old_size, type);
+	success = reserve_backend_memory(new_size, type);
+
+	/* If unable, free the old memory and return NULL */
+	if (!success)
+	{
+		free(block);
 		return NULL;
+	}
 
-	/* Resize the memory, returning the reservation if failed */
+	/* Now, actually resize the memory */
 	ptr = realloc(block, new_size);
+
+	/*
+	 * If unable to resize, release the allocation.
+	 * The actual memory has already been freed.
+	 */
 	if (ptr == NULL)
-		release_backend_memory(new_size - old_size, type);
+		release_backend_memory(new_size, type);
 
 	return ptr;
 }
