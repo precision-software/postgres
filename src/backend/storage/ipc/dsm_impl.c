@@ -160,37 +160,62 @@ dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
 			void **impl_private, void **mapped_address, Size *mapped_size,
 			int elevel)
 {
+	bool success;
+	fprintf(stderr, "dsm_impl_op: op=%d size=%zd shm type=%d\n", op, request_size, dynamic_shared_memory_type);
+
 	Assert(op == DSM_OP_CREATE || request_size == 0);
 	Assert((op != DSM_OP_CREATE && op != DSM_OP_ATTACH) ||
 		   (*mapped_address == NULL && *mapped_size == 0));
+
+	/* Try to reserve memory for the backend if we're creating a new segment. */
+	if (op == DSM_OP_CREATE && !reserve_backend_memory(request_size, PG_ALLOC_DSM))
+	{
+		ereport(elevel,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+					errmsg("Unable to reserve backend memory for dynamic shared memory segment.")));
+		return false;
+	}
 
 	switch (dynamic_shared_memory_type)
 	{
 #ifdef USE_DSM_POSIX
 		case DSM_IMPL_POSIX:
-			return dsm_impl_posix(op, handle, request_size, impl_private,
-								  mapped_address, mapped_size, elevel);
+			success = dsm_impl_posix(op, handle, request_size, impl_private,
+									 mapped_address, mapped_size, elevel);
+			break;
 #endif
 #ifdef USE_DSM_SYSV
 		case DSM_IMPL_SYSV:
-			return dsm_impl_sysv(op, handle, request_size, impl_private,
-								 mapped_address, mapped_size, elevel);
+			success = dsm_impl_sysv(op, handle, request_size, impl_private,
+									mapped_address, mapped_size, elevel);
+			break;
 #endif
 #ifdef USE_DSM_WINDOWS
 		case DSM_IMPL_WINDOWS:
-			return dsm_impl_windows(op, handle, request_size, impl_private,
+			success = dsm_impl_windows(op, handle, request_size, impl_private,
 									mapped_address, mapped_size, elevel);
+			breal''
 #endif
 #ifdef USE_DSM_MMAP
 		case DSM_IMPL_MMAP:
-			return dsm_impl_mmap(op, handle, request_size, impl_private,
-								 mapped_address, mapped_size, elevel);
+			success = dsm_impl_mmap(op, handle, request_size, impl_private,
+									mapped_address, mapped_size, elevel);
+			break;
 #endif
 		default:
 			elog(ERROR, "unexpected dynamic shared memory type: %d",
 				 dynamic_shared_memory_type);
-			return false;
+			success = false;
 	}
+
+	/*
+	 * If unsuccessful creation, or successful destruction,
+	 * release the backend memory reservation. TODO: save errno?
+	 */
+	if ( (!success && op == DSM_OP_CREATE) || (success && op == DSM_OP_DESTROY) )
+		release_backend_memory(request_size, PG_ALLOC_DSM);
+
+	return success;
 }
 
 #ifdef USE_DSM_POSIX
