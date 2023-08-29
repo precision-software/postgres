@@ -105,8 +105,8 @@ typedef struct
 } unit_conversion;
 
 /* Ensure that the constants in the tables don't overflow or underflow */
-#if BLCKSZ < 1024 || BLCKSZ > (1024*1024)
-#error BLCKSZ must be between 1KB and 1MB
+#if cluster_block_size < 1024 || cluster_block_size > (1024*1024)
+#error cluster_block_size must be between 1KB and 1MB
 #endif
 #if XLOG_BLCKSZ < 1024 || XLOG_BLCKSZ > (1024*1024)
 #error XLOG_BLCKSZ must be between 1KB and 1MB
@@ -134,11 +134,11 @@ static const unit_conversion memory_unit_conversion_table[] =
 	{"kB", GUC_UNIT_MB, 1.0 / 1024.0},
 	{"B", GUC_UNIT_MB, 1.0 / (1024.0 * 1024.0)},
 
-	{"TB", GUC_UNIT_BLOCKS, (1024.0 * 1024.0 * 1024.0) / (BLCKSZ / 1024)},
-	{"GB", GUC_UNIT_BLOCKS, (1024.0 * 1024.0) / (BLCKSZ / 1024)},
-	{"MB", GUC_UNIT_BLOCKS, 1024.0 / (BLCKSZ / 1024)},
-	{"kB", GUC_UNIT_BLOCKS, 1.0 / (BLCKSZ / 1024)},
-	{"B", GUC_UNIT_BLOCKS, 1.0 / BLCKSZ},
+	{"TB", GUC_UNIT_BLOCKS, (1024.0 * 1024.0 * 1024.0) / (cluster_block_size / 1024)},
+	{"GB", GUC_UNIT_BLOCKS, (1024.0 * 1024.0) / (cluster_block_size / 1024)},
+	{"MB", GUC_UNIT_BLOCKS, 1024.0 / (cluster_block_size / 1024)},
+	{"kB", GUC_UNIT_BLOCKS, 1.0 / (cluster_block_size / 1024)},
+	{"B", GUC_UNIT_BLOCKS, 1.0 / cluster_block_size},
 
 	{"TB", GUC_UNIT_XBLOCKS, (1024.0 * 1024.0 * 1024.0) / (XLOG_BLCKSZ / 1024)},
 	{"GB", GUC_UNIT_XBLOCKS, (1024.0 * 1024.0) / (XLOG_BLCKSZ / 1024)},
@@ -2782,7 +2782,7 @@ get_config_unit_name(int flags)
 
 				/* initialize if first time through */
 				if (bbuf[0] == '\0')
-					snprintf(bbuf, sizeof(bbuf), "%dkB", BLCKSZ / 1024);
+					snprintf(bbuf, sizeof(bbuf), "%dkB", cluster_block_size / 1024);
 				return bbuf;
 			}
 		case GUC_UNIT_XBLOCKS:

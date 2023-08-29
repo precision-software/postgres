@@ -467,7 +467,7 @@ mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	MdfdVec    *v;
 
 	/* If this build supports direct I/O, the buffer must be I/O aligned. */
-	if (PG_O_DIRECT != 0 && PG_IO_ALIGN_SIZE <= BLCKSZ)
+	if (PG_O_DIRECT != 0 && PG_IO_ALIGN_SIZE <= cluster_block_size)
 		Assert((uintptr_t) buffer == TYPEALIGN(PG_IO_ALIGN_SIZE, buffer));
 
 	/* This assert is too expensive to have on normally ... */
@@ -490,11 +490,11 @@ mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	v = _mdfd_getseg(reln, forknum, blocknum, skipFsync, EXTENSION_CREATE);
 
-	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+	seekpos = (off_t) cluster_block_size * (blocknum % ((BlockNumber) RELSEG_SIZE));
 
-	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
+	Assert(seekpos < (off_t) cluster_block_size * RELSEG_SIZE);
 
-	if ((nbytes = FileWrite(v->mdfd_vfd, buffer, BLCKSZ, seekpos, WAIT_EVENT_DATA_FILE_EXTEND)) != BLCKSZ)
+	if ((nbytes = FileWrite(v->mdfd_vfd, buffer, cluster_block_size, seekpos, WAIT_EVENT_DATA_FILE_EXTEND)) != cluster_block_size)
 	{
 		if (nbytes < 0)
 			ereport(ERROR,
@@ -507,7 +507,7 @@ mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				(errcode(ERRCODE_DISK_FULL),
 				 errmsg("could not extend file \"%s\": wrote only %d of %d bytes at block %u",
 						FilePathName(v->mdfd_vfd),
-						nbytes, BLCKSZ, blocknum),
+						nbytes, cluster_block_size, blocknum),
 				 errhint("Check free disk space.")));
 	}
 
@@ -553,7 +553,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 	while (remblocks > 0)
 	{
 		BlockNumber segstartblock = curblocknum % ((BlockNumber) RELSEG_SIZE);
-		off_t		seekpos = (off_t) BLCKSZ * segstartblock;
+		off_t		seekpos = (off_t) cluster_block_size * segstartblock;
 		int			numblocks;
 
 		if (segstartblock + remblocks > RELSEG_SIZE)
@@ -582,7 +582,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 			int			ret;
 
 			ret = FileFallocate(v->mdfd_vfd,
-								seekpos, (off_t) BLCKSZ * numblocks,
+								seekpos, (off_t) cluster_block_size * numblocks,
 								WAIT_EVENT_DATA_FILE_EXTEND);
 			if (ret != 0)
 			{
@@ -605,7 +605,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 			 * whole length of the extension.
 			 */
 			ret = FileZero(v->mdfd_vfd,
-						   seekpos, (off_t) BLCKSZ * numblocks,
+						   seekpos, (off_t) cluster_block_size * numblocks,
 						   WAIT_EVENT_DATA_FILE_EXTEND);
 			if (ret < 0)
 				ereport(ERROR,
@@ -726,11 +726,11 @@ mdprefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 	if (v == NULL)
 		return false;
 
-	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+	seekpos = (off_t) cluster_block_size * (blocknum % ((BlockNumber) RELSEG_SIZE));
 
-	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
+	Assert(seekpos < (off_t) cluster_block_size * RELSEG_SIZE);
 
-	(void) FilePrefetch(v->mdfd_vfd, seekpos, BLCKSZ, WAIT_EVENT_DATA_FILE_PREFETCH);
+	(void) FilePrefetch(v->mdfd_vfd, seekpos, cluster_block_size, WAIT_EVENT_DATA_FILE_PREFETCH);
 #endif							/* USE_PREFETCH */
 
 	return true;
@@ -748,7 +748,7 @@ mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	MdfdVec    *v;
 
 	/* If this build supports direct I/O, the buffer must be I/O aligned. */
-	if (PG_O_DIRECT != 0 && PG_IO_ALIGN_SIZE <= BLCKSZ)
+	if (PG_O_DIRECT != 0 && PG_IO_ALIGN_SIZE <= cluster_block_size)
 		Assert((uintptr_t) buffer == TYPEALIGN(PG_IO_ALIGN_SIZE, buffer));
 
 	TRACE_POSTGRESQL_SMGR_MD_READ_START(forknum, blocknum,
@@ -760,11 +760,11 @@ mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	v = _mdfd_getseg(reln, forknum, blocknum, false,
 					 EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY);
 
-	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+	seekpos = (off_t) cluster_block_size * (blocknum % ((BlockNumber) RELSEG_SIZE));
 
-	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
+	Assert(seekpos < (off_t) cluster_block_size * RELSEG_SIZE);
 
-	nbytes = FileRead(v->mdfd_vfd, buffer, BLCKSZ, seekpos, WAIT_EVENT_DATA_FILE_READ);
+	nbytes = FileRead(v->mdfd_vfd, buffer, cluster_block_size, seekpos, WAIT_EVENT_DATA_FILE_READ);
 
 	TRACE_POSTGRESQL_SMGR_MD_READ_DONE(forknum, blocknum,
 									   reln->smgr_rlocator.locator.spcOid,
@@ -772,9 +772,9 @@ mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 									   reln->smgr_rlocator.locator.relNumber,
 									   reln->smgr_rlocator.backend,
 									   nbytes,
-									   BLCKSZ);
+									   cluster_block_size);
 
-	if (nbytes != BLCKSZ)
+	if (nbytes != cluster_block_size)
 	{
 		if (nbytes < 0)
 			ereport(ERROR,
@@ -791,13 +791,13 @@ mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 * update a block that was later truncated away.
 		 */
 		if (zero_damaged_pages || InRecovery)
-			MemSet(buffer, 0, BLCKSZ);
+			MemSet(buffer, 0, cluster_block_size);
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("could not read block %u in file \"%s\": read only %d of %d bytes",
 							blocknum, FilePathName(v->mdfd_vfd),
-							nbytes, BLCKSZ)));
+							nbytes, cluster_block_size)));
 	}
 }
 
@@ -817,7 +817,7 @@ mdwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	MdfdVec    *v;
 
 	/* If this build supports direct I/O, the buffer must be I/O aligned. */
-	if (PG_O_DIRECT != 0 && PG_IO_ALIGN_SIZE <= BLCKSZ)
+	if (PG_O_DIRECT != 0 && PG_IO_ALIGN_SIZE <= cluster_block_size)
 		Assert((uintptr_t) buffer == TYPEALIGN(PG_IO_ALIGN_SIZE, buffer));
 
 	/* This assert is too expensive to have on normally ... */
@@ -834,11 +834,11 @@ mdwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	v = _mdfd_getseg(reln, forknum, blocknum, skipFsync,
 					 EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY);
 
-	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+	seekpos = (off_t) cluster_block_size * (blocknum % ((BlockNumber) RELSEG_SIZE));
 
-	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
+	Assert(seekpos < (off_t) cluster_block_size * RELSEG_SIZE);
 
-	nbytes = FileWrite(v->mdfd_vfd, buffer, BLCKSZ, seekpos, WAIT_EVENT_DATA_FILE_WRITE);
+	nbytes = FileWrite(v->mdfd_vfd, buffer, cluster_block_size, seekpos, WAIT_EVENT_DATA_FILE_WRITE);
 
 	TRACE_POSTGRESQL_SMGR_MD_WRITE_DONE(forknum, blocknum,
 										reln->smgr_rlocator.locator.spcOid,
@@ -846,9 +846,9 @@ mdwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 										reln->smgr_rlocator.locator.relNumber,
 										reln->smgr_rlocator.backend,
 										nbytes,
-										BLCKSZ);
+										cluster_block_size);
 
-	if (nbytes != BLCKSZ)
+	if (nbytes != cluster_block_size)
 	{
 		if (nbytes < 0)
 			ereport(ERROR,
@@ -861,7 +861,7 @@ mdwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				 errmsg("could not write block %u in file \"%s\": wrote only %d of %d bytes",
 						blocknum,
 						FilePathName(v->mdfd_vfd),
-						nbytes, BLCKSZ),
+						nbytes, cluster_block_size),
 				 errhint("Check free disk space.")));
 	}
 
@@ -917,9 +917,9 @@ mdwriteback(SMgrRelation reln, ForkNumber forknum,
 		Assert(nflush >= 1);
 		Assert(nflush <= nblocks);
 
-		seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+		seekpos = (off_t) cluster_block_size * (blocknum % ((BlockNumber) RELSEG_SIZE));
 
-		FileWriteback(v->mdfd_vfd, seekpos, (off_t) BLCKSZ * nflush, WAIT_EVENT_DATA_FILE_FLUSH);
+		FileWriteback(v->mdfd_vfd, seekpos, (off_t) cluster_block_size * nflush, WAIT_EVENT_DATA_FILE_FLUSH);
 
 		nblocks -= nflush;
 		blocknum += nflush;
@@ -1061,7 +1061,7 @@ mdtruncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 			 */
 			BlockNumber lastsegblocks = nblocks - priorblocks;
 
-			if (FileTruncate(v->mdfd_vfd, (off_t) lastsegblocks * BLCKSZ, WAIT_EVENT_DATA_FILE_TRUNCATE) < 0)
+			if (FileTruncate(v->mdfd_vfd, (off_t) lastsegblocks * cluster_block_size, WAIT_EVENT_DATA_FILE_TRUNCATE) < 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not truncate file \"%s\" to %u blocks: %m",
@@ -1458,7 +1458,7 @@ _mdfd_getseg(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 */
 			if (nblocks < ((BlockNumber) RELSEG_SIZE))
 			{
-				char	   *zerobuf = palloc_aligned(BLCKSZ, PG_IO_ALIGN_SIZE,
+				char	   *zerobuf = palloc_aligned(cluster_block_size, PG_IO_ALIGN_SIZE,
 													 MCXT_ALLOC_ZERO);
 
 				mdextend(reln, forknum,
@@ -1529,7 +1529,7 @@ _mdnblocks(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 				 errmsg("could not seek to end of file \"%s\": %m",
 						FilePathName(seg->mdfd_vfd))));
 	/* note that this calculation will ignore any partial block at EOF */
-	return (BlockNumber) (len / BLCKSZ);
+	return (BlockNumber) (len / cluster_block_size);
 }
 
 /*

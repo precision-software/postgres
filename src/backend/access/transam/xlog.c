@@ -3923,7 +3923,7 @@ WriteControlFile(void)
 	ControlFile->maxAlign = MAXIMUM_ALIGNOF;
 	ControlFile->floatFormat = FLOATFORMAT_VALUE;
 
-	ControlFile->blcksz = BLCKSZ;
+	ControlFile->blcksz = cluster_block_size;
 	ControlFile->relseg_size = RELSEG_SIZE;
 	ControlFile->xlog_blcksz = XLOG_BLCKSZ;
 	ControlFile->xlog_seg_size = wal_segment_size;
@@ -3931,8 +3931,8 @@ WriteControlFile(void)
 	ControlFile->nameDataLen = NAMEDATALEN;
 	ControlFile->indexMaxKeys = INDEX_MAX_KEYS;
 
-	ControlFile->toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
-	ControlFile->loblksize = LOBLKSIZE;
+	ControlFile->toast_max_chunk_size = cluster_toast_max_chunk_size;
+	ControlFile->loblksize = cluster_loblksize;
 
 	ControlFile->float8ByVal = FLOAT8PASSBYVAL;
 
@@ -4087,12 +4087,12 @@ ReadControlFile(void)
 				(errmsg("database files are incompatible with server"),
 				 errdetail("The database cluster appears to use a different floating-point number format than the server executable."),
 				 errhint("It looks like you need to initdb.")));
-	if (ControlFile->blcksz != BLCKSZ)
+	if (ControlFile->blcksz != cluster_block_size)
 		ereport(FATAL,
 				(errmsg("database files are incompatible with server"),
-				 errdetail("The database cluster was initialized with BLCKSZ %d,"
-						   " but the server was compiled with BLCKSZ %d.",
-						   ControlFile->blcksz, BLCKSZ),
+				 errdetail("The database cluster was initialized with cluster_block_size %d,"
+						   " but the server was compiled with cluster_block_size %d.",
+						   ControlFile->blcksz, cluster_block_size),
 				 errhint("It looks like you need to recompile or initdb.")));
 	if (ControlFile->relseg_size != RELSEG_SIZE)
 		ereport(FATAL,
@@ -4122,19 +4122,19 @@ ReadControlFile(void)
 						   " but the server was compiled with INDEX_MAX_KEYS %d.",
 						   ControlFile->indexMaxKeys, INDEX_MAX_KEYS),
 				 errhint("It looks like you need to recompile or initdb.")));
-	if (ControlFile->toast_max_chunk_size != TOAST_MAX_CHUNK_SIZE)
+	if (ControlFile->toast_max_chunk_size != cluster_toast_max_chunk_size)
 		ereport(FATAL,
 				(errmsg("database files are incompatible with server"),
-				 errdetail("The database cluster was initialized with TOAST_MAX_CHUNK_SIZE %d,"
-						   " but the server was compiled with TOAST_MAX_CHUNK_SIZE %d.",
-						   ControlFile->toast_max_chunk_size, (int) TOAST_MAX_CHUNK_SIZE),
+				 errdetail("The database cluster was initialized with cluster_toast_max_chunk_size %d,"
+						   " but the server was compiled with cluster_toast_max_chunk_size %d.",
+						   ControlFile->toast_max_chunk_size, (int) cluster_toast_max_chunk_size),
 				 errhint("It looks like you need to recompile or initdb.")));
-	if (ControlFile->loblksize != LOBLKSIZE)
+	if (ControlFile->loblksize != cluster_loblksize)
 		ereport(FATAL,
 				(errmsg("database files are incompatible with server"),
-				 errdetail("The database cluster was initialized with LOBLKSIZE %d,"
-						   " but the server was compiled with LOBLKSIZE %d.",
-						   ControlFile->loblksize, (int) LOBLKSIZE),
+				 errdetail("The database cluster was initialized with cluster_loblksize %d,"
+						   " but the server was compiled with cluster_loblksize %d.",
+						   ControlFile->loblksize, (int) cluster_loblksize),
 				 errhint("It looks like you need to recompile or initdb.")));
 
 #ifdef USE_FLOAT8_BYVAL

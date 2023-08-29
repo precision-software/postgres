@@ -36,7 +36,7 @@ typedef struct SpGistOptions
 	 ((SpGistOptions *) (relation)->rd_options)->fillfactor : \
 	 SPGIST_DEFAULT_FILLFACTOR)
 #define SpGistGetTargetPageFreeSpace(relation) \
-	(BLCKSZ * (100 - SpGistGetFillFactor(relation)) / 100)
+	(cluster_block_size * (100 - SpGistGetFillFactor(relation)) / 100)
 
 
 /* SPGiST leaf tuples have one key column, optionally have included columns */
@@ -444,8 +444,8 @@ typedef SpGistDeadTupleData *SpGistDeadTuple;
  */
 
 /* Page capacity after allowing for fixed header and special space */
-#define SPGIST_PAGE_CAPACITY  \
-	MAXALIGN_DOWN(BLCKSZ - \
+#define spgist_page_capacity  \
+	MAXALIGN_DOWN(cluster_block_size - \
 				  SizeOfPageHeaderData - \
 				  MAXALIGN(sizeof(SpGistPageOpaqueData)))
 

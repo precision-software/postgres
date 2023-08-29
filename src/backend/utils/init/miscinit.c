@@ -1501,8 +1501,8 @@ AddToDataDirLockFile(int target_line, const char *str)
 	int			lineno;
 	char	   *srcptr;
 	char	   *destptr;
-	char		srcbuffer[BLCKSZ];
-	char		destbuffer[BLCKSZ];
+	char		srcbuffer[cluster_block_size];
+	char		destbuffer[cluster_block_size];
 
 	fd = open(DIRECTORY_LOCK_FILE, O_RDWR | PG_BINARY, 0);
 	if (fd < 0)
@@ -1626,7 +1626,7 @@ RecheckDataDirLockFile(void)
 	int			fd;
 	int			len;
 	long		file_pid;
-	char		buffer[BLCKSZ];
+	char		buffer[cluster_block_size];
 
 	fd = open(DIRECTORY_LOCK_FILE, O_RDWR | PG_BINARY, 0);
 	if (fd < 0)

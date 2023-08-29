@@ -21,14 +21,14 @@
  * Find the maximum size of a tuple if there are to be N tuples per page.
  */
 #define MaximumBytesPerTuple(tuplesPerPage) \
-	MAXALIGN_DOWN((BLCKSZ - \
+	MAXALIGN_DOWN((cluster_block_size - \
 				   MAXALIGN(SizeOfPageHeaderData + (tuplesPerPage) * sizeof(ItemIdData))) \
 				  / (tuplesPerPage))
 
 /*
  * These symbols control toaster activation.  If a tuple is larger than
- * TOAST_TUPLE_THRESHOLD, we will try to toast it down to no more than
- * TOAST_TUPLE_TARGET bytes through compressing compressible fields and
+ * toast_tuple_threshold, we will try to toast it down to no more than
+ * cluster_toast_tuple_target bytes through compressing compressible fields and
  * moving EXTENDED and EXTERNAL data out-of-line.
  *
  * The numbers need not be the same, though they currently are.  It doesn't
@@ -40,14 +40,14 @@
  *
  * XXX while these can be modified without initdb, some thought needs to be
  * given to needs_toast_table() in toasting.c before unleashing random
- * changes.  Also see LOBLKSIZE in large_object.h, which can *not* be
+ * changes.  Also see cluster_loblksize in large_object.h, which can *not* be
  * changed without initdb.
  */
 #define TOAST_TUPLES_PER_PAGE	4
 
-#define TOAST_TUPLE_THRESHOLD	MaximumBytesPerTuple(TOAST_TUPLES_PER_PAGE)
+#define toast_tuple_threshold	MaximumBytesPerTuple(TOAST_TUPLES_PER_PAGE)
 
-#define TOAST_TUPLE_TARGET		TOAST_TUPLE_THRESHOLD
+#define cluster_toast_tuple_target		toast_tuple_threshold
 
 /*
  * The code will also consider moving MAIN data out-of-line, but only as a
@@ -58,7 +58,7 @@
  */
 #define TOAST_TUPLES_PER_PAGE_MAIN	1
 
-#define TOAST_TUPLE_TARGET_MAIN MaximumBytesPerTuple(TOAST_TUPLES_PER_PAGE_MAIN)
+#define toast_tuple_target_main MaximumBytesPerTuple(TOAST_TUPLES_PER_PAGE_MAIN)
 
 /*
  * If an index value is larger than TOAST_INDEX_TARGET, we will try to
@@ -69,19 +69,19 @@
 
 /*
  * When we store an oversize datum externally, we divide it into chunks
- * containing at most TOAST_MAX_CHUNK_SIZE data bytes.  This number *must*
+ * containing at most cluster_toast_max_chunk_size data bytes.  This number *must*
  * be small enough that the completed toast-table tuple (including the
  * ID and sequence fields and all overhead) will fit on a page.
  * The coding here sets the size on the theory that we want to fit
  * EXTERN_TUPLES_PER_PAGE tuples of maximum size onto a page.
  *
- * NB: Changing TOAST_MAX_CHUNK_SIZE requires an initdb.
+ * NB: Changing cluster_toast_max_chunk_size requires an initdb.
  */
 #define EXTERN_TUPLES_PER_PAGE	4	/* tweak only this */
 
 #define EXTERN_TUPLE_MAX_SIZE	MaximumBytesPerTuple(EXTERN_TUPLES_PER_PAGE)
 
-#define TOAST_MAX_CHUNK_SIZE	\
+#define cluster_toast_max_chunk_size	\
 	(EXTERN_TUPLE_MAX_SIZE -							\
 	 MAXALIGN(SizeofHeapTupleHeader) -					\
 	 sizeof(Oid) -										\

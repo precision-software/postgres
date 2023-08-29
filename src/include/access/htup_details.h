@@ -551,7 +551,7 @@ StaticAssertDecl(MaxOffsetNumber < SpecTokenOffsetNumber,
 
 /*
  * MaxHeapTupleSize is the maximum allowed size of a heap tuple, including
- * header and MAXALIGN alignment padding.  Basically it's BLCKSZ minus the
+ * header and MAXALIGN alignment padding.  Basically it's cluster_block_size minus the
  * other stuff that has to be on a disk page.  Since heap pages use no
  * "special space", there's no deduction for that.
  *
@@ -560,7 +560,7 @@ StaticAssertDecl(MaxOffsetNumber < SpecTokenOffsetNumber,
  * ItemIds and tuples have different alignment requirements, don't assume that
  * you can, say, fit 2 tuples of size MaxHeapTupleSize/2 on the same page.
  */
-#define MaxHeapTupleSize  (BLCKSZ - MAXALIGN(SizeOfPageHeaderData + sizeof(ItemIdData)))
+#define MaxHeapTupleSize  (cluster_block_size - MAXALIGN(SizeOfPageHeaderData + sizeof(ItemIdData)))
 #define MinHeapTupleSize  MAXALIGN(SizeofHeapTupleHeader)
 
 /*
@@ -575,7 +575,7 @@ StaticAssertDecl(MaxOffsetNumber < SpecTokenOffsetNumber,
  * require increases in the size of work arrays.
  */
 #define MaxHeapTuplesPerPage	\
-	((int) ((BLCKSZ - SizeOfPageHeaderData) / \
+	((int) ((cluster_block_size - SizeOfPageHeaderData) / \
 			(MAXALIGN(SizeofHeapTupleHeader) + sizeof(ItemIdData))))
 
 /*

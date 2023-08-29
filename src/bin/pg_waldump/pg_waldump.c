@@ -531,7 +531,7 @@ XLogRecordSaveFPWs(XLogReaderState *record, const char *savepath)
 		if (!file)
 			pg_fatal("could not open file \"%s\": %m", filename);
 
-		if (fwrite(page, BLCKSZ, 1, file) != 1)
+		if (fwrite(page, cluster_block_size, 1, file) != 1)
 			pg_fatal("could not write file \"%s\": %m", filename);
 
 		if (fclose(file) != 0)

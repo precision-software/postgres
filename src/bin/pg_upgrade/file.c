@@ -96,7 +96,7 @@ copyFile(const char *src, const char *dst,
 				 schemaName, relName, dst, strerror(errno));
 
 	/* copy in fairly large chunks for best efficiency */
-#define COPY_BUF_SIZE (50 * BLCKSZ)
+#define COPY_BUF_SIZE (50 * cluster_block_size)
 
 	buffer = (char *) pg_malloc(COPY_BUF_SIZE);
 
@@ -187,7 +187,7 @@ rewriteVisibilityMap(const char *fromfile, const char *tofile,
 	struct stat statbuf;
 
 	/* Compute number of old-format bytes per new page */
-	rewriteVmBytesPerPage = (BLCKSZ - SizeOfPageHeaderData) / 2;
+	rewriteVmBytesPerPage = (cluster_block_size - SizeOfPageHeaderData) / 2;
 
 	if ((src_fd = open(fromfile, O_RDONLY | PG_BINARY, 0)) < 0)
 		pg_fatal("error while copying relation \"%s.%s\": could not open file \"%s\": %s",
@@ -220,7 +220,7 @@ rewriteVisibilityMap(const char *fromfile, const char *tofile,
 		PageHeaderData pageheader;
 		bool		old_lastblk;
 
-		if ((bytesRead = read(src_fd, buffer.data, BLCKSZ)) != BLCKSZ)
+		if ((bytesRead = read(src_fd, buffer.data, cluster_block_size)) != cluster_block_size)
 		{
 			if (bytesRead < 0)
 				pg_fatal("error while copying relation \"%s.%s\": could not read file \"%s\": %s",
@@ -230,7 +230,7 @@ rewriteVisibilityMap(const char *fromfile, const char *tofile,
 						 schemaName, relName, fromfile);
 		}
 
-		totalBytesRead += BLCKSZ;
+		totalBytesRead += cluster_block_size;
 		old_lastblk = (totalBytesRead == src_filesize);
 
 		/* Save the page header data */
@@ -296,7 +296,7 @@ rewriteVisibilityMap(const char *fromfile, const char *tofile,
 					pg_checksum_page(new_vmbuf.data, new_blkno);
 
 			errno = 0;
-			if (write(dst_fd, new_vmbuf.data, BLCKSZ) != BLCKSZ)
+			if (write(dst_fd, new_vmbuf.data, cluster_block_size) != cluster_block_size)
 			{
 				/* if write didn't set errno, assume problem is no disk space */
 				if (errno == 0)

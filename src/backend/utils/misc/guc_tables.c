@@ -3118,7 +3118,7 @@ struct config_int ConfigureNamesInt[] =
 			GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE
 		},
 		&block_size,
-		BLCKSZ, BLCKSZ, BLCKSZ,
+		cluster_block_size, cluster_block_size, cluster_block_size,
 		NULL, NULL, NULL
 	},
 
@@ -3368,7 +3368,7 @@ struct config_int ConfigureNamesInt[] =
 			GUC_UNIT_BLOCKS | GUC_EXPLAIN,
 		},
 		&min_parallel_table_scan_size,
-		(8 * 1024 * 1024) / BLCKSZ, 0, INT_MAX / 3,
+		(8 * 1024 * 1024) / cluster_block_size, 0, INT_MAX / 3,
 		NULL, NULL, NULL
 	},
 
@@ -3379,7 +3379,7 @@ struct config_int ConfigureNamesInt[] =
 			GUC_UNIT_BLOCKS | GUC_EXPLAIN,
 		},
 		&min_parallel_index_scan_size,
-		(512 * 1024) / BLCKSZ, 0, INT_MAX / 3,
+		(512 * 1024) / cluster_block_size, 0, INT_MAX / 3,
 		NULL, NULL, NULL
 	},
 

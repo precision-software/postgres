@@ -212,7 +212,7 @@ sub GenerateFiles
 		ALIGNOF_PG_INT128_TYPE => undef,
 		ALIGNOF_SHORT => 2,
 		AC_APPLE_UNIVERSAL_BUILD => undef,
-		BLCKSZ => 1024 * $self->{options}->{blocksize},
+		cluster_block_size => 1024 * $self->{options}->{blocksize},
 		CONFIGURE_ARGS => '"' . $self->GetFakeConfigure() . '"',
 		DEF_PGPORT => $port,
 		DEF_PGPORT_STR => qq{"$port"},

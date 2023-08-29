@@ -328,7 +328,7 @@ static relopt_int intRelOpts[] =
 			RELOPT_KIND_HEAP,
 			ShareUpdateExclusiveLock
 		},
-		TOAST_TUPLE_TARGET, 128, TOAST_TUPLE_TARGET_MAIN
+		cluster_toast_tuple_target, 128, toast_tuple_target_main
 	},
 	{
 		{

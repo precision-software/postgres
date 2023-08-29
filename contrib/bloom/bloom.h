@@ -112,7 +112,7 @@ typedef struct BloomOptions
  */
 typedef BlockNumber FreeBlockNumberArray[
 										 MAXALIGN_DOWN(
-													   BLCKSZ - SizeOfPageHeaderData - MAXALIGN(sizeof(BloomPageOpaqueData))
+													   cluster_block_size - SizeOfPageHeaderData - MAXALIGN(sizeof(BloomPageOpaqueData))
 													   - MAXALIGN(sizeof(uint16) * 2 + sizeof(uint32) + sizeof(BloomOptions))
 													   ) / sizeof(BlockNumber)
 ];
@@ -150,7 +150,7 @@ typedef struct BloomState
 } BloomState;
 
 #define BloomPageGetFreeSpace(state, page) \
-	(BLCKSZ - MAXALIGN(SizeOfPageHeaderData) \
+	(cluster_block_size - MAXALIGN(SizeOfPageHeaderData) \
 		- BloomPageGetMaxOffset(page) * (state)->sizeOfBloomTuple \
 		- MAXALIGN(sizeof(BloomPageOpaqueData)))
 

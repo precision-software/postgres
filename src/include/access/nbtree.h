@@ -183,7 +183,7 @@ typedef struct BTMetaPageData
  * than necessary as a result, which is considered acceptable.
  */
 #define MaxTIDsPerBTreePage \
-	(int) ((BLCKSZ - SizeOfPageHeaderData - sizeof(BTPageOpaqueData)) / \
+	(int) ((cluster_block_size - SizeOfPageHeaderData - sizeof(BTPageOpaqueData)) / \
 		   sizeof(ItemPointerData))
 
 /*
@@ -1057,7 +1057,7 @@ typedef struct BTScanOpaqueData
 	/*
 	 * If we are doing an index-only scan, these are the tuple storage
 	 * workspaces for the currPos and markPos respectively.  Each is of size
-	 * BLCKSZ, so it can hold as much as a full page's worth of tuples.
+	 * cluster_block_size, so it can hold as much as a full page's worth of tuples.
 	 */
 	char	   *currTuples;		/* tuple storage for currPos */
 	char	   *markTuples;		/* tuple storage for markPos */
@@ -1104,7 +1104,7 @@ typedef struct BTOptions
 	 ((BTOptions *) (relation)->rd_options)->fillfactor : \
 	 BTREE_DEFAULT_FILLFACTOR)
 #define BTGetTargetPageFreeSpace(relation) \
-	(BLCKSZ * (100 - BTGetFillFactor(relation)) / 100)
+	(cluster_block_size * (100 - BTGetFillFactor(relation)) / 100)
 #define BTGetDeduplicateItems(relation) \
 	(AssertMacro(relation->rd_rel->relkind == RELKIND_INDEX && \
 				 relation->rd_rel->relam == BTREE_AM_OID), \

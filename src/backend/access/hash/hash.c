@@ -152,7 +152,7 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 * one page.  Also, "initial index size" accounting does not include the
 	 * metapage, nor the first bitmap page.
 	 */
-	sort_threshold = (maintenance_work_mem * 1024L) / BLCKSZ;
+	sort_threshold = (maintenance_work_mem * 1024L) / cluster_block_size;
 	if (index->rd_rel->relpersistence != RELPERSISTENCE_TEMP)
 		sort_threshold = Min(sort_threshold, NBuffers);
 	else

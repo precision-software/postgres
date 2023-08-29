@@ -187,7 +187,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	 */
 	minfree = RelationGetTargetPageFreeSpace(relation,
 											 HEAP_DEFAULT_FILLFACTOR);
-	minfree = Max(minfree, BLCKSZ / 10);
+	minfree = Max(minfree, cluster_block_size / 10);
 
 	if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 	{

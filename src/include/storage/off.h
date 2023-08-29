@@ -25,7 +25,7 @@ typedef uint16 OffsetNumber;
 
 #define InvalidOffsetNumber		((OffsetNumber) 0)
 #define FirstOffsetNumber		((OffsetNumber) 1)
-#define MaxOffsetNumber			((OffsetNumber) (BLCKSZ / sizeof(ItemIdData)))
+#define MaxOffsetNumber			((OffsetNumber) (cluster_block_size / sizeof(ItemIdData)))
 
 /* ----------------
  *		support macros

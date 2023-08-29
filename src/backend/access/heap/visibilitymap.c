@@ -105,7 +105,7 @@
  * extra headers, so the whole page minus the standard page header is
  * used for the bitmap.
  */
-#define MAPSIZE (BLCKSZ - MAXALIGN(SizeOfPageHeaderData))
+#define MAPSIZE (cluster_block_size - MAXALIGN(SizeOfPageHeaderData))
 
 /* Number of heap blocks we can represent in one byte */
 #define HEAPBLOCKS_PER_BYTE (BITS_PER_BYTE / BITS_PER_HEAPBLOCK)
@@ -613,7 +613,7 @@ vm_readbuf(Relation rel, BlockNumber blkno, bool extend)
 	{
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		if (PageIsNew(BufferGetPage(buf)))
-			PageInit(BufferGetPage(buf), BLCKSZ, 0);
+			PageInit(BufferGetPage(buf), cluster_block_size, 0);
 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 	}
 	return buf;

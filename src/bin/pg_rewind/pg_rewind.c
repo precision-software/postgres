@@ -571,8 +571,8 @@ perform_rewind(filemap_t *filemap, rewind_source *source,
 			iter = datapagemap_iterate(&entry->target_pages_to_overwrite);
 			while (datapagemap_next(iter, &blkno))
 			{
-				offset = blkno * BLCKSZ;
-				source->queue_fetch_range(source, entry->path, offset, BLCKSZ);
+				offset = blkno * cluster_block_size;
+				source->queue_fetch_range(source, entry->path, offset, cluster_block_size);
 			}
 			pg_free(iter);
 		}

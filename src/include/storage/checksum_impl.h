@@ -111,7 +111,7 @@
 typedef union
 {
 	PageHeaderData phdr;
-	uint32		data[BLCKSZ / (sizeof(uint32) * N_SUMS)][N_SUMS];
+	uint32		data[cluster_block_size / (sizeof(uint32) * N_SUMS)][N_SUMS];
 } PGChecksummablePage;
 
 /*
@@ -151,13 +151,13 @@ pg_checksum_block(const PGChecksummablePage *page)
 				j;
 
 	/* ensure that the size is compatible with the algorithm */
-	Assert(sizeof(PGChecksummablePage) == BLCKSZ);
+	Assert(sizeof(PGChecksummablePage) == cluster_block_size);
 
 	/* initialize partial checksums to their corresponding offsets */
 	memcpy(sums, checksumBaseOffsets, sizeof(checksumBaseOffsets));
 
 	/* main checksum calculation */
-	for (i = 0; i < (uint32) (BLCKSZ / (sizeof(uint32) * N_SUMS)); i++)
+	for (i = 0; i < (uint32) (cluster_block_size / (sizeof(uint32) * N_SUMS)); i++)
 		for (j = 0; j < N_SUMS; j++)
 			CHECKSUM_COMP(sums[j], page->data[i][j]);
 

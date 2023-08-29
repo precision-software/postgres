@@ -307,7 +307,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 	char		path[MAXPGPATH];
 	char		tmppath[MAXPGPATH];
 	char		histfname[MAXFNAMELEN];
-	char		buffer[BLCKSZ];
+	char		buffer[cluster_block_size];
 	int			srcfd;
 	int			fd;
 	int			nbytes;

@@ -686,14 +686,14 @@ GuessControlValues(void)
 
 	ControlFile.maxAlign = MAXIMUM_ALIGNOF;
 	ControlFile.floatFormat = FLOATFORMAT_VALUE;
-	ControlFile.blcksz = BLCKSZ;
+	ControlFile.blcksz = cluster_block_size;
 	ControlFile.relseg_size = RELSEG_SIZE;
 	ControlFile.xlog_blcksz = XLOG_BLCKSZ;
 	ControlFile.xlog_seg_size = DEFAULT_XLOG_SEG_SIZE;
 	ControlFile.nameDataLen = NAMEDATALEN;
 	ControlFile.indexMaxKeys = INDEX_MAX_KEYS;
-	ControlFile.toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
-	ControlFile.loblksize = LOBLKSIZE;
+	ControlFile.toast_max_chunk_size = cluster_toast_max_chunk_size;
+	ControlFile.loblksize = cluster_loblksize;
 	ControlFile.float8ByVal = FLOAT8PASSBYVAL;
 
 	/*
