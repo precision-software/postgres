@@ -9,15 +9,12 @@
 #include "storage/dsm.h"
 #include "storage/shm_toc.h"
 #include "tcop/tcopprot.h"
-#include "storage/spin.h"
 #include "storage/procarray.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "worker_pool.h"
 #include "utils/memutils.h"
 #include "miscadmin.h"
-#include "utils/memtrack.h"  /* for debug() */
-#include "utils/wait_event_types.h"
 #include "storage/barrier.h"
 
 
@@ -64,8 +61,6 @@ WorkerPool *createWorkerPool(int nWorkers, int inSize, int outSize, char *libNam
 	MemoryContext oldcontext;
 	BackgroundWorker worker;
 	pid_t pid;
-
-	debug("createWorkerPool: nWorkers=%d, inSize=%d, outSize=%d\n", nWorkers, inSize, outSize);
 
 	/*
 	 * We need the worker pool objects to allocated in CurTransactionContext
@@ -131,7 +126,6 @@ WorkerPool *createWorkerPool(int nWorkers, int inSize, int outSize, char *libNam
 	 * knowing this.  From their perspective, they're still waiting for those
 	 * workers to start, when in fact they've already died.
 	 */
-	debug("configuring on_detach:  seg=%p  fn=%p  pool=%ld\n", pool->seg, cleanupWorkers, PointerGetDatum(pool));
 	on_dsm_detach(pool->seg, cleanupWorkers, PointerGetDatum(pool));
 
 
@@ -148,7 +142,6 @@ WorkerPool *createWorkerPool(int nWorkers, int inSize, int outSize, char *libNam
 	strlcpy(worker.bgw_function_name, procName, sizeof(worker.bgw_function_name));
 	snprintf(worker.bgw_type, sizeof(worker.bgw_type), "%s worker", libName);
 	snprintf(worker.bgw_name, sizeof(worker.bgw_name), "%s/%s worker for [%d]", libName, procName, MyProcPid);
-	debug("lib=%s proc=%s .bgw_main_arg=%d\n", libName, procName, DatumGetInt32(worker.bgw_main_arg));
 
 	/* Do for each worker */
 	for (int w = 0; w < nWorkers; w++)
@@ -178,7 +171,6 @@ WorkerPool *createWorkerPool(int nWorkers, int inSize, int outSize, char *libNam
 						errhint("You may need to increase max_worker_processes.")));
 
 	/* Wait for workers to attach to the shared memory segment */
-	debug("Leader waiting on barrier\n");
 	BarrierArriveAndWait(pool->hdr->barrier, 0);
 
 	/*
@@ -198,7 +190,6 @@ WorkerPool *createWorkerPool(int nWorkers, int inSize, int outSize, char *libNam
 shm_mq_result sendToWorker(WorkerPool *pool, int workerIdx, void *msg, Size len)
 {
 	shm_mq_result result;
-	debug("workerIdx=%d, len=%zd\n", workerIdx, len);
 
 	result = shm_mq_send(pool->inQ[workerIdx], len, msg, true, true);
 
@@ -209,9 +200,7 @@ shm_mq_result recvFromWorker(WorkerPool *pool, int workerIdx, void**msg, Size *l
 {
 	shm_mq_result result;
 
-	debug("waiting workerIdx=%d\n", workerIdx);
 	result = shm_mq_receive(pool->outQ[workerIdx], len, msg, false);
-	debug("received result=%d workerIdx=%d, len=%zd\n", result, workerIdx, *len);
 
 	return result;
 }
@@ -221,7 +210,6 @@ void freeWorkerPool(WorkerPool *pool)
 	/* Only free the pool once. (possibly reentrant) */
     dsm_segment *seg = pool->seg;
 	pool->seg = NULL;
-	debug("pool=%p seg=%p\n", pool, seg);
 	if (seg == NULL)
 		return;
 
@@ -250,7 +238,7 @@ void freeWorkerPool(WorkerPool *pool)
 static void cleanupWorkers(dsm_segment *seg, Datum arg)
 {
 	WorkerPool *pool = (WorkerPool *)DatumGetPointer(arg);
-	debug("seg=%p pool=%p\n", seg, pool);
+
 	for (int w = 0; w < pool->nWorkers; w++)
 		TerminateBackgroundWorker(pool->handle[w]);
 	for (int w = 0; w < pool->nWorkers; w++)
@@ -305,13 +293,11 @@ static WorkerPoolStartup *hdr;
 
 shm_mq_result  workerRecv(void **msg, Size *msgSize)
 {
-	debug("MyWorkerNumber=%d\n", myWorkerNumber);
 	return shm_mq_receive(inQ, msgSize, msg, false);
 }
 
 shm_mq_result  workerSend(void *msg, Size msgSize)
 {
-	debug("MyWorkerNumber=%d msgSize=%zd\n", myWorkerNumber, msgSize);
 	return shm_mq_send(outQ, msgSize, msg, false, true);
 }
 
@@ -325,7 +311,6 @@ void workerInit(Datum arg)
 
 	/* We are passed the dsm handle of the worker pool */
 	handle = DatumGetInt32(arg);
-	debug("handle=%d\n", handle);
 
 	/*
 	* Establish signal handlers.
@@ -364,7 +349,6 @@ void workerInit(Datum arg)
 	/* Attach to the startup header and get our worker idx */
 	hdr = shm_toc_lookup(toc, 0, false);
 	myWorkerNumber = pg_atomic_fetch_add_u32(&hdr->nextWorker, 1);
-	debug("myWorkerNumber=%d\n", myWorkerNumber);
 	if (myWorkerNumber >= hdr->nWorkers)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -376,15 +360,12 @@ void workerInit(Datum arg)
 	outQ = attachToQueue(seg, toc, myWorkerNumber, 1, true);
 
 	/* Wait for everybody else to become ready */
-	debug("Waiting on barrier\n");
 	BarrierArriveAndWait(hdr->barrier, 0);
-	debug("Barrier passed\n");
 }
 
 
 void workerExit(int code)
 {
-	debug("code=%d\n", code);
 	/*
     * We're done.  For cleanliness, explicitly detach from the shared memory
     * segment (that would happen anyway during process exit, though).
@@ -411,6 +392,5 @@ static MemQue attachToQueue(dsm_segment *seg, shm_toc *toc, int workerIdx, int q
 	/* Attach to the queue */
 	que = shm_mq_attach(mq, seg, NULL);
 
-	debug("workerIdx=%d, queueIdx=%d  handle=%p\n", workerIdx, queueIdx, que);
 	return que;
 }

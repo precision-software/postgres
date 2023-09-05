@@ -13,25 +13,25 @@
  *     release_backend_memory()
  *     exit_backend_memory()
  *
- * All local variables are properly initialized at startup, so init_backend_memory()
+ * All private variables are properly initialized at startup, so init_backend_memory()
  * only needs to be called after a fork() system call.
  *
  * The reserve/release functions implement both a "fast path" and a "slow path".
  * The fast path is used for most allocations, and it only references
- * local variables. The slow path is invoked periodically; it updates
+ * private (hon-shmem) variables. The slow path is invoked periodically; it updates
  * shared memory and checks for limits on total backend memory.
  *
- * The following local variables represent the "TRUTH" of this backend's memory allocations.
+ * The following private variables represent the "TRUTH" of this backend's memory allocations.
  *   my_memory.allocated_bytes:               total amount of memory allocated by this backend.
  *   my_memory.allocated_bytes_by_type[type]: subtotals by allocator type.
  *
- * The local values are periodically reported to pgstgt.
+ * The private values are periodically reported to pgstgt.
  * The following variables hold the last reported values
  *    reported_memory.allocated_bytes
  *    reported_memory.allocated_bytes_by_type[type]:
  *
  * The "slow path" is invoked when my_memory.allocate_bytes exceeds these bounds.
- * Once invokoked, it updates the reported values and sets new bounds.
+ * Once invokked, it updates the reported values and sets new bounds.
  *   allocation_upper_bound:          update when my_memory.allocated_bytes exceeds this
  *   allocation_lower_bound:          update when my_memory.allocated_bytes drops below this
  *   allocation_allowance_refill_qty  amount of memory to allocate or release before updating again.
@@ -52,13 +52,8 @@
 
 #include <unistd.h>
 #include "postgres.h"
+#include "common/int.h"
 #include "port/atomics.h"
-
-/*
- * Define a debug macro which becomes noop() when debug is disabled.
- */
-#define debug(args...)  (void)0
-
 
 /* Various types of memory allocators we are tracking. */
 typedef enum pg_allocator_type
@@ -86,7 +81,7 @@ typedef struct PgBackendMemoryStatus
 } PgBackendMemoryStatus;
 
 
-/* These values are candidates for GUC variables.  We chose 1MV arbitrarily. */
+/* These values are candidates for GUC variables.  We chose 1MB arbitrarily. */
 static const int64 initial_allocation_allowance = 1024 * 1024;  /* 1MB */
 static const int64 allocation_allowance_refill_qty = 1024 * 1024;  /* 1MB */
 
@@ -125,17 +120,16 @@ reserve_backend_memory(int64 size, pg_allocator_type type)
 {
 	Assert(size >= 0);
 
-	/* quick optimization */
+	/* CASE: no change in reserved memory.  */
 	if (size == 0)
 		return true;
 
 	/* CASE: the new allocation is within bounds. Take the fast path. */
-	else if (my_memory.allocated_bytes + size <= allocation_upper_bound)
+	if (my_memory.allocated_bytes + size <= allocation_upper_bound)
 		return update_local_allocation(size, type);
 
 	/* CASE: out of bounds. Update pgstat and check memory limits */
-	else
-		return update_global_allocation(size, type);
+	return update_global_allocation(size, type);
 }
 
 /* ----------
@@ -149,12 +143,12 @@ release_backend_memory(int64 size, pg_allocator_type type)
 {
 	Assert(size >= 0);
 
-	/* quick optimization */
+	/* CASE: no change in reserved memory. Do nothing. */
 	if (size == 0)
 		return;
 
 	/* CASE: In bounds, take the fast path */
-	else if (my_memory.allocated_bytes - size >= allocation_lower_bound)
+	if (my_memory.allocated_bytes - size >= allocation_lower_bound)
 		update_local_allocation(-size, type);
 
 	/* CASE: Out of bounds. Update pgstat and memory totals */
@@ -167,7 +161,7 @@ release_backend_memory(int64 size, pg_allocator_type type)
 * Fast path for reserving and releasing memory.
 * This version is used for most allocations, and it
 * is stripped down to the bare minimum to reduce impact
-* on performance. It only updates local variables.
+* on performance. It only updates private (non-shared) variables.
 */
 static inline bool
 update_local_allocation(int64 size, pg_allocator_type type)
@@ -252,35 +246,27 @@ realloc_backend(void *block, int64 new_size, int64 old_size, pg_allocator_type t
 }
 
 
-/* True if adding a and b would overflow */
-static inline bool addition_overflow(int64 a, int64 b)
-{
-	int64 result = a + b;
-	return (a > 0 && b > 0 && result < 0) || (a < 0 && b < 0 && result > 0);
-}
-
 /*
- * Helper function to add to an atomic sum, as long as the result is within bounds.
- * TODO: consider moving to atomics.h
+ * Add to an atomic sum as long as it doesn't exceed the limit.
+ * We are assuming reasonable values which are not going to overflow,
+ * but we throw an assertion if they ever do.
  */
 static inline bool
-atomic_add_within_bounds_i64(pg_atomic_uint64 *ptr, int64 add, int64 lower_bound, int64 upper_bound)
+add_with_limit(pg_atomic_uint64 *sum, uint64 add, uint64 limit)
 {
-	int64 oldval;
-	int64 newval;
+	uint64 old_sum;
 
-	for (;;)
+	/* CAS loop until successful or until new sum would be out of bounds */
+	old_sum = pg_atomic_read_u64(sum);
+	do
 	{
-		oldval = (int64)pg_atomic_read_u64(ptr);
-		newval = oldval + add;
-
-		/* check if we are out of bounds */
-		if (newval < lower_bound || newval > upper_bound || addition_overflow(oldval, add))
+		Assert(old_sum + add >= old_sum);  /* Check for unlikely overflow */
+		if (old_sum + add > limit)
 			return false;
 
-		if (pg_atomic_compare_exchange_u64(ptr, (uint64 *)&oldval, newval))
-			return true;
-	}
+	} while (!pg_atomic_compare_exchange_u64(sum, &old_sum, old_sum + add));
+
+	return true;
 }
 
 

@@ -97,7 +97,6 @@ Datum test_nonDSM(FunctionCallInfo fcinfo, char *workerFunction)
 	int32 nBlocks = PG_GETARG_INT32(2);
 	int32 blockSize = PG_GETARG_INT32(3);
 
-	debug("nWorkers=%d type=%d nBlocks=%d blockSize=%d\n", nWorkers, type, nBlocks, blockSize);
 	validateArgs(nWorkers, type, nBlocks, blockSize);
 
 	/* Our global totals may be off by an allocation allowance per worker */
@@ -121,7 +120,6 @@ Datum test_nonDSM(FunctionCallInfo fcinfo, char *workerFunction)
 
 	/* Confirm the total backend memory is greater than what we just allocated */
 	delta = pg_atomic_read_u32((void *)&ProcGlobal->total_bkend_mem_bytes) - starting_bkend_bytes;
-	debug("starting_bkend_bytes=%zd  delta=%zd\n", starting_bkend_bytes, delta);
 	if (delta < expected - fudge || delta > expected + fudge)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -137,7 +135,6 @@ Datum test_nonDSM(FunctionCallInfo fcinfo, char *workerFunction)
 
 	/* Verify the new total is reasonable */
 	delta = pg_atomic_read_u32((void *)&ProcGlobal->total_bkend_mem_bytes) - starting_bkend_bytes;
-	debug("After release: delta=%zd  expected=%d\n", delta, 0);
 	if (delta < -fudge || delta > fudge)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -145,7 +142,6 @@ Datum test_nonDSM(FunctionCallInfo fcinfo, char *workerFunction)
 
 	/* Clean up */
 	freeWorkerPool(pool);
-	debug("done\n");
 	PG_RETURN_VOID();
 }
 
@@ -183,7 +179,6 @@ void sendRequest(WorkerPool *pool, int worker, Action action, pg_allocator_type 
 {
 	AllocateRequest req;
 	int result;
-    debug("worker=%d action=%d type=%d nBlocks=%d blockSize=%d\n", worker, action, type, nBlocks, blockSize);
 
 	req = (AllocateRequest) {.nBlocks = nBlocks, .action = action, .type = type, .blockSize = blockSize};
 
@@ -201,7 +196,6 @@ void processReply(WorkerPool *pool, int worker, Action action, pg_allocator_type
 		ResponseData *resp;
 		Size len;
 		int result;
-		debug("worker=%d action=%d type=%d nBlocks=%d blockSize=%d\n", worker, action, type, nBlocks, blockSize);
 
 		/* Receive a message. Returns a pointer to the message and a length */
 		result = recvFromWorker(pool, worker, (void *)&resp, &len);
@@ -217,7 +211,6 @@ void processReply(WorkerPool *pool, int worker, Action action, pg_allocator_type
 
 		/* Verify the totals */
 		delta = resp->memory.allocated_bytes_by_type[type] - resp->startingMemory.allocated_bytes_by_type[type];
-		debug("delta=%ld expected=%ld\n", delta, (int64)nBlocks*blockSize);
 		if (action == ALLOCATE && delta < nBlocks * blockSize)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -241,7 +234,6 @@ void test_memtrack_worker(Datum arg)
 
 	PgBackendMemoryStatus startingMemory;
 
-	debug("");
 	workerInit(arg);
 
 	/* Now that we're running, make note of how much memory has been already allocated */
@@ -250,7 +242,6 @@ void test_memtrack_worker(Datum arg)
 	do
 	{
 		result = workerRecv((void *)&req, &reqSize);
-		debug("Received  result=%d  action=%d type=%d nBlocks=%d  blockSize=%ld\n", result, req->action, req->type, req->nBlocks, req->blockSize);
 		if (result != SHM_MQ_SUCCESS)
 			break;
 
@@ -265,11 +256,9 @@ void test_memtrack_worker(Datum arg)
 		/* Get the current memory totals */
 		resp->memory = my_memory;
 		resp->startingMemory = startingMemory;
-		debug("MyBEEntry=%p  allocated_bytes=%ld  type=%d\n", MyBEEntry, my_memory.allocated_bytes_by_type[req->type], req->type);
 
 		/* Send the response */
 		result = workerSend(resp, sizeof(resp[1]));
-		debug("Send errorCode=%d  result=%d\n", resp->errorCode, result);
 
 	} while (result == SHM_MQ_SUCCESS);
 
@@ -279,20 +268,17 @@ void test_memtrack_worker(Datum arg)
 
 bool reserveBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 {
-    debug("type=%d nBlocks=%d blockSize=%d  prev=%zd\n", type, nBlocks, blockSize, my_memory.allocated_bytes_by_type[type]);
 	/* Allocate the requested number of blocks */
 	for (int i = 0; i < nBlocks; i++)
 		if (!reserve_backend_memory(blockSize, type))
 			return false;
 
-	debug("success: allocated_bytes=%zd\n", my_memory.allocated_bytes_by_type[type]);
 	return true;
 }
 
 
 bool releaseBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 {
-	debug("type=%d nBlocks=%d blockSize=%d\n", type, nBlocks, blockSize);
     for (int i = 0; i < nBlocks; i++)
 	    release_backend_memory(blockSize, type);
 
@@ -331,7 +317,6 @@ void test_allocation_worker(Datum arg)
 
 	PgBackendMemoryStatus startingMemory;
 
-	debug("\n");
 	workerInit(arg);
 
 	/* Now that we're running, make note of how much memory has been already allocated */
@@ -340,7 +325,6 @@ void test_allocation_worker(Datum arg)
 	do
 	{
 		result = workerRecv((void *)&req, &reqSize);
-		debug("Received  result=%d  action=%d type=%d nBlocks=%d  blockSize=%ld\n", result, req->action, req->type, req->nBlocks, req->blockSize);
 		if (result != SHM_MQ_SUCCESS)
 			break;
 
@@ -355,7 +339,6 @@ void test_allocation_worker(Datum arg)
 		/* Get the current memory totals */
 		resp->memory = my_memory;
 		resp->startingMemory = startingMemory;
-		debug("MyBEEntry=%p  allocated_bytes=%ld  type=%d\n", MyBEEntry, my_memory.allocated_bytes_by_type[req->type], req->type);
 
 		/* Send the response */
 		result = workerSend(resp, sizeof(resp[1]));
@@ -369,7 +352,6 @@ void test_allocation_worker(Datum arg)
 
 static bool allocateBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 {
-	debug("type=%d nBlocks=%d blockSize=%d  prev=%zd\n", type, nBlocks, blockSize, my_memory.allocated_bytes_by_type[type]);
 	if (type == PG_ALLOC_DSM)
 		return allocateDSMBlocks(nBlocks, blockSize);
 	else
@@ -378,7 +360,6 @@ static bool allocateBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 
 static bool freeBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 {
-	debug("type=%d nBlocks=%d blockSize=%d\n", type, nBlocks, blockSize);
 	if (type == PG_ALLOC_DSM)
 		return freeDSMBlocks(nBlocks, blockSize);
 	else
@@ -410,7 +391,6 @@ bool allocateContextBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 {
 	MemoryContext old;
 
-	debug("type=%d nBlocks=%d blockSize=%d  prev=%zd\n", type, nBlocks, blockSize, my_memory.allocated_bytes_by_type[type]);
 	if (type == PG_ALLOC_DSM || type == PG_ALLOC_OTHER)
 	    return false;
 
@@ -438,7 +418,6 @@ bool allocateContextBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 	/* Switch back to the old context */
 	MemoryContextSwitchTo(old);
 
-	debug("success: allocated_bytes=%zd\n", my_memory.allocated_bytes_by_type[type]);
 	return true;
 	}
 
@@ -446,7 +425,6 @@ bool allocateContextBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 static
 bool freeContextBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 {
-	debug("type=%d nBlocks=%d blockSize=%d\n", type, nBlocks, blockSize);
 	for (int i = 0; i < nBlocks; i++)
 		pfree(allocations[i]);
 
@@ -462,7 +440,6 @@ bool freeContextBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 
 static bool allocateDSMBlocks(int nBlocks, int blockSize)
 {
-	debug("nBlocks=%d blockSize=%d\n", nBlocks, blockSize);
 
 	/* Create a list of block pointers - not in the context */
 	allocations = malloc(sizeof(void *) * nBlocks);
@@ -474,7 +451,6 @@ static bool allocateDSMBlocks(int nBlocks, int blockSize)
 		allocations[i] = dsm_create(blockSize, 0);
 		if (allocations[i] == NULL)
 			return false;
-		debug("segment=%p size=%ld\n", allocations[i], dsm_segment_map_length(allocations[i]));
 	}
 
 	return true;
@@ -483,8 +459,6 @@ static bool allocateDSMBlocks(int nBlocks, int blockSize)
 
 static bool freeDSMBlocks(int nBlocks, int blockSize)
 {
-	debug("nBlocks=%d blockSize=%d\n", nBlocks, blockSize);
-
 	for (int i = 0; i < nBlocks; i++)
 		dsm_detach(allocations[i]);
 

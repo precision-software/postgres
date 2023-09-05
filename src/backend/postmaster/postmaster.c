@@ -6329,7 +6329,7 @@ restore_backend_variables(BackendParameters *param, Port *port)
 	strlcpy(pkglib_path, param->pkglib_path, MAXPGPATH);
 
 	max_total_bkend_mem = param->max_total_bkend_mem;
-	max_global_bkend_bytes = (uint64)max_total_bkend_mem * 1024 * 1024;
+	max_total_bkend_bytes = (uint64)max_total_bkend_mem * 1024 * 1024;
 
 	/*
 	 * We need to restore fd.c's counts of externally-opened FDs; to avoid
