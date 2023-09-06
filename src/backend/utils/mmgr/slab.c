@@ -432,7 +432,6 @@ SlabReset(MemoryContext context)
 	SlabContext *slab = (SlabContext *) context;
 	dlist_mutable_iter miter;
 	int			i;
-	uint64		deallocation = 0;
 
 	Assert(SlabIsValid(slab));
 
@@ -451,9 +450,8 @@ SlabReset(MemoryContext context)
 #ifdef CLOBBER_FREED_MEMORY
 		wipe_mem(block, slab->blockSize);
 #endif
-		free(block);
+		free_backend(block, slab->blockSize, PG_ALLOC_SLAB);
 		context->mem_allocated -= slab->blockSize;
-		deallocation += slab->blockSize;
 	}
 
 	/* walk over blocklist and free the blocks */
@@ -468,13 +466,11 @@ SlabReset(MemoryContext context)
 #ifdef CLOBBER_FREED_MEMORY
 			wipe_mem(block, slab->blockSize);
 #endif
-			free(block);
+			free_backend(block, slab->blockSize, PG_ALLOC_SLAB);
 			context->mem_allocated -= slab->blockSize;
-			deallocation += slab->blockSize;
 		}
 	}
 
-	release_backend_memory(deallocation, PG_ALLOC_SLAB);
 	slab->curBlocklistIndex = 0;
 
 	Assert(context->mem_allocated == 0);
