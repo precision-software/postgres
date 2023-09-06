@@ -18,14 +18,14 @@
  *
  * The reserve/release functions implement both a "fast path" and a "slow path".
  * The fast path is used for most allocations, and it only references
- * private (hon-shmem) variables. The slow path is invoked periodically; it updates
+ * private (hon-shared) variables. The slow path is invoked periodically; it updates
  * shared memory and checks for limits on total backend memory.
  *
  * The following private variables represent the "TRUTH" of this backend's memory allocations.
  *   my_memory.allocated_bytes:               total amount of memory allocated by this backend.
  *   my_memory.allocated_bytes_by_type[type]: subtotals by allocator type.
  *
- * The private values are periodically reported to pgstgt.
+ * The private values are periodically reported to pgstat.
  * The following variables hold the last reported values
  *    reported_memory.allocated_bytes
  *    reported_memory.allocated_bytes_by_type[type]:
@@ -120,7 +120,7 @@ reserve_backend_memory(int64 size, pg_allocator_type type)
 {
 	Assert(size >= 0);
 
-	/* CASE: no change in reserved memory.  */
+	/* CASE: no change in reserved memory. Do nothing. */
 	if (size == 0)
 		return true;
 
@@ -244,31 +244,5 @@ realloc_backend(void *block, int64 new_size, int64 old_size, pg_allocator_type t
 
 	return ptr;
 }
-
-
-/*
- * Add to an atomic sum as long as it doesn't exceed the limit.
- * We are assuming reasonable values which are not going to overflow,
- * but we throw an assertion if they ever do.
- */
-static inline bool
-add_with_limit(pg_atomic_uint64 *sum, uint64 add, uint64 limit)
-{
-	uint64 old_sum;
-
-	/* CAS loop until successful or until new sum would be out of bounds */
-	old_sum = pg_atomic_read_u64(sum);
-	do
-	{
-		Assert(old_sum + add >= old_sum);  /* Check for unlikely overflow */
-		if (old_sum + add > limit)
-			return false;
-
-	} while (!pg_atomic_compare_exchange_u64(sum, &old_sum, old_sum + add));
-
-	return true;
-}
-
-
 
 #endif //POSTGRES_IDE_MEMTRACK_H

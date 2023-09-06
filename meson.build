@@ -320,7 +320,6 @@ else
   error('unknown host system: @0@'.format(host_system))
 endif
 
-cppflags += '-DEXEC_BACKEND'
 
 ###############################################################
 # Program paths

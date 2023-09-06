@@ -185,45 +185,6 @@ InitProcGlobal(void)
 	pg_atomic_init_u64(&ProcGlobal->global_dsm_allocation, 0);
 
 	/*
-	 * TODO: the following code probably belongs elsewhere.
-	 * (It doesn't have much to do with ProcGlobal)
-	 * Since it is closely tied to the shmem size calculations, one
-	 * likely place is in InitializeShmemGUCs. Another would be immediately after
-	 * InitializeShmemGUCs is called in PostmasterMain, PostgresSingleuserMain et al.
-	 */
-
-	/* Validate max backend memory limit if configured. Note it can never be negative. */
-	if (false && max_total_bkend_mem > 0)
-	{
-		int shared_memory_size;
-
-		/* We would like to use max_total_bkend_mem as bytes rather than MB */
-		max_total_bkend_bytes = (int64)max_total_bkend_mem * 1024 * 1024;
-
-		/* Get integer value of shared_memory_size if it parses */
-		shared_memory_size = 0;
-		if (!parse_int(GetConfigOption("shared_memory_size", true, false), &shared_memory_size, 0, NULL))
-			ereport(ERROR, errmsg("max_total_backend_memory initialization is unable to parse shared_memory_size"));
-
-		/*
-		 * Generate error if backend memory limit is less than shared
-		 * memory size. Warn on startup if backend memory available is
-		 * less than arbitrarily picked value of 100MB.
-		 */
-		if (max_total_bkend_mem <= shared_memory_size)
-			ereport(ERROR,
-					errmsg("configured max_total_backend_memory %dMB is <= shared_memory_size %dMB",
-						   max_total_bkend_mem, shared_memory_size),
-					errhint("Disable or increase the configuration parameter \"max_total_backend_memory\"."));
-
-		if (max_total_bkend_mem - shared_memory_size < 100)
-			ereport(WARNING,
-					errmsg("max_total_backend_memory %dMB - shared_memory_size %dMB is < 100MB",
-						   max_total_bkend_mem, shared_memory_size),
-					errhint("Consider increasing the configuration parameter \"max_total_backend_memory\"."));
-	}
-
-	/*
 	 * Create and initialize all the PGPROC structures we'll need.  There are
 	 * five separate consumers: (1) normal backends, (2) autovacuum workers
 	 * and the autovacuum launcher, (3) background workers, (4) auxiliary

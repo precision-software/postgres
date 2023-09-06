@@ -7,6 +7,10 @@
 #include "utils/memtrack.h"
 #include "storage/proc.h"
 
+/* Forward references */
+static inline void atomic_add(pg_atomic_uint64 *sum, int64 delta);
+static inline bool atomic_add_with_limit(pg_atomic_uint64 *sum, uint64 add, uint64 limit);
+
 /*
  * Max backend memory allocation allowed (MB). 0 = disabled.
  * Max backend bytes is the same but in bytes.
@@ -34,7 +38,6 @@ int64      allocation_upper_bound = 0;
 void
 init_backend_memory(void)
 {
-	return;
 	/* Start with nothing allocated. */
 	my_memory = INIT_BACKEND_MEMORY;
 	reported_memory = NO_BACKEND_MEMORY;
@@ -56,7 +59,6 @@ init_backend_memory(void)
 void
 exit_backend_memory(void)
 {
-	return;
 	/*
 	 * Release non-dsm memory.
 	 * We don't release dsm shared memory since it survives process exit.
@@ -88,26 +90,29 @@ bool update_global_allocation(int64 size, pg_allocator_type type)
 {
 	int64 delta;
 	int64 dsm_delta;
-	return true;
 
 	/* If we are still initializing, only update the private counters */
 	if (ProcGlobal == NULL || MyProcPid == 0)
 		return update_local_allocation(size, type);
 
-	/* Calculate # bytes being allocated or freed since last reported. */
+	/* Quick check to verify totals are not negative. Should never happen. */
+	Assert(atomic_load_u32(&ProcGlobal->total_bkend_mem_bytes) >= 0);
+	Assert(atomic_load_u32(&ProcGlobal->global_dsm_allocation) >= 0);
+
+	/* Calculate total bytes allocated or freed since last report */
 	delta = my_memory.allocated_bytes + size - reported_memory.allocated_bytes;
 
 	/* If reporting new memory allocated, and we are limited by max_total_bkend ... */
 	if (delta > 0 && max_total_bkend_bytes > 0 && MyAuxProcType == NotAnAuxProcess && MyProcPid != PostmasterPid)
 	{
 		/* Update the global total memory counter subject to the upper limit. */
-		if (!add_with_limit(&ProcGlobal->total_bkend_mem_bytes, delta, max_total_bkend_bytes))
+		if (!atomic_add_with_limit(&ProcGlobal->total_bkend_mem_bytes, delta, max_total_bkend_bytes))
 			return false;
 	}
 
 	/* Otherwise, update the global counter with no limit checking */
 	else
-		pg_atomic_fetch_add_u64(&ProcGlobal->total_bkend_mem_bytes, delta);
+		atomic_add(&ProcGlobal->total_bkend_mem_bytes, delta);
 
 	/* Update the private memory counters. This must happen after bounds checking */
 	update_local_allocation(size, type);
@@ -132,4 +137,46 @@ bool update_global_allocation(int64 size, pg_allocator_type type)
 	allocation_lower_bound = my_memory.allocated_bytes - allocation_allowance_refill_qty;
 
 	return true;
+}
+
+
+/*
+ * Add to an atomic sum as long as it doesn't exceed the limit.
+ * We are assuming reasonable values which are not going to overflow,
+ * but we include an assertion just in case.
+ */
+static inline bool
+atomic_add_with_limit(pg_atomic_uint64 *sum, uint64 add, uint64 limit)
+{
+	uint64 old_sum;
+	uint64 new_sum;
+
+	/* CAS loop until successful or until new sum would be out of bounds */
+	old_sum = pg_atomic_read_u64(sum);
+	do
+	{
+		new_sum = old_sum + add;
+		Assert(new_sum >= old_sum);  /* Check for unlikely overflow */
+		if (new_sum > limit)
+			return false;
+
+	} while (!pg_atomic_compare_exchange_u64(sum, &old_sum, new_sum));
+
+	return true;
+}
+
+
+/*
+ * Add a signed value to an atomic sum.
+ * While we can probably just use pg_atomic_fetch_add,
+ * the C standard doesn't guarantee negative values
+ * can be cast to unsigned.
+ */
+static inline void
+atomic_add(pg_atomic_uint64 *sum, int64 delta)
+{
+	if (delta < 0)
+		pg_atomic_fetch_sub_u64(sum, -delta);
+	else
+		pg_atomic_fetch_add_u64(sum, delta);
 }
