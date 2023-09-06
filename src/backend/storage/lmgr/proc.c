@@ -184,39 +184,42 @@ InitProcGlobal(void)
     pg_atomic_init_u64(&ProcGlobal->total_bkend_mem_bytes, 0);
 	pg_atomic_init_u64(&ProcGlobal->global_dsm_allocation, 0);
 
-	/* TODO: the following max_bkend code probably belongs elsewhere. */
+	/*
+	 * TODO: the following code probably belongs elsewhere.
+	 * (It doesn't have much to do with ProcGlobal)
+	 * Since it is closely tied to the shmem size calculations, one
+	 * likely place is in InitializeShmemGUCs. Another would be immediately after
+	 * InitializeShmemGUCs is called in PostmasterMain, PostgresSingleuserMain et al.
+	 */
 
-	/* We would like to use max_total_bkend_mem as bytes rather than MB */
-	max_total_bkend_bytes = (int64)max_total_bkend_mem * 1024 * 1024;
-
-	/* Setup backend memory limiting if configured */
-	if (max_total_bkend_mem != 0)
+	/* Validate max backend memory limit if configured. Note it can never be negative. */
+	if (false && max_total_bkend_mem > 0)
 	{
-		/*
-		 * Convert max_total_bkend_mem to bytes, account for
-		 * shared_memory_size, and initialize total_bkend_mem_bytes.
-		 */
-		int result = 0;
+		int shared_memory_size;
+
+		/* We would like to use max_total_bkend_mem as bytes rather than MB */
+		max_total_bkend_bytes = (int64)max_total_bkend_mem * 1024 * 1024;
 
 		/* Get integer value of shared_memory_size if it parses */
-		if (!parse_int(GetConfigOption("shared_memory_size", true, false), &result, 0, NULL))
+		shared_memory_size = 0;
+		if (!parse_int(GetConfigOption("shared_memory_size", true, false), &shared_memory_size, 0, NULL))
 			ereport(ERROR, errmsg("max_total_backend_memory initialization is unable to parse shared_memory_size"));
 
 		/*
-		 * Error on startup if backend memory limit is less than shared
+		 * Generate error if backend memory limit is less than shared
 		 * memory size. Warn on startup if backend memory available is
 		 * less than arbitrarily picked value of 100MB.
 		 */
-		if (max_total_bkend_mem <= result)
+		if (max_total_bkend_mem <= shared_memory_size)
 			ereport(ERROR,
 					errmsg("configured max_total_backend_memory %dMB is <= shared_memory_size %dMB",
-						   max_total_bkend_mem, result),
+						   max_total_bkend_mem, shared_memory_size),
 					errhint("Disable or increase the configuration parameter \"max_total_backend_memory\"."));
 
-		if (max_total_bkend_mem - result < 100)
+		if (max_total_bkend_mem - shared_memory_size < 100)
 			ereport(WARNING,
 					errmsg("max_total_backend_memory %dMB - shared_memory_size %dMB is < 100MB",
-						   max_total_bkend_mem, result),
+						   max_total_bkend_mem, shared_memory_size),
 					errhint("Consider increasing the configuration parameter \"max_total_backend_memory\"."));
 	}
 

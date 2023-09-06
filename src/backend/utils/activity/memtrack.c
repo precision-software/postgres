@@ -34,6 +34,7 @@ int64      allocation_upper_bound = 0;
 void
 init_backend_memory(void)
 {
+	return;
 	/* Start with nothing allocated. */
 	my_memory = INIT_BACKEND_MEMORY;
 	reported_memory = NO_BACKEND_MEMORY;
@@ -55,6 +56,7 @@ init_backend_memory(void)
 void
 exit_backend_memory(void)
 {
+	return;
 	/*
 	 * Release non-dsm memory.
 	 * We don't release dsm shared memory since it survives process exit.
@@ -86,6 +88,7 @@ bool update_global_allocation(int64 size, pg_allocator_type type)
 {
 	int64 delta;
 	int64 dsm_delta;
+	return true;
 
 	/* If we are still initializing, only update the private counters */
 	if (ProcGlobal == NULL || MyProcPid == 0)

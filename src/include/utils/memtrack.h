@@ -31,7 +31,7 @@
  *    reported_memory.allocated_bytes_by_type[type]:
  *
  * The "slow path" is invoked when my_memory.allocate_bytes exceeds these bounds.
- * Once invokked, it updates the reported values and sets new bounds.
+ * Once invoked, it updates the reported values and sets new bounds.
  *   allocation_upper_bound:          update when my_memory.allocated_bytes exceeds this
  *   allocation_lower_bound:          update when my_memory.allocated_bytes drops below this
  *   allocation_allowance_refill_qty  amount of memory to allocate or release before updating again.
