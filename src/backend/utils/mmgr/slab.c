@@ -69,8 +69,8 @@
 #include "postgres.h"
 
 #include "lib/ilist.h"
-#include "utils/backend_status.h"
 #include "utils/memdebug.h"
+#include "utils/memtrack.h"
 #include "utils/memutils.h"
 #include "utils/memutils_memorychunk.h"
 #include "utils/memutils_internal.h"
@@ -486,10 +486,7 @@ SlabDelete(MemoryContext context)
 	/* Reset to release all the SlabBlocks */
 	SlabReset(context);
 
-	/*
-	 * Until context header allocation is included in context->mem_allocated,
-	 * cast to slab and decrement the header allocation
-	 */
+	/* And free the context header */
 	free_backend(context, Slab_CONTEXT_HDRSZ(((SlabContext *) context)->chunksPerBlock),
 				 PG_ALLOC_SLAB);
 }
