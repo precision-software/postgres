@@ -29,6 +29,7 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(test_memtrack);
 PG_FUNCTION_INFO_V1(test_allocation);
 
+/* Message sent to the worker */
 typedef enum {ALLOCATE, RELEASE} Action;
 typedef struct AllocateRequest
 {
@@ -39,6 +40,7 @@ typedef struct AllocateRequest
 	int64     blockSize;
 } AllocateRequest;
 
+/* Message received back from the worker */
 typedef struct ResponseData
 {
 	int32		errorCode;
@@ -52,7 +54,7 @@ static bool releaseBlocks(pg_allocator_type type, int nBlocks, int blockSize);
 static void validateArgs(int nWorkers, pg_allocator_type type, int nBlocks, int blockSize);
 static void sendRequest(WorkerPool *pool, int worker, Action action, pg_allocator_type type, int nBlocks, int blockSize);
 static void processReply(WorkerPool *pool, int worker, Action actions, pg_allocator_type type, int nBlocks, int blockSize);
-static Datum test_nonDSM(FunctionCallInfo fcinfo, char *workerFunction);
+static Datum exercise_worker(FunctionCallInfo fcinfo, char *workerFunction);
 
 /* Test the memory tracking features standalone */
 PGDLLEXPORT Datum test_memtrack(PG_FUNCTION_ARGS);
@@ -67,25 +69,24 @@ PGDLLEXPORT void test_allocation_worker(Datum arg);
 Datum
 test_memtrack(PG_FUNCTION_ARGS)
 {
-	return test_nonDSM(fcinfo, "test_memtrack_worker");
+	return exercise_worker(fcinfo, "test_memtrack_worker");
 }
 
 
 Datum
 test_allocation(PG_FUNCTION_ARGS)
 {
-	return test_nonDSM(fcinfo, "test_allocation_worker");
+	return exercise_worker(fcinfo, "test_allocation_worker");
 }
 
 
 
-/****************
- * Parent task to test the memory tracking features.
- * Schedules a pool of workers and verifies the results.
- * This version tests non-shared memory allocations.
+/*
+ * Test the memory tracking features
+ * Creates a pool of workers, issues requests, and verifies the results.
  */
 static
-Datum test_nonDSM(FunctionCallInfo fcinfo, char *workerFunction)
+Datum exercise_worker(FunctionCallInfo fcinfo, char *workerFunction)
 {
 	WorkerPool *pool;
 	int64 delta, starting_bkend_bytes;
@@ -146,6 +147,9 @@ Datum test_nonDSM(FunctionCallInfo fcinfo, char *workerFunction)
 }
 
 
+/*
+ * Verify the arguments passed to the SQL function are valid.
+ */
 static
 void validateArgs(int nWorkers, pg_allocator_type type, int nBlocks, int blockSize)
 {
@@ -174,6 +178,9 @@ void validateArgs(int nWorkers, pg_allocator_type type, int nBlocks, int blockSi
 					errmsg("invalid allocation type")));
 }
 
+/*
+ * Send a request message to a worker.
+ */
 static
 void sendRequest(WorkerPool *pool, int worker, Action action, pg_allocator_type type, int nBlocks, int blockSize)
 {
@@ -190,6 +197,9 @@ void sendRequest(WorkerPool *pool, int worker, Action action, pg_allocator_type 
 }
 
 
+/*
+ * Receive a reply from a worker and verify the results make sense.
+ */
 void processReply(WorkerPool *pool, int worker, Action action, pg_allocator_type type, int nBlocks, int blockSize)
 {
         int64 delta;
@@ -223,7 +233,9 @@ void processReply(WorkerPool *pool, int worker, Action action, pg_allocator_type
 }
 
 
-
+/*
+ * Worker which bumps the memtrack counters without actually allocating anything.
+ */
 void test_memtrack_worker(Datum arg)
 {
 	AllocateRequest *req;
@@ -285,13 +297,6 @@ bool releaseBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 	return true;
 }
 
-
-
-/***************
- * Worker which allocates and frees blocks,
- * but this one does actual allocations.
- */
-
 /* Forward references for the allocation worker */
 static bool freeBlocks(pg_allocator_type type, int nBlocks, int blockSize);
 static MemoryContext createTestContext(pg_allocator_type type);
@@ -307,6 +312,9 @@ static void **allocations;
 static MemoryContext testContext;
 
 
+/*
+ * Worker which actually allocates and releases memory.
+ */
 void test_allocation_worker(Datum arg)
 {
 	AllocateRequest *req;
@@ -368,7 +376,9 @@ static bool freeBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 
 
 
-
+/*
+ * Create a memory context for the non-DSM memory allocations.
+ */
 static
 MemoryContext createTestContext(pg_allocator_type type)
 {
@@ -386,6 +396,9 @@ MemoryContext createTestContext(pg_allocator_type type)
 }
 
 
+/*
+ * Allocate blocks of memory from a non-DSM context.
+ */
 static
 bool allocateContextBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 {
@@ -419,9 +432,12 @@ bool allocateContextBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 	MemoryContextSwitchTo(old);
 
 	return true;
-	}
+}
 
 
+/*
+ * Free blocks of memory allocated earlier
+ */
 static
 bool freeContextBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 {
@@ -436,8 +452,9 @@ bool freeContextBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 }
 
 
-
-
+/*
+ * Allocate blocks of memory from DSM
+ */
 static bool allocateDSMBlocks(int nBlocks, int blockSize)
 {
 
@@ -457,6 +474,9 @@ static bool allocateDSMBlocks(int nBlocks, int blockSize)
 }
 
 
+/*
+ * Free blocks of DSM memory allocated earlier
+ */
 static bool freeDSMBlocks(int nBlocks, int blockSize)
 {
 	for (int i = 0; i < nBlocks; i++)
