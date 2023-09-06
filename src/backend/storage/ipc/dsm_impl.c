@@ -155,10 +155,10 @@ int			min_dynamic_shared_memory;
  * silently return false.
  *-----
  */
-bool
-dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
-			void **impl_private, void **mapped_address, Size *mapped_size,
-			int elevel)
+static bool
+original_dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
+					 void **impl_private, void **mapped_address, Size *mapped_size,
+					 int elevel)
 {
 	Assert(op == DSM_OP_CREATE || request_size == 0);
 	Assert((op != DSM_OP_CREATE && op != DSM_OP_ATTACH) ||
@@ -1050,4 +1050,52 @@ errcode_for_dynamic_shared_memory(void)
 		return errcode(ERRCODE_OUT_OF_MEMORY);
 	else
 		return errcode_for_file_access();
+}
+
+/*
+* A Wrapper around the original dsm_impl_op function.
+* The wrapper is responsible for tracking backend memory,
+* but otherwise it stays out of the way as much
+* as possible.
+*/
+bool
+dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
+			void **impl_private, void **mapped_address, Size *mapped_size,
+			int elevel)
+{
+	bool success;
+	Size save_mapped_size;
+
+	/*
+	 * If creating a new segment, try to reserve memory first
+	 */
+	if (op == DSM_OP_CREATE && !reserve_backend_memory(request_size, PG_ALLOC_DSM))
+	{
+		ereport(elevel,  /* Add hint about max_bkend */
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+					errmsg("Unable to reserve backend memory for dynamic shared memory segment.")));
+		return false;
+	}
+
+	/* Do the actual work. Some of the operations clear *mapped_size, so we save it first */
+	save_mapped_size = *mapped_size;
+	success = original_dsm_impl_op(op, handle, request_size, impl_private, mapped_address, mapped_size, elevel);
+
+	/*
+	 * Update the memory reservation based on the outcome
+	 */
+
+	/* CASE: we failed to create a new segment. Release the reservation */
+	if (!success && op == DSM_OP_CREATE )
+		release_backend_memory(request_size, PG_ALLOC_DSM);
+
+	/* CASE: we created a different size than expected. Record the change, but don't abort */
+	else if (success && op == DSM_OP_CREATE && *mapped_size != request_size)
+		update_local_allocation(*mapped_size - request_size, PG_ALLOC_DSM);
+
+	/* CASE: we sucessfully destroyed a segment. Release the reservation */
+	else if (success && op == DSM_OP_DESTROY)
+		release_backend_memory(save_mapped_size, PG_ALLOC_DSM);
+
+	return success;
 }

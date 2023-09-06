@@ -359,4 +359,29 @@ InitializeShmemGUCs(void)
 		SetConfigOption("shared_memory_size_in_huge_pages", buf,
 						PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
 	}
+
+	/*
+	 * Validating the backend memory limit GUC depends on knowing the size of
+	 * shared memory. This is the first place where we know the size of shmem,
+	 * so it is also the first place we can validate the backend memory limit.
+	 */
+     if (max_total_bkend_mem > 0)
+	 {
+		 /* Error if backend memory limit is less than shared memory size */
+		 if (max_total_bkend_mem <= size_mb)
+			 ereport(ERROR,
+					 errmsg("configured max_total_backend_memory %dMB is <= shared_memory_size %ldMB",
+							max_total_bkend_mem, size_mb),
+					 errhint("Disable or increase the configuration parameter \"max_total_backend_memory\"."));
+
+		 /* Warning if less than 100MB available for non-shared memory */
+		 if (max_total_bkend_mem - size_mb < 100)
+			 ereport(WARNING,
+					 errmsg("max_total_backend_memory %dMB - shared_memory_size %ldMB is < 100MB",
+							max_total_bkend_mem, size_mb),
+					 errhint("Consider increasing the configuration parameter \"max_total_backend_memory\"."));
+
+		 /* We prefer to use max_total_bkend_mem as bytes rather than MB */
+		 max_total_bkend_bytes = (int64)max_total_bkend_mem * 1024 * 1024;
+	 }
 }
