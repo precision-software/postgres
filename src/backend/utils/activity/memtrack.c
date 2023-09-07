@@ -15,7 +15,7 @@ static inline bool atomic_add_with_limit(pg_atomic_uint64 *sum, uint64 add, uint
  * Max backend bytes is the same but in bytes.
  * These default to "0", meaning don't check bounds for total memory.
  */
-int			max_total_bkend_mem = 0;
+int			max_total_memory_mb = 0;
 int64       max_total_bkend_bytes = 0;
 
 /*
@@ -67,7 +67,7 @@ exit_backend_memory(void)
 			release_backend_memory(my_memory.allocated_bytes_by_type[type], type);
 
 	/* Force the final values to be posted to shmem */
-	update_global_allocation(0, PG_ALLOC_OTHER);
+	update_global_allocation(0, PG_ALLOC_INIT);
 
 	/* If we get a late request, send it to the long path. */
 	allocation_lower_bound = 0;
@@ -99,7 +99,7 @@ bool update_global_allocation(int64 size, pg_allocator_type type)
 		return update_local_allocation(size, type);
 
 	/* Quick check to verify totals are not negative. Should never happen. */
-	Assert((int64)atomic_load_u64(&ProcGlobal->total_bkend_mem_bytes) >= 0);
+	Assert((int64)atomic_load_u64(&ProcGlobal->total_memory_bytes) >= 0);
 	Assert((int64)atomic_load_u64(&ProcGlobal->global_dsm_allocation) >= 0);
 
 	/* Calculate total bytes allocated or freed since last report */
@@ -109,7 +109,7 @@ bool update_global_allocation(int64 size, pg_allocator_type type)
 	if (delta > 0 && max_total_bkend_bytes > 0 && MyAuxProcType == NotAnAuxProcess && MyProcPid != PostmasterPid)
 	{
 		/* Update the global total memory counter subject to the upper limit. */
-		if (!atomic_add_with_limit(&ProcGlobal->total_bkend_mem_bytes, delta, max_total_bkend_bytes))
+		if (!atomic_add_with_limit(&ProcGlobal->total_memory_bytes, delta, max_total_bkend_bytes))
 			return false;
 	}
 
@@ -117,7 +117,7 @@ bool update_global_allocation(int64 size, pg_allocator_type type)
 	 * Otherwise, update the global counter with no limit checking.
 	 */
 	else
-		pg_atomic_fetch_add_u64(&ProcGlobal->total_bkend_mem_bytes, delta);
+		pg_atomic_fetch_add_u64(&ProcGlobal->total_memory_bytes, delta);
 
 	/* Update the private memory counters. This must happen after bounds checking */
 	update_local_allocation(size, type);

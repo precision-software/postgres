@@ -2159,7 +2159,7 @@ include_dir 'conf.d'
         max_total_backend_memory is reduced by shared_memory_size_mb
         (includes shared buffers and other memory required for initialization).
         Each backend process is intialized with a 1MB local allowance which
-        also reduces total_bkend_mem_bytes_available. Keep this in mind when
+        also reduces total_memory_bytes_available. Keep this in mind when
         setting this value. A backend request that would exhaust the limit will
         be denied with an out of memory error causing that backend's current
         query/transaction to fail. Further requests will not be allocated until

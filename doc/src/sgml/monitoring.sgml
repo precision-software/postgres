@@ -4712,17 +4712,17 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>total_bkend_mem_bytes_available</structfield> <type>bigint</type>
+       <structfield>total_memory_bytes_available</structfield> <type>bigint</type>
       </para>
      <para>
       Tracks max_total_backend_memory (in bytes) available for allocation. At
-      database startup, total_bkend_mem_bytes_available is reduced by the
+      database startup, total_memory_bytes_available is reduced by the
       byte equivalent of shared_memory_size_mb. Each backend process is
       intialized with a 1MB local allowance which also reduces
-      total_bkend_mem_bytes_available. A process's allocation requests reduce
+      total_memory_bytes_available. A process's allocation requests reduce
       it's local allowance. If a process's allocation request exceeds it's
       remaining allowance, an attempt is made to refill the local allowance
-      from total_bkend_mem_bytes_available. If the refill request fails, then
+      from total_memory_bytes_available. If the refill request fails, then
       the requesting process will fail with an out of memory error resulting
       in the cancellation of that process's active query/transaction.  The
       default refill allocation quantity is 1MB.  If a request is greater than

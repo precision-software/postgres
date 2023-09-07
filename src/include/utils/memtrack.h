@@ -41,7 +41,7 @@
  *   proc->st_memory.allocated_bytes_by_type[type]: last reported subtotals reported to pgstat
  *
  * Limits on total backend memory. If max_total_bkend_bytes is zero, there is no limit.
- *   ProcGlobal->total_bkend_mem_bytes:       total amount of memory reserved by all backends, including shared memory
+ *   ProcGlobal->total_memory_bytes:       total amount of memory reserved by all backends, including shared memory
  *   max_total_bkend_bytes:                   maximum amount of memory allowed to be reserved by all backends.
  *
  * And finally,
@@ -58,7 +58,7 @@
 /* Various types of memory allocators we are tracking. */
 typedef enum pg_allocator_type
 {
-	PG_ALLOC_OTHER = 0,    /* Not tracked, but part of total memory */
+	PG_ALLOC_INIT = 0,    /* Not tracked, but part of total memory */
 	PG_ALLOC_ASET,         /* Allocation Set           */
 	PG_ALLOC_DSM,          /* Dynamic shared memory    */
 	PG_ALLOC_GENERATION,   /* Generation Context (all freed at once) */
@@ -98,7 +98,7 @@ extern PGDLLIMPORT int64 allocation_upper_bound;
 extern PGDLLIMPORT int64 allocation_lower_bound;
 
 extern PGDLLIMPORT int64 max_total_bkend_bytes;
-extern PGDLLIMPORT int32 max_total_bkend_mem;
+extern PGDLLIMPORT int32 max_total_memory_mb;
 
 /* These are the main entry points for backend memory accounting */
 extern void init_backend_memory(void);

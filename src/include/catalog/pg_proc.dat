@@ -5435,7 +5435,7 @@
   provolatile => 's', proparallel => 'r', prorettype => 'record',
   proargtypes => '', proallargtypes => '{oid,int8,int8}',
   proargmodes => '{o,o,o}',
-  proargnames => '{datid,total_bkend_mem_bytes_available,global_dsm_allocated_bytes}',
+  proargnames => '{datid,total_memory_bytes_available,global_dsm_allocated_bytes}',
   prosrc =>'pg_stat_get_global_memory_allocation' },
 { oid => '2022',
   descr => 'statistics: information about currently active backends',

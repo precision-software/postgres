@@ -407,7 +407,7 @@ typedef struct PROC_HDR
 	/* Global dsm allocations */
 	pg_atomic_uint64 global_dsm_allocation;
 	/* Track how much memory the backends have allocated */
-	pg_atomic_uint64 total_bkend_mem_bytes;
+	pg_atomic_uint64 total_memory_bytes;
 } PROC_HDR;
 
 extern PGDLLIMPORT PROC_HDR *ProcGlobal;

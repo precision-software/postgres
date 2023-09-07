@@ -3503,7 +3503,7 @@ struct config_int ConfigureNamesInt[] =
 			gettext_noop("0 turns this feature off."),
 			GUC_UNIT_MB
 		},
-		&max_total_bkend_mem,
+		&max_total_memory_mb,
 		0, 0, INT_MAX,
 		NULL, NULL, NULL
 	},

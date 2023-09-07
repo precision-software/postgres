@@ -109,7 +109,7 @@ Datum exercise_worker(FunctionCallInfo fcinfo, char *workerFunction)
 							"test_memtrack", workerFunction);
 
 	/* Remember the total memory before we start allocations */
-	starting_bkend_bytes = pg_atomic_read_u32((void *)&ProcGlobal->total_bkend_mem_bytes);
+	starting_bkend_bytes = pg_atomic_read_u32((void *)&ProcGlobal->total_memory_bytes);
 
 	/* Tell the workers to start their first batch of allocations */
 	for (int w = 0; w < nWorkers; w++)
@@ -120,7 +120,7 @@ Datum exercise_worker(FunctionCallInfo fcinfo, char *workerFunction)
 	    processReply(pool, w, ALLOCATE, type, nBlocks, blockSize);
 
 	/* Confirm the total backend memory is greater than what we just allocated */
-	delta = pg_atomic_read_u32((void *)&ProcGlobal->total_bkend_mem_bytes) - starting_bkend_bytes;
+	delta = pg_atomic_read_u32((void *)&ProcGlobal->total_memory_bytes) - starting_bkend_bytes;
 	if (delta < expected - fudge || delta > expected + fudge)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -135,7 +135,7 @@ Datum exercise_worker(FunctionCallInfo fcinfo, char *workerFunction)
 		processReply(pool, w, RELEASE, type, nBlocks, blockSize);
 
 	/* Verify the new total is reasonable */
-	delta = pg_atomic_read_u32((void *)&ProcGlobal->total_bkend_mem_bytes) - starting_bkend_bytes;
+	delta = pg_atomic_read_u32((void *)&ProcGlobal->total_memory_bytes) - starting_bkend_bytes;
 	if (delta < -fudge || delta > fudge)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -404,7 +404,7 @@ bool allocateContextBlocks(pg_allocator_type type, int nBlocks, int blockSize)
 {
 	MemoryContext old;
 
-	if (type == PG_ALLOC_DSM || type == PG_ALLOC_OTHER)
+	if (type == PG_ALLOC_DSM || type == PG_ALLOC_INIT)
 	    return false;
 
 	/* Create a memory context for the allocations */

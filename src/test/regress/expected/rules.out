@@ -1884,14 +1884,14 @@ pg_stat_global_memory_allocation| WITH sums AS (
     current_setting('shared_memory_size'::text, true) AS shared_memory_size,
     (current_setting('shared_memory_size_in_huge_pages'::text, true))::integer AS shared_memory_size_in_huge_pages,
     pg_size_bytes(current_setting('max_total_backend_memory'::text, true)) AS max_total_backend_memory_bytes,
-    s.total_bkend_mem_bytes_available,
+    s.total_memory_bytes_available,
     s.global_dsm_allocated_bytes,
     sums.total_aset_allocated_bytes,
     sums.total_dsm_allocated_bytes,
     sums.total_generation_allocated_bytes,
     sums.total_slab_allocated_bytes
    FROM sums,
-    (pg_stat_get_global_memory_allocation() s(datid, total_bkend_mem_bytes_available, global_dsm_allocated_bytes)
+    (pg_stat_get_global_memory_allocation() s(datid, total_memory_bytes_available, global_dsm_allocated_bytes)
      LEFT JOIN pg_database d ON ((s.datid = d.oid)));
 pg_stat_gssapi| SELECT pid,
     gss_auth AS gss_authenticated,

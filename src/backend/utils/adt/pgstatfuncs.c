@@ -2138,7 +2138,7 @@ pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
 	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "datid",
 					   OIDOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "total_bkend_mem_bytes_available",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "total_memory_bytes_available",
 					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "global_dsm_allocated_bytes",
 					   INT8OID, -1, 0);
@@ -2147,8 +2147,8 @@ pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
 	/* datid */
 	values[0] = ObjectIdGetDatum(MyDatabaseId);
 
-	/* Get total_bkend_mem_bytes */
-	values[1] = Int64GetDatum(pg_atomic_read_u64(&procglobal->total_bkend_mem_bytes));
+	/* Get total_memory_bytes */
+	values[1] = Int64GetDatum(pg_atomic_read_u64(&procglobal->total_memory_bytes));
 
 	/* Get global_dsm_allocated_bytes */
 	values[2] = Int64GetDatum(pg_atomic_read_u64(&procglobal->global_dsm_allocation));
