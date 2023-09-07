@@ -1372,7 +1372,7 @@ SELECT
         S.datid AS datid,
         current_setting('shared_memory_size', true) as shared_memory_size,
         (current_setting('shared_memory_size_in_huge_pages', true))::integer as shared_memory_size_in_huge_pages,
-        pg_size_bytes(current_setting('max_total_backend_memory', true)) as max_total_backend_memory_bytes,
+        pg_size_bytes(current_setting('max_total_memory', true)) as max_total_memory_bytes,
         S.total_memory_bytes_available,
         S.global_dsm_allocated_bytes,
         sums.total_aset_allocated_bytes,

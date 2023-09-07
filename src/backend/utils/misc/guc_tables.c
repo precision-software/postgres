@@ -3498,7 +3498,7 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"max_total_backend_memory", PGC_SU_BACKEND, RESOURCES_MEM,
+		{"max_total_memory", PGC_SU_BACKEND, RESOURCES_MEM,
 			gettext_noop("Restrict total backend memory allocations to this max."),
 			gettext_noop("0 turns this feature off."),
 			GUC_UNIT_MB

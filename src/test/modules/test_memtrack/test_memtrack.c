@@ -1,7 +1,7 @@
 /*--------------------------------------------------------------------------
  *
  * test_memstack.c
- *		Test harness code
+ *		Testing the memory tracking features.
  *
  * Copyright (c) 2013-2023, PostgreSQL Global Development Group
  *

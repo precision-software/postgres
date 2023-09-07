@@ -1,3 +1,17 @@
+/*-------------------------------------------------------------------------
+ *
+ * memtrack.c
+ *	  track and manage memory usage by the PostgreSQL server.
+ *
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
+ *
+ *
+ * IDENTIFICATION
+ *	  src/backend/utils/activity/memtrack.c
+ *
+ *-------------------------------------------------------------------------
+ */
 
 #include <unistd.h>
 

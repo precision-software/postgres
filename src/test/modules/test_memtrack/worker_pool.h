@@ -1,8 +1,8 @@
-/*
- * Implement a pool of workers that can be used to perform work in parallel.
+/* -------------------------------------------------------------------------
+ * Implement a pool of workers which can be used to perform work in parallel.
  * This version is derived from the postgres test_shm_mq module, but it is
  * intended to be more general purpose. Besides being useful for running
- * tests, it could eventually replace the current implementation of parallel query.
+ * tests, it could eventually integrate with the implementation of parallel query.
  * For now, it is just a piece of infrastructure for running parallel tests.
  *
  * The worker pool is created by the owner process. It creates a shared memory
@@ -32,11 +32,10 @@
  * If the workers don't exit on their own, they will be terminated when
  * the owner calls freeWorkerPool.
  *
- * Currently, the worker entry point is passed as the name of a procedure
- * and the name of a shared library.
- * Future updates may allow the worker to be specified as function pointer
- * in the main postgres executable.
- */
+ * Currently, the worker entry point is passed as the text name of a procedure
+ * and the text name of a shared library. If the library name is "postgres",
+ * then the procedure is assumed to be in the main postgres executable.
+ * --------------------------------------------------------------------------- */
 
 #ifndef WORKER_POOL_H
 #define WORKER_POOL_H

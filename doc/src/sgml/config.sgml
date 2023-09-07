@@ -2145,10 +2145,10 @@ include_dir 'conf.d'
       </listitem>
      </varlistentry>
 
-     <varlistentry id="guc-max-total-backend-memory" xreflabel="max_total_backend_memory">
-      <term><varname>max_total_backend_memory</varname> (<type>integer</type>)
+     <varlistentry id="guc-max-total-backend-memory" xreflabel="max_total_memory">
+      <term><varname>max_total_memory</varname> (<type>integer</type>)
       <indexterm>
-       <primary><varname>max_total_backend_memory</varname> configuration parameter</primary>
+       <primary><varname>max_total_memory</varname> configuration parameter</primary>
       </indexterm>
       </term>
       <listitem>
@@ -2156,7 +2156,7 @@ include_dir 'conf.d'
         Specifies a limit to the amount of memory (MB) that may be allocated to
         backends in total (i.e. this is not a per user or per backend limit).
         If unset, or set to 0 it is disabled.  At databse startup
-        max_total_backend_memory is reduced by shared_memory_size_mb
+        max_total_memory is reduced by shared_memory_size_mb
         (includes shared buffers and other memory required for initialization).
         Each backend process is intialized with a 1MB local allowance which
         also reduces total_memory_bytes_available. Keep this in mind when

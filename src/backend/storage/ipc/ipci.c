@@ -370,16 +370,16 @@ InitializeShmemGUCs(void)
 		 /* Error if backend memory limit is less than shared memory size */
 		 if (max_total_memory_mb <= size_mb)
 			 ereport(ERROR,
-					 errmsg("configured max_total_backend_memory %dMB is <= shared_memory_size %ldMB",
+					 errmsg("configured max_total_memory %dMB is <= shared_memory_size %ldMB",
 							max_total_memory_mb, size_mb),
-					 errhint("Disable or increase the configuration parameter \"max_total_backend_memory\"."));
+					 errhint("Disable or increase the configuration parameter \"max_total_memory\"."));
 
 		 /* Warning if less than 100MB available for non-shared memory */
 		 if (max_total_memory_mb - size_mb < 100)
 			 ereport(WARNING,
-					 errmsg("max_total_backend_memory %dMB - shared_memory_size %ldMB is < 100MB",
+					 errmsg("max_total_memory %dMB - shared_memory_size %ldMB is < 100MB",
 							max_total_memory_mb, size_mb),
-					 errhint("Consider increasing the configuration parameter \"max_total_backend_memory\"."));
+					 errhint("Consider increasing the configuration parameter \"max_total_memory\"."));
 
 		 /* We prefer to use max_total_memory_mb as bytes rather than MB */
 		 max_total_bkend_bytes = (int64)max_total_memory_mb * 1024 * 1024;

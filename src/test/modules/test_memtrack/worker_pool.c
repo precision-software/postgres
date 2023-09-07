@@ -1,6 +1,17 @@
-//
-// Created by John Morris on 8/18/23.
-//
+/*-------------------------------------------------------------------------
+ *
+ * worker_pool.c
+ *	  create a pool of workers for parallel testing.
+ *
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
+ *
+ *
+ * IDENTIFICATION
+ *	  src/test/modules/test_memtrack/worker_pool.c
+ *
+ *-------------------------------------------------------------------------
+ */
 
 
 #include "postgres.h"

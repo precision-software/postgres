@@ -4701,7 +4701,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>max_total_backend_memory_bytes</structfield> <type>bigint</type>
+       <structfield>max_total_memory_bytes</structfield> <type>bigint</type>
       </para>
      <para>
       Reports the user defined backend maximum allowed shared memory in bytes.
@@ -4715,7 +4715,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>total_memory_bytes_available</structfield> <type>bigint</type>
       </para>
      <para>
-      Tracks max_total_backend_memory (in bytes) available for allocation. At
+      Tracks max_total_memory (in bytes) available for allocation. At
       database startup, total_memory_bytes_available is reduced by the
       byte equivalent of shared_memory_size_mb. Each backend process is
       intialized with a 1MB local allowance which also reduces
@@ -4727,7 +4727,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       in the cancellation of that process's active query/transaction.  The
       default refill allocation quantity is 1MB.  If a request is greater than
       1MB, an attempt will be made to allocate the full amount. If
-      max_total_backend_memory is disabled, this will be -1.
+      max_total_memory is disabled, this will be -1.
       <xref linkend="guc-max-total-backend-memory"/>.
      </para></entry>
      </row>
