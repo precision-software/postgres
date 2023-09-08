@@ -2153,18 +2153,19 @@ include_dir 'conf.d'
       </term>
       <listitem>
        <para>
-        Specifies a limit to the amount of memory (MB) that may be allocated to
-        backends in total (i.e. this is not a per user or per backend limit).
-        If unset, or set to 0 it is disabled.  At database startup
+        Specifies a limit to the total amount of memory (MB) that may be allocated to
+        the postgres server. (i.e. this is not a per user or per backend limit).
+        If unset, or set to 0 it is disabled.  At database startup,
         max_total_memory is reduced by shared_memory_size
         (includes shared buffers and other memory required for initialization).
-        Each backend process is intialized with a 1MB local allowance which
-        also reduces total_memory_bytes_available. Keep this in mind when
-        setting this value. A backend request that would exhaust the limit will
-        be denied with an out of memory error causing that backend's current
+        Since each backend process is assumed to consume 1 MB of memory simply by existing,
+        it is important to consider max_connections when setting this value.
+        <para>
+        Any backend request that would exhaust the limit will
+        be denied with an out of memory error, causing that backend's current
         query/transaction to fail. Further requests will not be allocated until
-        dropping below the limit.  This limit does not affect auxiliary backend
-        processes
+        total memory used drops below the limit.  This limit does not affect auxiliary backend
+        processes.
         <xref linkend="glossary-auxiliary-proc"/> or the postmaster process.
         Backend memory allocations (<varname>allocated_bytes</varname>) are
         displayed in the

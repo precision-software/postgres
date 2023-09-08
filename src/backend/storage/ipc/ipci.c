@@ -51,6 +51,9 @@
 #include "utils/snapmgr.h"
 #include "utils/wait_event.h"
 
+/* forward reference */
+inline static Size asMB(int64 bytes);
+
 /* GUCs */
 int			shared_memory_type = DEFAULT_SHARED_MEMORY_TYPE;
 
@@ -336,6 +339,8 @@ InitializeShmemGUCs(void)
 	Size		size_b;
 	Size		size_mb;
 	Size		hp_size;
+	Size 		connection_memory_mb;
+	Size		required_mb;
 
 	/*
 	 * Calculate the shared memory size and round up to the nearest megabyte.
@@ -374,14 +379,25 @@ InitializeShmemGUCs(void)
 							max_total_memory_mb, size_mb),
 					 errhint("Disable or increase the configuration parameter \"max_total_memory\"."));
 
+		 /* Decide how much memory is needed to support the connections. */
+		 connection_memory_mb = asMB(MaxBackends * (initial_allocation_allowance + allocation_allowance_refill_qty));
+		 required_mb = size_mb + connection_memory_mb;
+
 		 /* Warning if less than 100MB available for non-shared memory */
-		 if (max_total_memory_mb - size_mb < 100)
+		 if (max_total_memory_mb - size_mb < connection_memory_mb)
 			 ereport(WARNING,
-					 errmsg("max_total_memory %dMB - shared_memory_size %ldMB is < 100MB",
-							max_total_memory_mb, size_mb),
+					 errmsg("max_total_memory %dMB needs to be increased to at least %ld to support %d connections",
+							max_total_memory_mb, required_mb, MaxBackends),
 					 errhint("Consider increasing the configuration parameter \"max_total_memory\"."));
 
 		 /* We prefer to use max_total_memory_mb as bytes rather than MB */
 		 max_total_memory_bytes = (int64)max_total_memory_mb * 1024 * 1024;
 	 }
+}
+
+
+/* Convert size in bytes to size in MB, rounding up. */
+inline static Size asMB(int64 bytes)
+{
+	return (int)( (bytes + 1024*1024  - 1)/ (1024 * 1024));
 }

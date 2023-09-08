@@ -14,6 +14,12 @@
  * hard postmaster crash, remaining segments will be removed, if they
  * still exist, at the next postmaster startup.
  *
+ * When invoking the low level functions, the caller must correctly
+ * set "request_size" when creating and destroying segments.
+ * This value is needed for for tracking server memory utilization.
+ * To provide the size on "destroy", the orginal creation size is saved
+ * in the dsm control structure.
+ *
  * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
