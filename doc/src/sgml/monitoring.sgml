@@ -4533,7 +4533,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    The <structname>pg_stat_memory_allocation</structname> view will have one
    row per server process, showing information related to the current memory
    allocation of that process in total and by allocator type. Due to the
-   dynamic nature of memory allocations the allocated bytes values may not be
+   dynamic nature of memory allocations, the allocated bytes values may not be
    exact but should be sufficient for the intended purposes. Dynamic shared
    memory allocations are included only in the value displayed for the backend
    that created them, they are not included in the value for backends that are
@@ -4645,9 +4645,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
   <para>
    The <structname>pg_stat_global_memory_allocation</structname> view will
-   have one row showing information related to current shared memory
-   allocations. Due to the dynamic nature of memory allocations the allocated
-   bytes values may not be exact but should be sufficient for the intended
+   have one row showing two values: total_memory_used and dsm_memory_used.
+   Due to the dynamic nature of memory allocations, the
+   values may not be exact but should be sufficient for the intended
    purposes. Use <function>pg_size_pretty</function> described in
    <xref linkend="functions-admin-dbsize"/> to make the byte populated values
    more easily readable.
@@ -4679,119 +4679,42 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>shared_memory_size_mb</structfield> <type>integer</type>
-      </para>
-      <para>
-       Reports the size of the main shared memory area, rounded up to the
-       nearest megabyte. See <xref linkend="guc-shared-memory-size"/>.
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>shared_memory_size_in_huge_pages</structfield> <type>bigint</type>
+       <structfield>total_memory_used</structfield> <type>bigint</type>
       </para>
      <para>
-      Reports the number of huge pages that are needed for the main shared
-      memory area based on the specified huge_page_size. If huge pages are not
-      supported, this will be -1. See
-      <xref linkend="guc-shared-memory-size-in-huge-pages"/>.
-     </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>max_total_memory_bytes</structfield> <type>bigint</type>
-      </para>
-     <para>
-      Reports the user defined backend maximum allowed shared memory in bytes.
-      0 if disabled or not set. See
+      Reports the total amount of memory (in bytes) currently used by the server.
+      This total includes shared memory segments, actual memory
+      allocated by the server, along with a fixed amount of memory
+      for each server process. Due to the dynamic nature of memory allocation,
+      this total is not exact, but it should be sufficient for monitoring purposes.
       <xref linkend="guc-max-total-backend-memory"/>.
      </para></entry>
      </row>
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>total_memory_bytes_available</structfield> <type>bigint</type>
+       <structfield>dsm_memory_used</structfield> <type>bigint</type>
       </para>
      <para>
-      Tracks max_total_memory (in bytes) available for allocation. At
-      database startup, total_memory_bytes_available is reduced by the
-      byte equivalent of shared_memory_size_mb. Each backend process is
-      intialized with a 1MB local allowance which also reduces
-      total_memory_bytes_available. A process's allocation requests reduce
-      it's local allowance. If a process's allocation request exceeds it's
-      remaining allowance, an attempt is made to refill the local allowance
-      from total_memory_bytes_available. If the refill request fails, then
-      the requesting process will fail with an out of memory error resulting
-      in the cancellation of that process's active query/transaction.  The
-      default refill allocation quantity is 1MB.  If a request is greater than
-      1MB, an attempt will be made to allocate the full amount. If
-      max_total_memory is disabled, this will be -1.
+      Reports the amount of shared memory (in bytes) currently used by the server.
       <xref linkend="guc-max-total-backend-memory"/>.
      </para></entry>
      </row>
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>global_dsm_allocated_bytes</structfield> <type>bigint</type>
+       <structfield>total_memory_available</structfield> <type>bigint</type>
       </para>
-      <para>
-       Long lived dynamically allocated memory currently allocated to the
-       database. Upon process exit, dsm allocations that have not been freed
-       are considered long lived and added to
-       <structfield>global_dsm_allocated_bytes</structfield>.
-      </para></entry>
+     <para>
+      Reports how much memory renains available to the server. If a
+      backend process attempts to allocate more memory than remains,
+      the process will fail with an out of memory error, resulting in
+      cancellation of the process's active query/transaction.
+      If memory is not being limited, this column returns -1.
+      TODO: should it be -1 or NULL?
+      <xref linkend="guc-max-total-backend-memory"/>.
+     </para></entry>
      </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>total_aset_allocated_bytes</structfield> <type>bigint</type>
-      </para>
-      <para>
-       Sum total of <structfield>aset_allocated_bytes</structfield> for all
-       backend processes from
-       <link linkend="monitoring-pg-stat-memory-allocation-view">
-       <structname>pg_stat_memory_allocation</structname></link> view.
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>total_dsm_allocated_bytes</structfield> <type>bigint</type>
-      </para>
-      <para>
-       Sum total of <structfield>dsm_allocated_bytes</structfield> for all
-       backend processes from
-       <link linkend="monitoring-pg-stat-memory-allocation-view">
-       <structname>pg_stat_memory_allocation</structname></link> view.
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>total_generation_allocated_bytes</structfield> <type>bigint</type>
-      </para>
-      <para>
-       Sum total of <structfield>generation_allocated_bytes</structfield> for
-       all backend processes from
-       <link linkend="monitoring-pg-stat-memory-allocation-view">
-       <structname>pg_stat_memory_allocation</structname></link> view.
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>total_slab_allocated_bytes</structfield> <type>bigint</type>
-      </para>
-      <para>
-       Sum total of <structfield>slab_allocated_bytes</structfield> for all
-       backend processes from
-       <link linkend="monitoring-pg-stat-memory-allocation-view">
-       <structname>pg_stat_memory_allocation</structname></link> view.
-      </para></entry>
-     </row>
-
     </tbody>
    </tgroup>
   </table>
