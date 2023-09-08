@@ -2155,8 +2155,8 @@ include_dir 'conf.d'
        <para>
         Specifies a limit to the amount of memory (MB) that may be allocated to
         backends in total (i.e. this is not a per user or per backend limit).
-        If unset, or set to 0 it is disabled.  At databse startup
-        max_total_memory is reduced by shared_memory_size_mb
+        If unset, or set to 0 it is disabled.  At database startup
+        max_total_memory is reduced by shared_memory_size
         (includes shared buffers and other memory required for initialization).
         Each backend process is intialized with a 1MB local allowance which
         also reduces total_memory_bytes_available. Keep this in mind when
