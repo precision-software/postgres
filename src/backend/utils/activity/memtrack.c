@@ -30,7 +30,7 @@ static inline bool atomic_add_with_limit(pg_atomic_uint64 *sum, uint64 add, uint
  * These default to "0", meaning don't check bounds for total memory.
  */
 int			max_total_memory_mb = 0;
-int64       max_total_bkend_bytes = 0;
+int64       max_total_memory_bytes = 0;
 
 /*
  * Private variables for tracking memory use.
@@ -120,10 +120,10 @@ bool update_global_allocation(int64 size, pg_allocator_type type)
 	delta = my_memory.allocated_bytes + size - reported_memory.allocated_bytes;
 
 	/* If reporting new memory allocated, and we are limited by max_total_bkend ... */
-	if (delta > 0 && max_total_bkend_bytes > 0 && MyAuxProcType == NotAnAuxProcess && MyProcPid != PostmasterPid)
+	if (delta > 0 && max_total_memory_bytes > 0 && MyAuxProcType == NotAnAuxProcess && MyProcPid != PostmasterPid)
 	{
 		/* Update the global total memory counter subject to the upper limit. */
-		if (!atomic_add_with_limit(&ProcGlobal->total_memory_bytes, delta, max_total_bkend_bytes))
+		if (!atomic_add_with_limit(&ProcGlobal->total_memory_bytes, delta, max_total_memory_bytes))
 			return false;
 	}
 

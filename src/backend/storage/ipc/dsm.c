@@ -82,6 +82,7 @@ typedef struct dsm_control_item
 	size_t		first_page;
 	size_t		npages;
 	void	   *impl_private_pm_handle; /* only needed on Windows */
+	size_t      size;  /* the requested size when created */
 	bool		pinned;
 } dsm_control_item;
 
@@ -138,6 +139,7 @@ static dlist_head dsm_segment_list = DLIST_STATIC_INIT(dsm_segment_list);
 static dsm_handle dsm_control_handle;
 static dsm_control_header *dsm_control;
 static Size dsm_control_mapped_size = 0;
+static Size dsm_control_size = 0;
 static void *dsm_control_impl_private = NULL;
 
 /*
@@ -151,7 +153,6 @@ dsm_postmaster_startup(PGShmemHeader *shim)
 {
 	void	   *dsm_control_address = NULL;
 	uint32		maxitems;
-	Size		segsize;
 
 	Assert(!IsUnderPostmaster);
 
@@ -169,7 +170,7 @@ dsm_postmaster_startup(PGShmemHeader *shim)
 		+ PG_DYNSHMEM_SLOTS_PER_BACKEND * MaxBackends;
 	elog(DEBUG2, "dynamic shared memory system will support %u segments",
 		 maxitems);
-	segsize = dsm_control_bytes_needed(maxitems);
+	dsm_control_size = dsm_control_bytes_needed(maxitems);
 
 	/*
 	 * Loop until we find an unused identifier for the new control segment. We
@@ -184,7 +185,7 @@ dsm_postmaster_startup(PGShmemHeader *shim)
 		dsm_control_handle = pg_prng_uint32(&pg_global_prng_state) << 1;
 		if (dsm_control_handle == DSM_HANDLE_INVALID)
 			continue;
-		if (dsm_impl_op(DSM_OP_CREATE, dsm_control_handle, segsize,
+		if (dsm_impl_op(DSM_OP_CREATE, dsm_control_handle, dsm_control_size,
 						&dsm_control_impl_private, &dsm_control_address,
 						&dsm_control_mapped_size, ERROR))
 			break;
@@ -193,7 +194,7 @@ dsm_postmaster_startup(PGShmemHeader *shim)
 	on_shmem_exit(dsm_postmaster_shutdown, PointerGetDatum(shim));
 	elog(DEBUG2,
 		 "created dynamic shared memory control segment %u (%zu bytes)",
-		 dsm_control_handle, segsize);
+		 dsm_control_handle, dsm_control_size);
 	shim->dsm_control = dsm_control_handle;
 
 	/* Initialize control segment. */
@@ -371,7 +372,7 @@ dsm_postmaster_shutdown(int code, Datum arg)
 			 handle);
 
 		/* Destroy the segment. */
-		dsm_impl_op(DSM_OP_DESTROY, handle, 0, &junk_impl_private,
+		dsm_impl_op(DSM_OP_DESTROY, handle, dsm_segment_size(handle), &junk_impl_private,
 					&junk_mapped_address, &junk_mapped_size, LOG);
 	}
 
@@ -380,7 +381,7 @@ dsm_postmaster_shutdown(int code, Datum arg)
 		 "cleaning up dynamic shared memory control segment with ID %u",
 		 dsm_control_handle);
 	dsm_control_address = dsm_control;
-	dsm_impl_op(DSM_OP_DESTROY, dsm_control_handle, 0,
+	dsm_impl_op(DSM_OP_DESTROY, dsm_control_handle, dsm_control_size,
 				&dsm_control_impl_private, &dsm_control_address,
 				&dsm_control_mapped_size, LOG);
 	dsm_control = dsm_control_address;
@@ -572,6 +573,7 @@ dsm_create(Size size, int flags)
 			dsm_control->item[i].refcnt = 2;
 			dsm_control->item[i].impl_private_pm_handle = NULL;
 			dsm_control->item[i].pinned = false;
+			dsm_control->item[i].size = size;
 			seg->control_slot = i;
 			LWLockRelease(DynamicSharedMemoryControlLock);
 			return seg;
@@ -585,7 +587,7 @@ dsm_create(Size size, int flags)
 			FreePageManagerPut(dsm_main_space_fpm, first_page, npages);
 		LWLockRelease(DynamicSharedMemoryControlLock);
 		if (!using_main_dsm_region)
-			dsm_impl_op(DSM_OP_DESTROY, seg->handle, 0, &seg->impl_private,
+			dsm_impl_op(DSM_OP_DESTROY, seg->handle, dsm_segment_size(seg->handle), &seg->impl_private,
 						&seg->mapped_address, &seg->mapped_size, WARNING);
 		if (seg->resowner != NULL)
 			ResourceOwnerForgetDSM(seg->resowner, seg);
@@ -611,6 +613,7 @@ dsm_create(Size size, int flags)
 	dsm_control->item[nitems].refcnt = 2;
 	dsm_control->item[nitems].impl_private_pm_handle = NULL;
 	dsm_control->item[nitems].pinned = false;
+	dsm_control->item[nitems].size = size;
 	seg->control_slot = nitems;
 	dsm_control->nitems++;
 	LWLockRelease(DynamicSharedMemoryControlLock);
@@ -776,14 +779,6 @@ void
 dsm_detach(dsm_segment *seg)
 {
 	/*
-	 * Retain mapped_size to pass into destroy call in cases where the detach
-	 * is the last reference. mapped_size is zeroed as part of the detach
-	 * process, but is needed later in these cases for dsm_allocated_bytes
-	 * accounting.
-	 */
-	Size		save_mapped_size = seg->mapped_size;
-
-	/*
 	 * Invoke registered callbacks.  Just in case one of those callbacks
 	 * throws a further error that brings us back here, pop the callback
 	 * before invoking it, to avoid infinite error recursion.  Don't allow
@@ -862,8 +857,8 @@ dsm_detach(dsm_segment *seg)
 			 * we did.  There's not much we can do about that, though.
 			 */
 			if (is_main_region_dsm_handle(seg->handle) ||
-				dsm_impl_op(DSM_OP_DESTROY, seg->handle, 0, &seg->impl_private,
-							&seg->mapped_address, &save_mapped_size, WARNING))
+				dsm_impl_op(DSM_OP_DESTROY, seg->handle, dsm_segment_size(seg->handle), &seg->impl_private,
+							&seg->mapped_address, &seg->mapped_size, WARNING))
 			{
 				LWLockAcquire(DynamicSharedMemoryControlLock, LW_EXCLUSIVE);
 				if (is_main_region_dsm_handle(seg->handle))
@@ -1032,7 +1027,7 @@ dsm_unpin_segment(dsm_handle handle)
 		 * here.
 		 */
 		if (is_main_region_dsm_handle(handle) ||
-			dsm_impl_op(DSM_OP_DESTROY, handle, 0, &junk_impl_private,
+			dsm_impl_op(DSM_OP_DESTROY, handle, dsm_segment_size(handle), &junk_impl_private,
 						&junk_mapped_address, &junk_mapped_size, WARNING))
 		{
 			LWLockAcquire(DynamicSharedMemoryControlLock, LW_EXCLUSIVE);
@@ -1102,6 +1097,35 @@ dsm_handle
 dsm_segment_handle(dsm_segment *seg)
 {
 	return seg->handle;
+}
+
+/*
+ * Get the size used to create a shared memory segment.
+ * We assume we have a valid handle, meaning the segment
+ * is either the control segment or one which is in the table.
+ * TODO: create separate versions given handle vs segment.
+ */
+Size
+dsm_segment_size(dsm_handle handle)
+{
+	int nitems;
+	int slot;
+
+	/* If we're setting up the dsm header, return the size of the control segment */
+	if (handle == dsm_control_handle)
+		return dsm_control_size;
+
+	/* Find the corresponding dsm segment. */
+	nitems = dsm_control->nitems;
+	for (slot = 0; slot < nitems; slot++)
+		if (dsm_control->item[slot].refcnt != 0 && dsm_control->item[slot].handle == handle)
+			break;
+
+	/* Assert: we should always find the handle */
+	Assert(slot < nitems);
+
+	/* We found the handle. Now return the size; */
+	return dsm_control->item[slot].size;
 }
 
 /*

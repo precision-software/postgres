@@ -55,6 +55,24 @@
 #include "common/int.h"
 #include "port/atomics.h"
 
+#define DEBUG 1
+#ifdef DEBUG
+#define memtrack_debug(args...) \
+do {                            \
+    int save_errno = errno;      \
+    fprintf(stderr, "%s[%d] ", __func__, getpid()); \
+	fprintf(stderr, args);         \
+	fprintf(stderr, "\n");         \
+    fflush(stderr);                        \
+    errno = save_errno;         \
+} while(0)
+
+#else
+#define memtrack_debug(args...)  (void)0
+#endif
+
+
+
 /* Various types of memory allocators we are tracking. */
 typedef enum pg_allocator_type
 {
@@ -97,7 +115,7 @@ extern PGDLLIMPORT PgBackendMemoryStatus reported_memory;
 extern PGDLLIMPORT int64 allocation_upper_bound;
 extern PGDLLIMPORT int64 allocation_lower_bound;
 
-extern PGDLLIMPORT int64 max_total_bkend_bytes;
+extern PGDLLIMPORT int64 max_total_memory_bytes;
 extern PGDLLIMPORT int32 max_total_memory_mb;
 
 /* These are the main entry points for backend memory accounting */

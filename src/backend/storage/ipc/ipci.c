@@ -382,6 +382,6 @@ InitializeShmemGUCs(void)
 					 errhint("Consider increasing the configuration parameter \"max_total_memory\"."));
 
 		 /* We prefer to use max_total_memory_mb as bytes rather than MB */
-		 max_total_bkend_bytes = (int64)max_total_memory_mb * 1024 * 1024;
+		 max_total_memory_bytes = (int64)max_total_memory_mb * 1024 * 1024;
 	 }
 }

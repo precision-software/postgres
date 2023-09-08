@@ -64,6 +64,7 @@
 #include "pgstat.h"
 #include "portability/mem.h"
 #include "postmaster/postmaster.h"
+#include "storage/dsm.h"
 #include "storage/dsm_impl.h"
 #include "storage/fd.h"
 #include "utils/guc.h"
@@ -138,7 +139,8 @@ int			min_dynamic_shared_memory;
  *	 op: The operation to be performed.
  *	 handle: The handle of an existing object, or for DSM_OP_CREATE, the
  *	   identifier for the new handle the caller wants created.
- *	 request_size: For DSM_OP_CREATE, the requested size.  Otherwise, 0.
+ *	 request_size: For DSM_OP_CREATE and DSM_OP_DESTROY, the requested size.
+ *	    Otherwise, 0.
  *	 impl_private: Private, implementation-specific data.  Will be a pointer
  *	   to NULL for the first operation on a shared memory segment within this
  *	   backend; thereafter, it will point to the value to which it was set
@@ -160,7 +162,7 @@ original_dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
 					 void **impl_private, void **mapped_address, Size *mapped_size,
 					 int elevel)
 {
-	Assert(op == DSM_OP_CREATE || request_size == 0);
+	Assert(op == DSM_OP_CREATE || op == DSM_OP_DESTROY || request_size == 0);
 	Assert((op != DSM_OP_CREATE && op != DSM_OP_ATTACH) ||
 		   (*mapped_address == NULL && *mapped_size == 0));
 
@@ -1064,11 +1066,9 @@ dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
 			int elevel)
 {
 	bool success;
-	Size save_mapped_size;
+	memtrack_debug("op=%d handle=%d request_size=%zu", op, handle, request_size);
 
-	/*
-	 * If creating a new segment, try to reserve memory first
-	 */
+	/* Reserve memory if we are creating a new segment */
 	if (op == DSM_OP_CREATE && !reserve_backend_memory(request_size, PG_ALLOC_DSM))
 	{
 		ereport(elevel,  /* Add hint about max_bkend */
@@ -1077,25 +1077,13 @@ dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
 		return false;
 	}
 
-	/* Do the actual work. Some of the operations clear *mapped_size, so we save it first */
-	save_mapped_size = *mapped_size;
+	/* Do the actual work. */
 	success = original_dsm_impl_op(op, handle, request_size, impl_private, mapped_address, mapped_size, elevel);
 
-	/*
-	 * Update the memory reservation based on the outcome
-	 */
 
-	/* CASE: we failed to create a new segment. Release the reservation */
-	if (!success && op == DSM_OP_CREATE )
+/* Release the memory if we destroyed the segment or failed to create it */
+if ((success && op == DSM_OP_DESTROY) || (!success && op == DSM_OP_CREATE))
 		release_backend_memory(request_size, PG_ALLOC_DSM);
-
-	/* CASE: we created a different size than expected. Record the change, but don't abort */
-	else if (success && op == DSM_OP_CREATE && *mapped_size != request_size)
-		update_local_allocation(*mapped_size - request_size, PG_ALLOC_DSM);
-
-	/* CASE: we sucessfully destroyed a segment. Release the reservation */
-	else if (success && op == DSM_OP_DESTROY)
-		release_backend_memory(save_mapped_size, PG_ALLOC_DSM);
 
 	return success;
 }
