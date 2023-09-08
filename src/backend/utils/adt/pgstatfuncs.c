@@ -2123,8 +2123,8 @@ pg_stat_get_memory_allocation(PG_FUNCTION_ARGS)
 }
 
 /*
- * Get the global memory allocation statistics.
- */
+* Get the global memory allocation statistics.
+*/
 Datum
 pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
 {
