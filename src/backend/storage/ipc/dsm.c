@@ -104,6 +104,9 @@ static uint64 dsm_control_bytes_needed(uint32 nitems);
 static inline dsm_handle make_main_region_dsm_handle(int slot);
 static inline bool is_main_region_dsm_handle(dsm_handle handle);
 
+static Size dsm_segment_size(dsm_segment *seg);
+static Size dsm_handle_size(dsm_handle handle);
+
 /* Has this backend initialized the dynamic shared memory system yet? */
 static bool dsm_init_done = false;
 
@@ -372,7 +375,7 @@ dsm_postmaster_shutdown(int code, Datum arg)
 			 handle);
 
 		/* Destroy the segment. */
-		dsm_impl_op(DSM_OP_DESTROY, handle, dsm_segment_size(handle), &junk_impl_private,
+		dsm_impl_op(DSM_OP_DESTROY, handle, dsm_handle_size(handle), &junk_impl_private,
 					&junk_mapped_address, &junk_mapped_size, LOG);
 	}
 
@@ -587,7 +590,7 @@ dsm_create(Size size, int flags)
 			FreePageManagerPut(dsm_main_space_fpm, first_page, npages);
 		LWLockRelease(DynamicSharedMemoryControlLock);
 		if (!using_main_dsm_region)
-			dsm_impl_op(DSM_OP_DESTROY, seg->handle, dsm_segment_size(seg->handle), &seg->impl_private,
+			dsm_impl_op(DSM_OP_DESTROY, seg->handle, dsm_segment_size(seg), &seg->impl_private,
 						&seg->mapped_address, &seg->mapped_size, WARNING);
 		if (seg->resowner != NULL)
 			ResourceOwnerForgetDSM(seg->resowner, seg);
@@ -857,7 +860,7 @@ dsm_detach(dsm_segment *seg)
 			 * we did.  There's not much we can do about that, though.
 			 */
 			if (is_main_region_dsm_handle(seg->handle) ||
-				dsm_impl_op(DSM_OP_DESTROY, seg->handle, dsm_segment_size(seg->handle), &seg->impl_private,
+				dsm_impl_op(DSM_OP_DESTROY, seg->handle, dsm_handle_size(seg->handle), &seg->impl_private,
 							&seg->mapped_address, &seg->mapped_size, WARNING))
 			{
 				LWLockAcquire(DynamicSharedMemoryControlLock, LW_EXCLUSIVE);
@@ -1027,7 +1030,7 @@ dsm_unpin_segment(dsm_handle handle)
 		 * here.
 		 */
 		if (is_main_region_dsm_handle(handle) ||
-			dsm_impl_op(DSM_OP_DESTROY, handle, dsm_segment_size(handle), &junk_impl_private,
+			dsm_impl_op(DSM_OP_DESTROY, handle, dsm_handle_size(handle), &junk_impl_private,
 						&junk_mapped_address, &junk_mapped_size, WARNING))
 		{
 			LWLockAcquire(DynamicSharedMemoryControlLock, LW_EXCLUSIVE);
@@ -1100,13 +1103,12 @@ dsm_segment_handle(dsm_segment *seg)
 }
 
 /*
- * Get the size used to create a shared memory segment.
+ * Given a handle, get the size used to create a shared memory segment.
  * We assume we have a valid handle, meaning the segment
  * is either the control segment or one which is in the table.
- * TODO: create separate versions given handle vs segment.
  */
-Size
-dsm_segment_size(dsm_handle handle)
+static Size
+dsm_handle_size(dsm_handle handle)
 {
 	int nitems;
 	int slot;
@@ -1127,6 +1129,19 @@ dsm_segment_size(dsm_handle handle)
 	/* We found the handle. Now return the size; */
 	return dsm_control->item[slot].size;
 }
+
+
+/*
+ * Given a dsm segment, get the size it was created with.
+ * The control segment doesn't have a segment structure,
+ * so this only applies to segments in the table.
+ */
+static Size
+dsm_segment_size(dsm_segment *seg)
+{
+	return dsm_control->item[seg->control_slot].size;
+}
+
 
 /*
  * Register an on-detach callback for a dynamic shared memory segment.

@@ -49,7 +49,6 @@ extern dsm_segment *dsm_find_mapping(dsm_handle handle);
 extern void *dsm_segment_address(dsm_segment *seg);
 extern Size dsm_segment_map_length(dsm_segment *seg);
 extern dsm_handle dsm_segment_handle(dsm_segment *seg);
-extern Size dsm_segment_size(dsm_handle handle);
 
 /* Cleanup hooks. */
 typedef void (*on_dsm_detach_callback) (dsm_segment *, Datum arg);
