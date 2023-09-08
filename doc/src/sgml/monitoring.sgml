@@ -4644,11 +4644,12 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   </indexterm>
 
   <para>
-   The <structname>pg_stat_global_memory_allocation</structname> view will
-   have one row showing two values: total_memory_used and dsm_memory_used.
+   The <structname>pg_stat_global_memory_allocation</structname> view shows
+   the current memory allocation for the entire server. This view
+   has a single row with a column for each global value.
    Due to the dynamic nature of memory allocations, the
-   values may not be exact but should be sufficient for the intended
-   purposes. Use <function>pg_size_pretty</function> described in
+   values may not be exact, but they should be sufficient for monitoring the server.
+   Use <function>pg_size_pretty</function> described in
    <xref linkend="functions-admin-dbsize"/> to make the byte populated values
    more easily readable.
   </para>

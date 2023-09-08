@@ -2128,8 +2128,9 @@ pg_stat_get_memory_allocation(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS	3
+#define PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS	4
 	TupleDesc	tupdesc;
+	int64 total_memory_used;
 	Datum		values[PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS] = {0};
 	bool		nulls[PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS] = {0};
 	volatile PROC_HDR *procglobal = ProcGlobal;
@@ -2138,20 +2139,29 @@ pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
 	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "datid",
 					   OIDOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "total_memory_bytes_available",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "total_memory_used",
 					   INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "global_dsm_allocated_bytes",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "shared_memory_used",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "total_memory_available",
 					   INT8OID, -1, 0);
 	BlessTupleDesc(tupdesc);
 
 	/* datid */
 	values[0] = ObjectIdGetDatum(MyDatabaseId);
 
-	/* Get total_memory_bytes */
-	values[1] = Int64GetDatum(pg_atomic_read_u64(&procglobal->total_memory_bytes));
+	/* Get total_memory_used */
+	total_memory_used = pg_atomic_read_u64(&procglobal->total_memory_bytes);
+	values[1] = Int64GetDatum(total_memory_used);
 
-	/* Get global_dsm_allocated_bytes */
+	/* Get dsm_memory_used */
 	values[2] = Int64GetDatum(pg_atomic_read_u64(&procglobal->global_dsm_allocation));
+
+	/* Get total_memory_available */
+	if (max_total_memory_bytes > 0)
+		values[3] = Int64GetDatum(max_total_memory_bytes - total_memory_used);
+	else
+		nulls[3] = true;
 
 	/* Returns the record as Datum */
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));

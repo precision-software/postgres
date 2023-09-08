@@ -1343,27 +1343,11 @@ CREATE VIEW pg_stat_subscription_stats AS
     FROM pg_subscription as s,
          pg_stat_get_subscription_stats(s.oid) as ss;
 
-
 CREATE VIEW pg_wait_events AS
 SELECT * FROM pg_get_wait_events();
 
-
 CREATE VIEW pg_stat_global_memory_allocation AS
-SELECT
-        G.datid as datid,
-        G.total_memory_used,
-        G.dsm_memory_used,
-        G.remaining_memory_available
-FROM pg_stat_get_global_memory_allocation() AS G;
-
+SELECT * from pg_stat_get_global_memory_allocation();
 
 CREATE VIEW pg_stat_memory_allocation AS
-SELECT
-    S.datid AS datid,
-    S.pid,
-    S.allocated_bytes,
-    S.aset_allocated_bytes,
-    S.dsm_allocated_bytes,
-    S.generation_allocated_bytes,
-    S.slab_allocated_bytes
-FROM pg_stat_get_memory_allocation(NULL) AS S
+SELECT * from pg_stat_get_memory_allocation();
