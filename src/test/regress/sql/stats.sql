@@ -840,4 +840,24 @@ DROP TABLE brin_hot_3;
 
 SET enable_seqscan = on;
 
+-- ensure that allocated_bytes exist for backends
+SELECT
+    allocated_bytes >= 0 AS result
+FROM
+    pg_stat_activity ps
+    JOIN pg_stat_memory_allocation pa ON (pa.pid = ps.pid)
+WHERE
+    backend_type IN ('checkpointer', 'background writer', 'walwriter', 'autovacuum launcher');
+
+-- ensure that pg_stat_memory_allocation view exists
+SELECT
+    pid > 0, allocated_bytes >= 0, aset_allocated_bytes >= 0, dsm_allocated_bytes >= 0, generation_allocated_bytes >= 0, slab_allocated_bytes >= 0
+FROM
+    pg_stat_memory_allocation limit 1;
+
+-- ensure that pg_stat_global_memory_allocation view exists
+SELECT
+        datid > 0, total_memory_allocated >= 0, dsm_memory_allocated >= 0, total_memory_available >= 0
+FROM
+    pg_stat_global_memory_allocation;
 -- End of Stats Test

@@ -64,6 +64,7 @@
 #include "pgstat.h"
 #include "portability/mem.h"
 #include "postmaster/postmaster.h"
+#include "storage/dsm.h"
 #include "storage/dsm_impl.h"
 #include "storage/fd.h"
 #include "utils/guc.h"
@@ -138,7 +139,8 @@ int			min_dynamic_shared_memory;
  *	 op: The operation to be performed.
  *	 handle: The handle of an existing object, or for DSM_OP_CREATE, the
  *	   identifier for the new handle the caller wants created.
- *	 request_size: For DSM_OP_CREATE, the requested size.  Otherwise, 0.
+ *	 request_size: For DSM_OP_CREATE and DSM_OP_DESTROY, the requested size.
+ *	    Otherwise, 0.
  *	 impl_private: Private, implementation-specific data.  Will be a pointer
  *	   to NULL for the first operation on a shared memory segment within this
  *	   backend; thereafter, it will point to the value to which it was set
@@ -155,12 +157,12 @@ int			min_dynamic_shared_memory;
  * silently return false.
  *-----
  */
-bool
-dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
-			void **impl_private, void **mapped_address, Size *mapped_size,
-			int elevel)
+static bool
+dsm_impl_op_worker(dsm_op op, dsm_handle handle, Size request_size,
+				   void **impl_private, void **mapped_address, Size *mapped_size,
+				   int elevel)
 {
-	Assert(op == DSM_OP_CREATE || request_size == 0);
+	Assert(op == DSM_OP_CREATE || op == DSM_OP_DESTROY || request_size == 0);
 	Assert((op != DSM_OP_CREATE && op != DSM_OP_ATTACH) ||
 		   (*mapped_address == NULL && *mapped_size == 0));
 
@@ -1050,4 +1052,37 @@ errcode_for_dynamic_shared_memory(void)
 		return errcode(ERRCODE_OUT_OF_MEMORY);
 	else
 		return errcode_for_file_access();
+}
+
+/*
+* A Wrapper around dsm_impl_op_worker.
+* The wrapper is responsible for tracking backend memory,
+* but otherwise it stays out of the way as much
+* as possible.
+*/
+bool
+dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
+			void **impl_private, void **mapped_address, Size *mapped_size,
+			int elevel)
+{
+	bool		success;
+
+	/* Reserve memory if we are creating a new segment */
+	if (op == DSM_OP_CREATE && !reserve_tracked_memory(request_size, PG_ALLOC_DSM))
+	{
+		ereport(elevel,			/* TODO: Add hint about max_bkend */
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("Unable to reserve backend memory for dynamic shared memory segment."),
+				 errhint("Consider increasing the configuration parameter \"max_total_memory\".")));
+		return false;
+	}
+
+	/* Do the actual work. */
+	success = dsm_impl_op_worker(op, handle, request_size, impl_private, mapped_address, mapped_size, elevel);
+
+	/* Release the memory if we destroyed the segment or failed to create it */
+	if ((success && op == DSM_OP_DESTROY) || (!success && op == DSM_OP_CREATE))
+		release_tracked_memory(request_size, PG_ALLOC_DSM);
+
+	return success;
 }

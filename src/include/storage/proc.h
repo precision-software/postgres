@@ -404,6 +404,9 @@ typedef struct PROC_HDR
 	int			spins_per_delay;
 	/* Buffer id of the buffer that Startup process waits for pin on, or -1 */
 	int			startupBufferPinWaitBufId;
+	/* Track how much memory the database server has allocated */
+	pg_atomic_uint64 total_memory_bytes;
+	pg_atomic_uint64 shared_memory_bytes;
 } PROC_HDR;
 
 extern PGDLLIMPORT PROC_HDR *ProcGlobal;
