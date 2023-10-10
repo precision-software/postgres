@@ -112,14 +112,13 @@ pgstat_init_memtrack(PgStatShared_Memtrack *global)
 PgStat_Memtrack *
 pgstat_fetch_stat_memtrack(void)
 {
-	pgstat_memtrack_snapshot_cb(); /* Update immediately */
 	pgstat_snapshot_fixed(PGSTAT_KIND_MEMORYTRACK);
 	return &pgStatLocal.snapshot.memtrack;
 }
 
 
 /*
- * Populate the memtrack snapshot with current values.
+ * Populate the memtrack globals snapshot with current values.
  */
 void
 pgstat_memtrack_snapshot_cb(void)
@@ -146,21 +145,18 @@ Datum
 pg_stat_get_backend_memory(PG_FUNCTION_ARGS)
 {
 #define PG_STAT_GET_MEMORY_ALLOCATION_COLS	(3 + PG_ALLOC_TYPE_MAX)
-	int			num_backends = pgstat_fetch_stat_numbackends();
+	int			num_backends;
 	int			curr_backend;
 	int			pid = PG_ARGISNULL(0) ? -1 : PG_GETARG_INT32(0);
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
-	/* Get a fresh snapshot of backend status */
-	pgstat_clear_backend_activity_snapshot();
-	pgstat_memtrack_snapshot_cb();
-
-	/* Get a fresh snapshot of the global memory stats (for consistency) */
+	/* Ensure we have a consistent snapshot of postmaster and globals */
 	(void) pgstat_fetch_stat_memtrack();
 
 	InitMaterializedSRF(fcinfo, 0);
 
 	/* 1-based index */
+	num_backends = pgstat_fetch_stat_numbackends();
 	for (curr_backend = 1; curr_backend <= num_backends; curr_backend++)
 	{
 		/* for each row */
