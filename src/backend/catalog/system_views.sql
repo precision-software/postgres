@@ -1346,3 +1346,11 @@ CREATE VIEW pg_stat_subscription_stats AS
 
 CREATE VIEW pg_wait_events AS
     SELECT * FROM pg_get_wait_events();
+
+CREATE VIEW pg_stat_global_memory_allocation AS
+    SELECT * FROM pg_stat_get_global_memory_allocation();
+
+CREATE VIEW pg_stat_memory_allocation AS
+    SELECT * from pg_stat_get_backend_memory(NULL)
+    UNION
+    SELECT * from pg_stat_get_postmaster_memory();
