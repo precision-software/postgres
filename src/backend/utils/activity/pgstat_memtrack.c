@@ -140,6 +140,15 @@ pgstat_memtrack_snapshot_cb(void)
 
 /*
  * SQL callable function to get the memory allocation of PG backends.
+ * Returns a row for each backend, consisting of:
+ *    datid   						- backend's database id, null if not attached
+ *    pid     						- backend's process id
+ *    allocated_bytes				- total number of bytes allocated by backend
+ *    init_allocated_bytes			- subtotal attributed to each process at startup
+ *    aset_allocated_bytes			- subtotal from allocation sets
+ *    dsm_allocated_bytes			- subtotal attributed to dynamic shared memory (DSM)
+ *    generation_allocated_bytes	- subtotal from generation allocator
+ *    slab_allocated_bytes			- subtotal from slab allocator
  */
 Datum
 pg_stat_get_backend_memory(PG_FUNCTION_ARGS)
@@ -150,23 +159,23 @@ pg_stat_get_backend_memory(PG_FUNCTION_ARGS)
 	int			pid = PG_ARGISNULL(0) ? -1 : PG_GETARG_INT32(0);
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
-	/* Ensure we have a consistent snapshot of postmaster and globals */
+	/* Ensure we have a consistent snapshot including postmaster and globals */
 	(void) pgstat_fetch_stat_memtrack();
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	/* 1-based index */
+	/* Do for each backend process */
 	num_backends = pgstat_fetch_stat_numbackends();
 	for (curr_backend = 1; curr_backend <= num_backends; curr_backend++)
 	{
-		/* for each row */
+		/* Define data for the row */
 		Datum		values[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
 		bool		nulls[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
 		LocalPgBackendStatus *local_beentry;
 		PgBackendStatus *beentry;
 		pg_allocator_type type;
 
-		/* Get the next one in the list */
+		/* Fetch the data for the backend */
 		local_beentry = pgstat_fetch_stat_local_beentry(curr_backend);
 		beentry = &local_beentry->backendStatus;
 
@@ -240,8 +249,13 @@ pg_stat_get_postmaster_memory(PG_FUNCTION_ARGS)
 
 
 /*
-* SQL callable function to get the global memory allocation statistics.
-*/
+ * SQL callable function to get the global memory allocation statistics.
+ * Returns a single row with the following values (in bytes)
+ *   total_memory_allocated   - total memory allocated by server
+ *   dsm_memory_allocated     - dsm memory allocated by server
+ *   total_memory_available   - memory remaining (null if no limit set)
+ *   static_shared_memory     - configured shared memory
+ */
 Datum
 pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
 {
