@@ -5424,7 +5424,7 @@
   descr => 'statistics: memory utilized per-backend process',
   proname => 'pg_stat_get_backend_memory', prorows => '100', proisstrict => 'f',
   proretset => 't', provolatile => 'v', proparallel => 'r',
-  prorettype => 'record', proargtypes => 'int4',
+  prorettype => 'record', proargtypes => '',
   proallargtypes => '{int4,oid,int4,int8,int8,int8,int8,int8,int8}',
   proargmodes => '{i,o,o,o,o,o,o,o,o}',
   proargnames => '{pid,datid,pid,allocated_bytes,init_allocated_bytes,aset_allocated_bytes,dsm_allocated_bytes,generation_allocated_bytes,slab_allocated_bytes}',

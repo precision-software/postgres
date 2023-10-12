@@ -1912,7 +1912,7 @@ pg_stat_memory_allocation| SELECT pg_stat_get_backend_memory.datid,
     pg_stat_get_backend_memory.dsm_allocated_bytes,
     pg_stat_get_backend_memory.generation_allocated_bytes,
     pg_stat_get_backend_memory.slab_allocated_bytes
-   FROM pg_stat_get_backend_memory(NULL::integer) pg_stat_get_backend_memory(datid, pid, allocated_bytes, init_allocated_bytes, aset_allocated_bytes, dsm_allocated_bytes, generation_allocated_bytes, slab_allocated_bytes)
+   FROM pg_stat_get_backend_memory() pg_stat_get_backend_memory(datid, pid, allocated_bytes, init_allocated_bytes, aset_allocated_bytes, dsm_allocated_bytes, generation_allocated_bytes, slab_allocated_bytes)
 UNION
  SELECT pg_stat_get_postmaster_memory.datid,
     pg_stat_get_postmaster_memory.pid,

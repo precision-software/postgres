@@ -74,7 +74,6 @@ static MemoryContext backendStatusSnapContext;
 
 
 static void pgstat_beshutdown_hook(int code, Datum arg);
-static void pgstat_read_current_status(void);
 static void pgstat_setup_backend_status_context(void);
 
 
@@ -728,14 +727,14 @@ pgstat_report_xact_timestamp(TimestampTz tstamp)
 }
 
 /* ----------
- * pgstat_read_current_status() -
+ * pgstat_read_backend_status() -
  *
  *	Copy the current contents of the PgBackendStatus array to local memory,
  *	if not already done in this transaction.
  * ----------
  */
-static void
-pgstat_read_current_status(void)
+void
+pgstat_read_backend_status(void)
 {
 	volatile PgBackendStatus *beentry;
 	LocalPgBackendStatus *localtable;
@@ -888,6 +887,13 @@ pgstat_read_current_status(void)
 
 	/* Set the pointer only after completion of a valid table */
 	localBackendStatusTable = localtable;
+
+	/*
+	 * For consistency, take a snapshot of the global memory state.
+	 * We do both snapshots to ensure the global memory total matches
+	 * the sum of backend memory.
+	 */
+	pgstat_memtrack_snapshot_cb();
 }
 
 
@@ -1127,7 +1133,7 @@ pgstat_get_local_beentry_by_backend_id(BackendId beid)
 {
 	LocalPgBackendStatus key;
 
-	pgstat_read_current_status();
+	pgstat_read_backend_status();
 
 	/*
 	 * Since the localBackendStatusTable is in order by backend_id, we can use
@@ -1156,7 +1162,7 @@ pgstat_get_local_beentry_by_backend_id(BackendId beid)
 LocalPgBackendStatus *
 pgstat_get_local_beentry_by_index(int idx)
 {
-	pgstat_read_current_status();
+	pgstat_read_backend_status();
 
 	if (idx < 1 || idx > localNumBackends)
 		return NULL;
@@ -1176,7 +1182,7 @@ pgstat_get_local_beentry_by_index(int idx)
 int
 pgstat_fetch_stat_numbackends(void)
 {
-	pgstat_read_current_status();
+	pgstat_read_backend_status();
 
 	return localNumBackends;
 }

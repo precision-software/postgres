@@ -106,20 +106,6 @@ pgstat_init_memtrack(PgStatShared_Memtrack *global)
 }
 
 
-
-/*
- * Support function for SQL callable functions.
- * Force a snapshot of ALL the memtrack values at the same time.
- * We want these to be as consistent as possible.
- */
-PgStat_Memtrack *
-pgstat_memtrack_freeze()
-{
-	(void) pgstat_fetch_stat_numbackends();
-	return pgstat_fetch_stat_memtrack();
-}
-
-
 /*
  * Take a snapshot of the global memtrack values if not
  * already done, and point to the snapshot values.
@@ -127,7 +113,10 @@ pgstat_memtrack_freeze()
 PgStat_Memtrack *
 pgstat_fetch_stat_memtrack(void)
 {
-	pgstat_snapshot_fixed(PGSTAT_KIND_MEMORYTRACK);
+	/* Take a snapshot of both the memtrack globals and the backends */
+	pgstat_read_backend_status();
+
+	/* Return a pointer to the globals snapshot */
 	return &pgStatLocal.snapshot.memtrack;
 }
 
@@ -173,8 +162,6 @@ pg_stat_get_backend_memory(PG_FUNCTION_ARGS)
 	int			backendIdx;
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
-	/* Ensure we have a consistent snapshot including postmaster and globals */
-	(void) pgstat_memtrack_freeze();
 	InitMaterializedSRF(fcinfo, 0);
 
 	/* Do for each backend process */
@@ -231,7 +218,7 @@ pg_stat_get_postmaster_memory(PG_FUNCTION_ARGS)
 	bool nulls[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
 
 	/* Fetch the values and build a row */
-	memtrack = pgstat_memtrack_freeze();
+	memtrack = pgstat_fetch_stat_memtrack();
 	InitMaterializedSRF(fcinfo, 0);
 
 	/* database - postmaster is not attached to a database */
@@ -272,7 +259,7 @@ pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
 	PgStat_Memtrack *snap;
 
 	/* Get access to the snapshot */
-	snap = pgstat_memtrack_freeze();
+	snap = pgstat_fetch_stat_memtrack();
 
 	/* Initialise attributes information in the tuple descriptor. */
 	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS);

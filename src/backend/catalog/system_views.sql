@@ -1351,6 +1351,6 @@ CREATE VIEW pg_stat_global_memory_allocation AS
     SELECT * FROM pg_stat_get_global_memory_allocation();
 
 CREATE VIEW pg_stat_memory_allocation AS
-    SELECT * from pg_stat_get_backend_memory(NULL)
+    SELECT * from pg_stat_get_backend_memory()
     UNION
     SELECT * from pg_stat_get_postmaster_memory();
