@@ -105,9 +105,24 @@ pgstat_init_memtrack(PgStatShared_Memtrack *global)
 	}
 }
 
+
+
 /*
- * Support function for the SQL-callable pgstat* functions. Returns
- * a pointer to a snapshot of the global memtrack values.
+ * Support function for SQL callable functions.
+ * Force a snapshot of ALL the memtrack values at the same time.
+ * We want these to be as consistent as possible.
+ */
+PgStat_Memtrack *
+pgstat_memtrack_freeze()
+{
+	(void) pgstat_fetch_stat_numbackends();
+	return pgstat_fetch_stat_memtrack();
+}
+
+
+/*
+ * Take a snapshot of the global memtrack values if not
+ * already done, and point to the snapshot values.
  */
 PgStat_Memtrack *
 pgstat_fetch_stat_memtrack(void)
@@ -155,18 +170,16 @@ pg_stat_get_backend_memory(PG_FUNCTION_ARGS)
 {
 #define PG_STAT_GET_MEMORY_ALLOCATION_COLS	(3 + PG_ALLOC_TYPE_MAX)
 	int			num_backends;
-	int			curr_backend;
-	int			pid = PG_ARGISNULL(0) ? -1 : PG_GETARG_INT32(0);
+	int			backendIdx;
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	/* Ensure we have a consistent snapshot including postmaster and globals */
-	(void) pgstat_fetch_stat_memtrack();
-
+	(void) pgstat_memtrack_freeze();
 	InitMaterializedSRF(fcinfo, 0);
 
 	/* Do for each backend process */
 	num_backends = pgstat_fetch_stat_numbackends();
-	for (curr_backend = 1; curr_backend <= num_backends; curr_backend++)
+	for (backendIdx = 1; backendIdx <= num_backends; backendIdx++)
 	{
 		/* Define data for the row */
 		Datum		values[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
@@ -176,12 +189,8 @@ pg_stat_get_backend_memory(PG_FUNCTION_ARGS)
 		pg_allocator_type type;
 
 		/* Fetch the data for the backend */
-		local_beentry = pgstat_fetch_stat_local_beentry(curr_backend);
+		local_beentry = pgstat_get_local_beentry_by_index(backendIdx);
 		beentry = &local_beentry->backendStatus;
-
-		/* If looking for specific PID, ignore all the others */
-		if (pid != -1 && beentry->st_procpid != pid)
-			continue;
 
 		/* Database id */
 		if (beentry->st_databaseid != InvalidOid)
@@ -200,10 +209,6 @@ pg_stat_get_backend_memory(PG_FUNCTION_ARGS)
 			values[3 + type] = UInt64GetDatum(beentry->st_memory.subTotal[type]);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
-
-		/* If only a single backend was requested, and we found it, break. */
-		if (pid != -1)
-			break;
 	}
 
 	return (Datum) 0;
@@ -225,9 +230,9 @@ pg_stat_get_postmaster_memory(PG_FUNCTION_ARGS)
 	Datum values[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
 	bool nulls[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
 
-	/* Get access to the memtrack snapshot */
+	/* Fetch the values and build a row */
+	memtrack = pgstat_memtrack_freeze();
 	InitMaterializedSRF(fcinfo, 0);
-	memtrack = pgstat_fetch_stat_memtrack();
 
 	/* database - postmaster is not attached to a database */
 	nulls[0] = true;
@@ -267,7 +272,7 @@ pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
 	PgStat_Memtrack *snap;
 
 	/* Get access to the snapshot */
-	snap = pgstat_fetch_stat_memtrack();
+	snap = pgstat_memtrack_freeze();
 
 	/* Initialise attributes information in the tuple descriptor. */
 	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS);
