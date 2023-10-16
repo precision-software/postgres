@@ -120,7 +120,7 @@ exercise_worker(FunctionCallInfo fcinfo, char *workerFunction)
 							"test_memtrack", workerFunction);
 
 	/* Remember the total memory before we start allocations */
-	starting_bkend_bytes = pg_atomic_read_u32((void *) &global->total_memory_used);
+	starting_bkend_bytes = pg_atomic_read_u32((void *) &global->total_memory_reserved);
 
 	/* Tell the workers to start their first batch of allocations */
 	for (int w = 0; w < nWorkers; w++)
@@ -131,7 +131,7 @@ exercise_worker(FunctionCallInfo fcinfo, char *workerFunction)
 		processReply(pool, w, ALLOCATE, type, nBlocks, blockSize);
 
 	/* Confirm the total backend memory is greater than what we just allocated */
-	delta = pg_atomic_read_u32((void *) &global->total_memory_used) - starting_bkend_bytes;
+	delta = pg_atomic_read_u32((void *) &global->total_memory_reserved) - starting_bkend_bytes;
 	if (delta < expected - fudge || delta > expected + fudge)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -146,7 +146,7 @@ exercise_worker(FunctionCallInfo fcinfo, char *workerFunction)
 		processReply(pool, w, RELEASE, type, nBlocks, blockSize);
 
 	/* Verify the new total is reasonable */
-	delta = pg_atomic_read_u32((void *) &global->total_memory_used) - starting_bkend_bytes;
+	delta = pg_atomic_read_u32((void *) &global->total_memory_reserved) - starting_bkend_bytes;
 	if (delta < -fudge || delta > fudge)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),

@@ -128,8 +128,8 @@ update_global_reservation(int64 size, pg_allocator_type type)
 		return update_local_reservation(size, type);
 
 	/* Verify totals are not negative. This is both a pre- and post-condition. */
-	Assert((int64) pg_atomic_read_u64(&global->total_memory_used) >= 0);
-	Assert((int64) pg_atomic_read_u64(&global->total_dsm_used) >= 0);
+	Assert((int64) pg_atomic_read_u64(&global->total_memory_reserved) >= 0);
+	Assert((int64) pg_atomic_read_u64(&global->total_dsm_reserved) >= 0);
 
 	/* Calculate total bytes allocated or freed since last report */
 	delta = my_memory.total + size - reported_memory.total;
@@ -141,7 +141,7 @@ update_global_reservation(int64 size, pg_allocator_type type)
 	if (max_total_memory_bytes > 0 && delta > 0 && MyProcPid != PostmasterPid)
 	{
 		/* Update the global total memory counter subject to the upper limit. */
-		if (!pg_atomic_fetch_add_limit_u64(&global->total_memory_used, delta, max_total_memory_bytes, &dummy))
+		if (!pg_atomic_fetch_add_limit_u64(&global->total_memory_reserved, delta, max_total_memory_bytes, &dummy))
 			return false;
 	}
 
@@ -149,7 +149,7 @@ update_global_reservation(int64 size, pg_allocator_type type)
 	 * Otherwise, update the global counter with no limit checking.
 	 */
 	else
-		(void) pg_atomic_fetch_add_u64(&global->total_memory_used, delta);
+		(void) pg_atomic_fetch_add_u64(&global->total_memory_reserved, delta);
 
 	/*
 	 * Update the private memory counters. This must happen after the limit is
@@ -164,7 +164,7 @@ update_global_reservation(int64 size, pg_allocator_type type)
 	 * we do for private memory allocators.
 	 */
 	if (type == PG_ALLOC_DSM)
-		(void) pg_atomic_fetch_add_u64(&global->total_dsm_used, size);
+		(void) pg_atomic_fetch_add_u64(&global->total_dsm_reserved, size);
 
 	/* Report the current memory allocations for either postmaster or backend */
 	if (MyProcPid == PostmasterPid)
@@ -183,8 +183,8 @@ update_global_reservation(int64 size, pg_allocator_type type)
 	 * Verify totals are not negative. By checking as a post-condition, we are
 	 * more likely to identify the code that caused the problem.
 	 */
-	Assert((int64) pg_atomic_read_u64(&global->total_memory_used) >= 0);
-	Assert((int64) pg_atomic_read_u64(&global->total_dsm_used) >= 0);
+	Assert((int64) pg_atomic_read_u64(&global->total_memory_reserved) >= 0);
+	Assert((int64) pg_atomic_read_u64(&global->total_dsm_reserved) >= 0);
 
 	return true;
 }

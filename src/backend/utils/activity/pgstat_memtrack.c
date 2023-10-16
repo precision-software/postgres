@@ -72,8 +72,8 @@ pgstat_init_memtrack(PgStatShared_Memtrack *global)
 	shmem_mb = asMB(shmem_bytes);
 
 	/* Initialize the global memory counters. Total memory includes shared memory */
-	pg_atomic_init_u64(&global->total_memory_used, shmem_bytes);
-	pg_atomic_init_u64(&global->total_dsm_used, 0);
+	pg_atomic_init_u64(&global->total_memory_reserved, shmem_bytes);
+	pg_atomic_init_u64(&global->total_dsm_reserved, 0);
 
 	/*
 	 * Validate the server's memory limit if one is set.
@@ -137,8 +137,8 @@ pgstat_memtrack_snapshot_cb(void)
 									&global->postmasterChangeCount);
 
 	/* Get a copy of the global atomic counters. */
-	snap->dsm_reserved = (int64) pg_atomic_read_u64(&global->total_dsm_used);
-	snap->total_reserved = (int64) pg_atomic_read_u64(&global->total_memory_used);
+	snap->dsm_reserved = (int64) pg_atomic_read_u64(&global->total_dsm_reserved);
+	snap->total_reserved = (int64) pg_atomic_read_u64(&global->total_memory_reserved);
 }
 
 

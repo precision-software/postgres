@@ -360,8 +360,8 @@ typedef struct PgStatShared_Memtrack
 	LWLock		lock;
 	uint32		postmasterChangeCount;
 	PgStat_Memory	postmasterMemory;
-	pg_atomic_uint64  total_memory_used;
-	pg_atomic_uint64  total_dsm_used;
+	pg_atomic_uint64  total_memory_reserved;
+	pg_atomic_uint64  total_dsm_reserved;
 } PgStatShared_Memtrack;
 
 
