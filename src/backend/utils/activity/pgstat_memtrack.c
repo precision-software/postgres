@@ -137,8 +137,8 @@ pgstat_memtrack_snapshot_cb(void)
 									&global->postmasterChangeCount);
 
 	/* Get a copy of the global atomic counters. */
-	snap->total_dsm_used = (int64) pg_atomic_read_u64(&global->total_dsm_used);
-	snap->total_memory_used = (int64) pg_atomic_read_u64(&global->total_memory_used);
+	snap->dsm_reserved = (int64) pg_atomic_read_u64(&global->total_dsm_used);
+	snap->total_reserved = (int64) pg_atomic_read_u64(&global->total_memory_used);
 }
 
 
@@ -241,31 +241,31 @@ pg_stat_get_postmaster_memory(PG_FUNCTION_ARGS)
 
 
 /*
- * SQL callable function to get the global memory allocation statistics.
+ * SQL callable function to get the server's memory reservation statistics.
  * Returns a single row with the following values (in bytes)
- *   total_memory_allocated   - total memory allocated by server
- *   dsm_memory_allocated     - dsm memory allocated by server
+ *   total_memory_reserved   - total memory reserved by server
+ *   dsm_memory_reserved     - dsm memory reserved by server
  *   total_memory_available   - memory remaining (null if no limit set)
  *   static_shared_memory     - configured shared memory
  */
 Datum
-pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
+pg_stat_get_memory_reservation(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS	4
+#define PG_STAT_GET_SERVER_MEMORY_RESERVATION_COLS	4
 	TupleDesc	tupdesc;
-	int64		total_memory_used;
-	Datum		values[PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS] = {0};
-	bool		nulls[PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS] = {0};
+	int64		total_memory_reserved;
+	Datum		values[PG_STAT_GET_SERVER_MEMORY_RESERVATION_COLS] = {0};
+	bool		nulls[PG_STAT_GET_SERVER_MEMORY_RESERVATION_COLS] = {0};
 	PgStat_Memtrack *snap;
 
 	/* Get access to the snapshot */
 	snap = pgstat_fetch_stat_memtrack();
 
 	/* Initialise attributes information in the tuple descriptor. */
-	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_GLOBAL_MEMORY_ALLOCATION_COLS);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "total_memory_allocated",
+	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_SERVER_MEMORY_RESERVATION_COLS);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "total_memory_reserved",
 					   INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "dsm_memory_allocated",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "dsm_memory_reserved",
 					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "total_memory_available",
 					   INT8OID, -1, 0);
@@ -273,16 +273,16 @@ pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS)
 					   INT8OID, -1, 0);
 	BlessTupleDesc(tupdesc);
 
-	/* Get total_memory_used */
-	total_memory_used = snap->total_memory_used;
-	values[0] = Int64GetDatum(total_memory_used);
+	/* Get total_memory_reserved */
+	total_memory_reserved = snap->total_reserved;
+	values[0] = Int64GetDatum(total_memory_reserved);
 
-	/* Get dsm_memory_used */
-	values[1] = Int64GetDatum(snap->total_dsm_used);
+	/* Get dsm_memory_reserved */
+	values[1] = Int64GetDatum(snap->dsm_reserved);
 
 	/* Get total_memory_available */
 	if (max_total_memory_bytes > 0)
-		values[2] = Int64GetDatum(max_total_memory_bytes - total_memory_used);
+		values[2] = Int64GetDatum(max_total_memory_bytes - total_memory_reserved);
 	else
 		nulls[2] = true;
 

@@ -1,22 +1,22 @@
 
 -- verify the pg_stat_memory_allocation view exists
 SELECT
-        pid > 0, allocated_bytes >= 0, init_allocated_bytes >= 0, aset_allocated_bytes >= 0, dsm_allocated_bytes >= 0, generation_allocated_bytes >= 0, slab_allocated_bytes >= 0
+        pid > 0, total_reserved >= 0, init_reserved >= 0, aset_reserved >= 0, dsm_reserved >= 0, generation_reserved >= 0, slab_reserved >= 0
 FROM
-    pg_stat_memory_allocation limit 1;
+    pg_stat_memory_reservation limit 1;
 
 -- verify the pg_stat_global_memory_allocation view exists
 SELECT
-        total_memory_allocated >= 0, dsm_memory_allocated >= 0, total_memory_available >= 0, static_shared_memory >= 0
+        total_memory_reserved >= 0, dsm_memory_reserved >= 0, total_memory_available >= 0, static_shared_memory >= 0
 FROM
-    pg_stat_global_memory_allocation;
+    pg_stat_server_memory_reservation;
 
--- ensure that allocated_bytes exist for backends
+-- verify some common backends have reserved memory
 SELECT
-        allocated_bytes >= 0 AS result
+        total_reserved >= 0 AS result
 FROM
     pg_stat_activity ps
-        JOIN pg_stat_memory_allocation pa ON (pa.pid = ps.pid)
+        JOIN pg_stat_memory_reservation pa ON (pa.pid = ps.pid)
 WHERE
         backend_type IN ('checkpointer', 'background writer', 'walwriter', 'autovacuum launcher');
 
@@ -24,15 +24,15 @@ WHERE
 -- For each process, the total should be the sum of subtotals
 SELECT *
 FROM
-    pg_stat_memory_allocation
-WHERE allocated_bytes != (init_allocated_bytes + aset_allocated_bytes + dsm_allocated_bytes + generation_allocated_bytes + slab_allocated_bytes);
+    pg_stat_memory_reservation
+WHERE total_reserved != (init_reserved + aset_reserved + dsm_reserved + generation_reserved + slab_reserved);
 
 -- For each process, the initial allocation is >= 1 MB
 SELECT *
 FROM
-    pg_stat_memory_allocation
+    pg_stat_memory_reservation
 WHERE
-    init_allocated_bytes < 1024*1024;
+    init_reserved < 1024*1024;
 
 CREATE EXTENSION test_memtrack;
 
@@ -66,17 +66,17 @@ SELECT test_allocation(5,4,5*1024,1024);
 --  The delta should be 0.
 SELECT ABS(process_private - global_private) as delta
 FROM
-    (SELECT SUM(allocated_bytes - dsm_allocated_bytes)                             AS process_private
-    FROM pg_stat_memory_allocation as p),
-    (SELECT (total_memory_allocated - dsm_memory_allocated - static_shared_memory) AS global_private
-    FROM pg_stat_global_memory_allocation as g);
+    (SELECT SUM(total_reserved - dsm_reserved)                             AS process_private
+    FROM pg_stat_memory_reservation as p),
+    (SELECT (total_memory_reserved - dsm_memory_reserved - static_shared_memory) AS global_private
+    FROM pg_stat_server_memory_reservation as g);
 
 -- Verify the global dsm memory is at least the sum of processes dsm memory.
 -- The global can be larger if some process pinned dsm and than exited.
 SELECT *
 FROM
-    (SELECT SUM(dsm_allocated_bytes) as process_dsm from pg_stat_memory_allocation),
-    (SELECT dsm_memory_allocated as global_dsm from pg_stat_global_memory_allocation)
+    (SELECT SUM(dsm_reserved) as process_dsm from pg_stat_memory_reservation),
+    (SELECT dsm_memory_reserved as global_dsm from pg_stat_server_memory_reservation)
 WHERE
     global_dsm < process_dsm;
 

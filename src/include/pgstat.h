@@ -461,8 +461,8 @@ typedef struct PgStat_PendingWalStats
 typedef struct PgStat_Memtrack
 {
 	PgStat_Memory	postmasterMemory;
-	int64			total_memory_used;
-	int64			total_dsm_used;
+	int64			total_reserved;
+	int64			dsm_reserved;
 } PgStat_Memtrack;
 
 /*

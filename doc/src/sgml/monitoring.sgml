@@ -4541,9 +4541,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   </indexterm>
 
   <para>
-   The <structname>pg_stat_memory_allocation</structname> view will have one
+   The <structname>pg_stat_memory_reservation</structname> view will have one
    row per server process, showing information related to the current memory
-   allocation of that process. Due to the dynamic nature of memory allocations,
+   reserved for that process. Due to the dynamic nature of memory allocations,
    the values may not be exact, but they should be sufficient for monitoring memory use.
    Shared memory is attributed to the backend which created the
    shared memory, not to backends which only attach to it.
@@ -4552,8 +4552,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    readable.
   </para>
 
-  <table id="pg-stat-memory-allocation-view" xreflabel="pg_stat_memory_allocation">
-   <title><structname>pg_stat_memory_allocation</structname> View</title>
+  <table id="pg-stat-memory-reservation-view" xreflabel="pg_stat_memory_reservation">
+   <title><structname>pg_stat_memory_reservtion</structname> View</title>
    <tgroup cols="1">
     <thead>
      <row>
@@ -4587,58 +4587,58 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>allocated_bytes</structfield> <type>bigint</type>
+       <structfield>total_reserved</structfield> <type>bigint</type>
       </para>
      <para>
-      Total memory currently allocated to this backend.
+      Total memory currently reserved to this backend.
      </para></entry>
      </row>
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>aset_allocated_bytes</structfield> <type>bigint</type>
+       <structfield>aset_reserved</structfield> <type>bigint</type>
       </para>
       <para>
-       Subtotal of memory allocated via the allocation set allocator.
+       Subtotal of memory reserved via the allocation set allocator.
       </para></entry>
      </row>
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>dsm_allocated_bytes</structfield> <type>bigint</type>
+       <structfield>dsm_reserved</structfield> <type>bigint</type>
       </para>
       <para>
-       Subtotal representing dynamic shared memory (dsm) allocated by this backend.
+       Subtotal representing dynamic shared memory (dsm) reserved by this backend.
        When a backend exits, dsm allocations that have
        not been freed are considered long lived and will continue to be part of
        <structfield>dsm_memory_allocated</structfield>, found in the
-       <link linkend="monitoring-pg-stat-global-memory-allocation-view">
-       <structname>pg_stat_global_memory_allocation</structname></link> view.
+       <link linkend="monitoring-pg-stat-server-memory-allocation-view">
+       <structname>pg_stat_server_memory_allocation</structname></link> view.
       </para></entry>
      </row>
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>generation_allocated_bytes</structfield> <type>bigint</type>
+       <structfield>generation_reserved</structfield> <type>bigint</type>
       </para>
       <para>
-       Subtotal of memory allocated via the generation allocator.
+       Subtotal of memory reserved via the generation allocator.
       </para></entry>
      </row>
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>slab_allocated_bytes</structfield> <type>bigint</type>
+       <structfield>slab_reserved</structfield> <type>bigint</type>
       </para>
       <para>
-       Subtotal of memory allocated via the slab allocator.
+       Subtotal of memory reserved via the slab allocator.
       </para></entry>
      </row>
 
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>init_allocated_bytes</structfield> <type>bigint</type>
+       <structfield>init_reserved</structfield> <type>bigint</type>
       </para>
       <para>
        Subtotal of memory which was automatically reserved when a backend starts up.
@@ -4651,16 +4651,16 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
  </sect2>
 
- <sect2 id="monitoring-pg-stat-global-memory-allocation-view">
-  <title><structname>pg_stat_global_memory_allocation</structname></title>
+ <sect2 id="monitoring-pg-stat-server-memory-reservation-view">
+  <title><structname>pg_stat_server_memory_reservation</structname></title>
 
   <indexterm>
-   <primary>pg_stat_global-memory_allocation</primary>
+   <primary>pg_stat_server-memory_reservation</primary>
   </indexterm>
 
   <para>
-   The <structname>pg_stat_global_memory_allocation</structname> view shows
-   the current memory allocation for the entire server. This view
+   The <structname>pg_stat_server_memory_reservation</structname> view shows
+   the current memory reservations for the entire server. This view
    has a single row with a column for each global value.
    Due to the dynamic nature of memory allocations, the
    values may not be exact, but they should be sufficient for monitoring the server.
@@ -4669,8 +4669,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    more easily readable.
   </para>
 
-  <table id="pg-stat-global-memory-allocation-view" xreflabel="pg_stat_global_memory_allocation">
-   <title><structname>pg_stat_global_memory_allocation</structname> View</title>
+  <table id="pg-stat-server-memory-reservation-view" xreflabel="pg_stat_server_memory_allocation">
+   <title><structname>pg_stat_server_memory_reservation</structname> View</title>
    <tgroup cols="1">
     <thead>
      <row>
@@ -4686,11 +4686,11 @@ description | Waiting for a newly initialized WAL file to reach durable storage
     <tbody>
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>total_memory_allocated</structfield> <type>bigint</type>
+       <structfield>total_memory_reserved</structfield> <type>bigint</type>
       </para>
      <para>
-      Reports the total amount of memory (in bytes) currently allocated by the server.
-      This total includes shared memory as well as private memory allocated by
+      Reports the total amount of memory (in bytes) currently reserved by the server.
+      This total includes shared memory as well as private memory  by
       the backends.
       Due to the dynamic nature of memory allocation,
       this total is not exact, but it should be sufficient for monitoring purposes.

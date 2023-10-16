@@ -35,8 +35,8 @@ int64		max_total_memory_bytes = 0;
  */
 PgStat_Memory my_memory = INITIAL_ALLOCATED_MEMORY;
 PgStat_Memory reported_memory = NO_ALLOCATED_MEMORY;
-int64		allocation_lower_bound = 0;
-int64		allocation_upper_bound = 0;
+int64		reservation_lower_bound = 0;
+int64		reservation_upper_bound = 0;
 
 /*
  * Reset private memory counters to their startup values.
@@ -57,8 +57,8 @@ init_tracked_memory(void)
 	/*
 	 * Force early allocations to be reported once ProcGlobal is initialized.
 	 */
-	allocation_lower_bound = 0;
-	allocation_upper_bound = 0;
+	reservation_lower_bound = 0;
+	reservation_upper_bound = 0;
 }
 
 /*
@@ -79,37 +79,37 @@ exit_tracked_memory(void)
 	 */
 	for (int type = 0; type < PG_ALLOC_TYPE_MAX; type++)
 		if (type != PG_ALLOC_DSM)
-			update_local_allocation(-my_memory.subTotal[type], type);
+			update_local_reservation(-my_memory.subTotal[type], type);
 
 	/* Report the final values to shmem (just once) */
-	(void) update_global_allocation(0, 0);
+	(void) update_global_reservation(0, 0);
 
 	/*
 	 * Sometimes we get late memory releases after this function is called.
 	 * We've already reported all our private memory as released. Set the
 	 * bounds to ensure we don't report those late releases twice.
 	 */
-	allocation_lower_bound = INT64_MIN;
-	allocation_upper_bound = INT64_MAX;
+	reservation_lower_bound = INT64_MIN;
+	reservation_upper_bound = INT64_MAX;
 }
 
 
 /*
- * Update memory allocation for a new request.
+ * Update memory reservation for a new request.
  *
  * There are two versions of this function. This one, which updates
- * global values in shared memory, and an optimized update_local_allocation()
+ * global values in shared memory, and an optimized update_local_reservation()
  * which only updates private values.
  *
  * This routine is the "slow path". We invoke it periodically to update
  * global values and pgstat statistics.
  *
- * We also invoke it whenever we allocate DSM memory. This ensures the
+ * We also invoke it whenever we reserve DSM memory. This ensures the
  * DSM memory counter is up-to-date, and more important, ensures it
  * never goes negative.
  */
 bool
-update_global_allocation(int64 size, pg_allocator_type type)
+update_global_reservation(int64 size, pg_allocator_type type)
 {
 	int64		delta;
 	uint64		dummy;
@@ -125,7 +125,7 @@ update_global_allocation(int64 size, pg_allocator_type type)
 	 */
 	if (UsedShmemSegAddr == NULL || pgStatLocal.shmem == NULL || PostmasterPid == 0 ||
 		(MyProcPid != PostmasterPid && MyBEEntry == NULL))
-		return update_local_allocation(size, type);
+		return update_local_reservation(size, type);
 
 	/* Verify totals are not negative. This is both a pre- and post-condition. */
 	Assert((int64) pg_atomic_read_u64(&global->total_memory_used) >= 0);
@@ -155,7 +155,7 @@ update_global_allocation(int64 size, pg_allocator_type type)
 	 * Update the private memory counters. This must happen after the limit is
 	 * checked.
 	 */
-	(void) update_local_allocation(size, type);
+	(void) update_local_reservation(size, type);
 
 	/*
 	 * Update the global dsm memory counter. Since we always take this path
@@ -176,8 +176,8 @@ update_global_allocation(int64 size, pg_allocator_type type)
 	reported_memory = my_memory;
 
 	/* Update bounds so they bracket our new allocation size. */
-	allocation_upper_bound = my_memory.total + allocation_allowance_refill_qty;
-	allocation_lower_bound = my_memory.total - allocation_allowance_refill_qty;
+	reservation_upper_bound = my_memory.total + allocation_allowance_refill_qty;
+	reservation_lower_bound = my_memory.total - allocation_allowance_refill_qty;
 
 	/*
 	 * Verify totals are not negative. By checking as a post-condition, we are

@@ -217,7 +217,7 @@ StatsShmemInit(void)
 	}
 
 	/* Report startup memory allocations to pgstat */
-	update_global_allocation(0, 0);
+	update_global_reservation(0, 0);
 }
 
 void

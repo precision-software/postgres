@@ -605,7 +605,7 @@ AllocSetDelete(MemoryContext context)
 {
 	AllocSet	set = (AllocSet) context;
 	AllocBlock	block = set->blocks;
-	Size		keepersize PG_USED_FOR_ASSERTS_ONLY;
+	Size		keepersize;
 
 	Assert(AllocSetIsValid(set));
 
@@ -614,7 +614,7 @@ AllocSetDelete(MemoryContext context)
 	AllocSetCheck(context);
 #endif
 
-	/* Remember keeper block size for Assert below */
+	/* Remember keeper block size */
 	keepersize = KeeperBlock(set)->endptr - ((char *) set);
 
 	/*
@@ -676,7 +676,7 @@ AllocSetDelete(MemoryContext context)
 	Assert(context->mem_allocated == keepersize);
 
 	/* Finally, free the context header, including the keeper block */
-	free(set);
+	free_tracked(set, sizeof(*set) + keepersize, PG_ALLOC_ASET);
 }
 
 /*

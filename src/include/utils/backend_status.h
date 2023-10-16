@@ -97,10 +97,10 @@ typedef enum pg_allocator_type
 #define PG_ALLOC_TYPE_MAX  (PG_ALLOC_SLAB + 1)
 
 /*
- * Track memory allocated by each process,
+ * Track memory reserved by each process,
  * This structure is used both for backends and for the postmaster.
  * Note subTotal[PG_ALLOC_DSM] can go negative if one process
- * frees DSM memory which was allocated by another process.
+ * frees DSM memory which was reserved by another process.
  */
 typedef struct PgStat_Memory
 {

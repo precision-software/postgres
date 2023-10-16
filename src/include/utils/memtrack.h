@@ -43,8 +43,8 @@
  *
  * The "slow path" is invoked when my_memory.allocated_bytes exceeds these bounds.
  * Once invoked, it updates the reported values and sets new bounds.
- *   allocation_upper_bound:          update when my_memory.allocated_bytes exceeds this
- *   allocation_lower_bound:          update when my_memory.allocated_bytes drops below this
+ *   reservation_upper_bound:          update when my_memory.allocated_bytes exceeds this
+ *   reservation_lower_bound:          update when my_memory.allocated_bytes drops below this
  *   allocation_allowance_refill_qty  amount of memory to allocate or release before updating again.
  *
  * These counters are the values seen  by pgstat. They are a copy of reported_memory.
@@ -52,12 +52,12 @@
  *   proc->st_memory.subTotal[type]:      last subtotals for pgstat
  *
  * Limits on total server memory. If max_total_memory_bytes is zero, there is no limit.
- *   ProcGlobal->total_memory_used:       total amount of memory reserved by the server, including shared memory
+ *   ProcGlobal->total_reserved:       total amount of memory reserved by the server, including shared memory
  *   max_total_memory_bytes:               maximum memory the server can allocate
  *
  * And finally,
  *   initial_allocation_allowance:            each process consumes this much memory simply by existing.
- *   ProcGlobal->total_dsm_used:             total amount of DSM memory allocated by the server
+ *   ProcGlobal->dsm_reserved:             total amount of DSM memory allocated by the server
  *
  * Note this header file works in conjunction with memtrack.c and pgstat_memtrack.c.
  * The former is focused on gathering memory data and implementing a max
@@ -89,8 +89,8 @@ static const int64 allocation_allowance_refill_qty = 1024 * 1024;	/* 1MB */
 /* Manage memory allocation for backends. */
 extern PGDLLIMPORT PgStat_Memory my_memory;
 extern PGDLLIMPORT PgStat_Memory reported_memory;
-extern PGDLLIMPORT int64 allocation_upper_bound;
-extern PGDLLIMPORT int64 allocation_lower_bound;
+extern PGDLLIMPORT int64 reservation_upper_bound;
+extern PGDLLIMPORT int64 reservation_lower_bound;
 
 extern PGDLLIMPORT int64 max_total_memory_bytes;
 extern PGDLLIMPORT int32 max_total_memory_mb;
@@ -103,8 +103,8 @@ extern void exit_tracked_memory(void);
 extern void pgstat_init_memtrack(PgStatShared_Memtrack *global);
 
 /* Helper functions for memory tracking */
-static inline bool update_local_allocation(int64 size, pg_allocator_type type);
-extern bool update_global_allocation(int64 size, pg_allocator_type type);
+static inline bool update_local_reservation(int64 size, pg_allocator_type type);
+extern bool update_global_reservation(int64 size, pg_allocator_type type);
 
 /* pgstat functions */
 void pgstat_report_backend_memory(void);
@@ -114,7 +114,7 @@ bool pgstat_verify_totals(void);
 
 extern Datum pg_stat_get_postmaster_memory(PG_FUNCTION_ARGS);
 extern Datum pg_stat_get_backend_memory(PG_FUNCTION_ARGS);
-extern Datum pg_stat_get_global_memory_allocation(PG_FUNCTION_ARGS);
+extern Datum pg_stat_get_memory_reservation(PG_FUNCTION_ARGS);
 
 
 
@@ -214,11 +214,11 @@ reserve_tracked_memory(int64 size, pg_allocator_type type)
 		return true;
 
 	/* CASE: Bounds reached, take the slow path and update pgstat globals */
-	if (my_memory.total + size >= allocation_upper_bound || type == PG_ALLOC_DSM)
-		return update_global_allocation(size, type);
+	if (my_memory.total + size >= reservation_upper_bound || type == PG_ALLOC_DSM)
+		return update_global_reservation(size, type);
 
 	/* OTHERWISE: take the fast path and only update local variables */
-	return update_local_allocation(size, type);
+	return update_local_reservation(size, type);
 }
 
 /* ----------
@@ -238,11 +238,11 @@ release_tracked_memory(int64 size, pg_allocator_type type)
 		return true;
 
 	/* CASE: Bounds reached, take the slow path and update pgstat globals */
-	if (my_memory.total - size <= allocation_lower_bound || type == PG_ALLOC_DSM)
-		return update_global_allocation(-size, type);
+	if (my_memory.total - size <= reservation_lower_bound || type == PG_ALLOC_DSM)
+		return update_global_reservation(-size, type);
 
 	/* OTHERWISE: take the fast path and only update local variables */
-	return update_local_allocation(-size, type);
+	return update_local_reservation(-size, type);
 }
 
 
@@ -253,7 +253,7 @@ release_tracked_memory(int64 size, pg_allocator_type type)
 * on performance. It only updates private (non-shared) variables.
 */
 static inline bool
-update_local_allocation(int64 size, pg_allocator_type type)
+update_local_reservation(int64 size, pg_allocator_type type)
 {
 	/* Update our local memory counters. */
 	my_memory.total += size;

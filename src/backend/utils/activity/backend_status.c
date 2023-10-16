@@ -274,7 +274,7 @@ pgstat_beinit(void)
 	on_shmem_exit(pgstat_beshutdown_hook, 0);
 
 	/* Post the memory used so far to pgstats */
-	update_global_allocation(0, 0);
+	update_global_reservation(0, 0);
 }
 
 
