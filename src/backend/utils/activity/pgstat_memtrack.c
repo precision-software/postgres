@@ -114,7 +114,7 @@ PgStat_Memtrack *
 pgstat_fetch_stat_memtrack(void)
 {
 	/* Take a snapshot of both the memtrack globals and the backends */
-	pgstat_read_backend_status();
+	pgstat_read_current_status();
 
 	/* Return a pointer to the globals snapshot */
 	return &pgStatLocal.snapshot.memtrack;
