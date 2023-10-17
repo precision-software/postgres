@@ -4534,14 +4534,14 @@ description | Waiting for a newly initialized WAL file to reach durable storage
  </sect2>
 
  <sect2 id="monitoring-pg-stat-memory-reservation-view">
-  <title><structname>pg_stat_memory_reservation</structname></title>
+  <title><structname>pg_memory_reservation</structname></title>
 
   <indexterm>
-   <primary>pg_stat_memory_allocation</primary>
+   <primary>pg_memory_allocation</primary>
   </indexterm>
 
   <para>
-   The <structname>pg_stat_memory_reservation</structname> view will have one
+   The <structname>pg_memory_reservation</structname> view will have one
    row per server process showing information related to the current memory
    reserved for that process. Due to the dynamic nature of memory allocations,
    the values may not be exact, but they should be sufficient for monitoring memory use.
@@ -4552,8 +4552,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    readable.
   </para>
 
-  <table id="pg-stat-memory-reservation-view" xreflabel="pg_stat_memory_reservation">
-   <title><structname>pg_stat_memory_reservtion</structname> View</title>
+  <table id="pg-stat-memory-reservation-view" xreflabel="pg_memory_reservation">
+   <title><structname>pg_memory_reservtion</structname> View</title>
    <tgroup cols="1">
     <thead>
      <row>
@@ -4613,7 +4613,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        not been freed are considered long lived and will continue to be part of
        <structfield>dsm_memory_allocated</structfield>, found in the
        <link linkend="monitoring-pg-stat-global-memory-tracking-view">
-       <structname>pg_stat_global_memory_tracking</structname></link> view.
+       <structname>pg_global_memory_tracking</structname></link> view.
       </para></entry>
      </row>
 
@@ -4652,21 +4652,21 @@ description | Waiting for a newly initialized WAL file to reach durable storage
  </sect2>
 
  <sect2 id="monitoring-pg-stat-backend_memory-reservation-view">
-   <title><structname>pg_stat_backend_memory_reservation</structname></title>
+   <title><structname>pg_backend_memory_reservation</structname></title>
 
    <indexterm>
-    <primary>pg_stat_backend_memory_allocation</primary>
+    <primary>pg_backend_memory_allocation</primary>
    </indexterm>
 
    <para>
-    The <structname>pg_stat_backendPmemory_reservation</structname> view has
-    a single row showing memory reservations for the backend process.
-    Unlike the pg_stat_memory_reservation view, these numbers are accurate
+    The <structname>pg_backendPmemory_reservation</structname> view has
+    a single row showing memory reservations for the current backend process.
+    Unlike the pg_memory_reservation view, these numbers are accurate
     and up-to-date.
    </para>
 
-   <table id="pg-stat-backend_memory-reservation-view" xreflabel="pg_stat_backend_memory_reservation">
-    <title><structname>pg_stat_backendPmemory_reservtion</structname> View</title>
+   <table id="pg-stat-backend_memory-reservation-view" xreflabel="pg_backend_memory_reservation">
+    <title><structname>pg_backendPmemory_reservtion</structname> View</title>
     <tgroup cols="1">
      <thead>
       <row>
@@ -4726,7 +4726,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         not been freed are considered long lived and will continue to be part of
         <structfield>dsm_memory_allocated</structfield>, found in the
         <link linkend="monitoring-pg-stat-global-memory-tracking-view">
-        <structname>pg_stat_global_memory_tracking</structname></link> view.
+        <structname>pg_global_memory_tracking</structname></link> view.
        </para></entry>
       </row>
 
@@ -4765,14 +4765,14 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   </sect2>
 
  <sect2 id="monitoring-pg-stat-global-memory-tracking-view">
-  <title><structname>pg_stat_global_memory_tracking</structname></title>
+  <title><structname>pg_global_memory_tracking</structname></title>
 
   <indexterm>
-   <primary>pg_stat_global-memory_tracking</primary>
+   <primary>pg_global-memory_tracking</primary>
   </indexterm>
 
   <para>
-   The <structname>pg_stat_global_memory_tracking</structname> view shows
+   The <structname>pg_global_memory_tracking</structname> view shows
    a memory reservation summary for the entire server. This view
    has a single row with a column for each global value.
    Due to the dynamic nature of memory allocations, the
