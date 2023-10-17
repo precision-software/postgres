@@ -89,6 +89,7 @@ static const int64 allocation_allowance_refill_qty = 1024 * 1024;	/* 1MB */
 /* Manage memory allocation for backends. */
 extern PGDLLIMPORT PgStat_Memory my_memory;
 extern PGDLLIMPORT PgStat_Memory reported_memory;
+extern PGDLLIMPORT PgStat_Memory my_memory_snap;
 extern PGDLLIMPORT int64 reservation_upper_bound;
 extern PGDLLIMPORT int64 reservation_lower_bound;
 
@@ -106,17 +107,16 @@ extern void pgstat_init_memtrack(PgStatShared_Memtrack *global);
 static inline bool update_local_reservation(int64 size, pg_allocator_type type);
 extern bool update_global_reservation(int64 size, pg_allocator_type type);
 
-/* pgstat functions */
+/* pgstat helper functions */
 void pgstat_report_backend_memory(void);
 void pgstat_report_postmaster_memory(void);
 void pgstat_init_memtrack(PgStatShared_Memtrack *global);
-bool pgstat_verify_totals(void);
+void pgstat_backend_memory_reservation_cb(void);
 
-extern Datum pg_stat_get_postmaster_memory(PG_FUNCTION_ARGS);
-extern Datum pg_stat_get_backend_memory(PG_FUNCTION_ARGS);
+/* SQL Callable functions */
 extern Datum pg_stat_get_memory_reservation(PG_FUNCTION_ARGS);
-
-
+extern Datum pg_stat_get_backend_memory_reservation(PG_FUNCTION_ARGS);
+extern Datum pg_stat_get_global_memory_tracking(PG_FUNCTION_ARGS);
 
 /*--------------------------------------------
  * Keep track of memory coming from malloc()/free().

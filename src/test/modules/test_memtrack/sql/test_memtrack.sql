@@ -5,11 +5,11 @@ SELECT
 FROM
     pg_stat_memory_reservation limit 1;
 
--- verify the pg_stat_global_memory_allocation view exists
+-- verify the pg_stat_global_memory_tracking view exists
 SELECT
         total_memory_reserved >= 0, dsm_memory_reserved >= 0, total_memory_available >= 0, static_shared_memory >= 0
 FROM
-    pg_stat_server_memory_reservation;
+    pg_stat_global_memory_tracking;
 
 -- verify some common backends have reserved memory
 SELECT
@@ -33,6 +33,20 @@ FROM
     pg_stat_memory_reservation
 WHERE
     init_reserved < 1024*1024;
+
+-- Same should be true for the current backend values
+SELECT *
+FROM
+    pg_stat_backend_memory_reservation
+WHERE total_reserved != (init_reserved + aset_reserved + dsm_reserved + generation_reserved + slab_reserved);
+
+-- For current backend process, the initial allocation is >= 1 MB
+SELECT *
+FROM
+    pg_stat_backend_memory_reservation
+WHERE
+        init_reserved < 1024*1024;
+
 
 CREATE EXTENSION test_memtrack;
 
@@ -69,14 +83,14 @@ FROM
     (SELECT SUM(total_reserved - dsm_reserved)                             AS process_private
     FROM pg_stat_memory_reservation as p),
     (SELECT (total_memory_reserved - dsm_memory_reserved - static_shared_memory) AS global_private
-    FROM pg_stat_server_memory_reservation as g);
+    FROM pg_stat_global_memory_tracking as g);
 
 -- Verify the global dsm memory is at least the sum of processes dsm memory.
 -- The global can be larger if some process pinned dsm and than exited.
 SELECT *
 FROM
     (SELECT SUM(dsm_reserved) as process_dsm from pg_stat_memory_reservation),
-    (SELECT dsm_memory_reserved as global_dsm from pg_stat_server_memory_reservation)
+    (SELECT dsm_memory_reserved as global_dsm from pg_stat_global_memory_tracking)
 WHERE
     global_dsm < process_dsm;
 

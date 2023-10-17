@@ -4533,8 +4533,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
  </sect2>
 
- <sect2 id="monitoring-pg-stat-memory-allocation-view">
-  <title><structname>pg_stat_memory_allocation</structname></title>
+ <sect2 id="monitoring-pg-stat-memory-reservation-view">
+  <title><structname>pg_stat_memory_reservation</structname></title>
 
   <indexterm>
    <primary>pg_stat_memory_allocation</primary>
@@ -4542,7 +4542,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
   <para>
    The <structname>pg_stat_memory_reservation</structname> view will have one
-   row per server process, showing information related to the current memory
+   row per server process showing information related to the current memory
    reserved for that process. Due to the dynamic nature of memory allocations,
    the values may not be exact, but they should be sufficient for monitoring memory use.
    Shared memory is attributed to the backend which created the
@@ -4612,8 +4612,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        When a backend exits, dsm allocations that have
        not been freed are considered long lived and will continue to be part of
        <structfield>dsm_memory_allocated</structfield>, found in the
-       <link linkend="monitoring-pg-stat-server-memory-allocation-view">
-       <structname>pg_stat_server_memory_allocation</structname></link> view.
+       <link linkend="monitoring-pg-stat-global-memory-tracking-view">
+       <structname>pg_stat_global_memory_tracking</structname></link> view.
       </para></entry>
      </row>
 
@@ -4651,16 +4651,129 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
  </sect2>
 
- <sect2 id="monitoring-pg-stat-server-memory-reservation-view">
-  <title><structname>pg_stat_server_memory_reservation</structname></title>
+ <sect2 id="monitoring-pg-stat-backend_memory-reservation-view">
+   <title><structname>pg_stat_backend_memory_reservation</structname></title>
+
+   <indexterm>
+    <primary>pg_stat_backend_memory_allocation</primary>
+   </indexterm>
+
+   <para>
+    The <structname>pg_stat_backendPmemory_reservation</structname> view has
+    a single row showing memory reservations for the backend process.
+    Unlike the pg_stat_memory_reservation view, these numbers are accurate
+    and up-to-date.
+   </para>
+
+   <table id="pg-stat-backend_memory-reservation-view" xreflabel="pg_stat_backend_memory_reservation">
+    <title><structname>pg_stat_backendPmemory_reservtion</structname> View</title>
+    <tgroup cols="1">
+     <thead>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        Column Type
+       </para>
+       <para>
+        Description
+       </para></entry>
+      </row>
+     </thead>
+
+     <tbody>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>datid</structfield> <type>oid</type>
+       </para>
+       <para>
+        OID of the database this backend is connected to
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>pid</structfield> <type>integer</type>
+       </para>
+       <para>
+        Process ID of this backend
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>total_reserved</structfield> <type>bigint</type>
+       </para>
+      <para>
+       Total memory currently reserved to this backend.
+      </para></entry>
+      </row>
+
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>aset_reserved</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Subtotal of memory reserved via the allocation set allocator.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>dsm_reserved</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Subtotal representing dynamic shared memory (dsm) reserved by this backend.
+        When a backend exits, dsm allocations that have
+        not been freed are considered long lived and will continue to be part of
+        <structfield>dsm_memory_allocated</structfield>, found in the
+        <link linkend="monitoring-pg-stat-global-memory-tracking-view">
+        <structname>pg_stat_global_memory_tracking</structname></link> view.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>generation_reserved</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Subtotal of memory reserved via the generation allocator.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>slab_reserved</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Subtotal of memory reserved via the slab allocator.
+       </para></entry>
+      </row>
+
+
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>init_reserved</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Subtotal of memory which was automatically reserved when a backend starts up.
+       </para></entry>
+      </row>
+
+     </tbody>
+    </tgroup>
+   </table>
+
+  </sect2>
+
+ <sect2 id="monitoring-pg-stat-global-memory-tracking-view">
+  <title><structname>pg_stat_global_memory_tracking</structname></title>
 
   <indexterm>
-   <primary>pg_stat_server-memory_reservation</primary>
+   <primary>pg_stat_global-memory_tracking</primary>
   </indexterm>
 
   <para>
-   The <structname>pg_stat_server_memory_reservation</structname> view shows
-   the current memory reservations for the entire server. This view
+   The <structname>pg_stat_global_memory_tracking</structname> view shows
+   a memory reservation summary for the entire server. This view
    has a single row with a column for each global value.
    Due to the dynamic nature of memory allocations, the
    values may not be exact, but they should be sufficient for monitoring the server.

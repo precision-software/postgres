@@ -750,6 +750,13 @@ pgstat_read_current_status(void)
 #endif
 	int			i;
 
+	/*
+	 * For consistency, take a snapshot of the memtrack globals.
+	 * We do both snapshots to ensure the global memory total matches
+	 * the sum of backend memory.
+	 */
+	pgstat_snapshot_fixed(PGSTAT_KIND_MEMORYTRACK);
+
 	if (localBackendStatusTable)
 		return;					/* already done */
 
@@ -887,13 +894,6 @@ pgstat_read_current_status(void)
 
 	/* Set the pointer only after completion of a valid table */
 	localBackendStatusTable = localtable;
-
-	/*
-	 * For consistency, take a snapshot of the global memory state.
-	 * We do both snapshots to ensure the global memory total matches
-	 * the sum of backend memory.
-	 */
-	pgstat_memtrack_snapshot_cb();
 }
 
 

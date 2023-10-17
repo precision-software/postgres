@@ -2171,8 +2171,8 @@ include_dir 'conf.d'
         query/transaction to fail. Further requests will not be allocated until
         total memory reserved drops below the limit.
         Total memory reserved (<varname>total_memory_used</varname>) is displayed in the
-        <link linkend="monitoring-pg-stat-global-memory-reservation-view">
-        <structname>pg_stat_server_memory_reservation</structname></link> view.
+        <link linkend="monitoring-pg-stat-global-memory-tracking-view">
+        <structname>pg_stat_global_memory_tracking</structname></link> view.
        </para>
       </listitem>
      </varlistentry>

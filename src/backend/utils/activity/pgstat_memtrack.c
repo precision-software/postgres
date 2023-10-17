@@ -1,7 +1,7 @@
 /* -------------------------------------------------------------------------
  *
  * pgstat_memtrack.c
- *	  Implementation of memory tracking statistics other than backends.
+ *	  Implementation of memory tracking statistics.
  *
  * This file contains the implementation of memtrack statistics. It is kept
  * separate from pgstat.c to enforce the line between the statistics access /
@@ -24,6 +24,9 @@
 #include "storage/pg_shmem.h"
 
 inline static Size asMB(Size bytes);
+static void get_postmaster_reservation_row(bool *nulls, Datum *values);
+static void get_backend_reservation_row(int idx, bool *nulls, Datum *values);
+static void clearRow(bool *nulls, Datum *values, int count);
 
 /*
  * Report postmaster memory allocations to pgstat.
@@ -122,7 +125,7 @@ pgstat_fetch_stat_memtrack(void)
 
 
 /*
- * Populate the memtrack globals snapshot with current values.
+ * Callback to populate the memtrack globals snapshot with current values.
  */
 void
 pgstat_memtrack_snapshot_cb(void)
@@ -155,71 +158,85 @@ pgstat_memtrack_snapshot_cb(void)
  *    slab_allocated_bytes			- subtotal from slab allocator
  */
 Datum
-pg_stat_get_backend_memory(PG_FUNCTION_ARGS)
+pg_stat_get_memory_reservation(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_MEMORY_ALLOCATION_COLS	(3 + PG_ALLOC_TYPE_MAX)
-	int			num_backends;
-	int			backendIdx;
-	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+#define RESERVATION_COLS    (3 + PG_ALLOC_TYPE_MAX)
+	int num_backends;
+	int backendIdx;
+	Datum values[RESERVATION_COLS];
+	bool nulls[RESERVATION_COLS];
 
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	InitMaterializedSRF(fcinfo, 0);
 
-	/* Do for each backend process */
+	/* Take a snapshot if not already done */
+	pgstat_read_current_status();
+
+	/* Get the postmaster memory reservations and output the row */
+	get_postmaster_reservation_row(nulls, values);
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+	/* Do for each backend */
 	num_backends = pgstat_fetch_stat_numbackends();
 	for (backendIdx = 1; backendIdx <= num_backends; backendIdx++)
 	{
-		/* Define data for the row */
-		Datum		values[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
-		bool		nulls[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
-		LocalPgBackendStatus *local_beentry;
-		PgBackendStatus *beentry;
-		pg_allocator_type type;
 
-		/* Fetch the data for the backend */
-		local_beentry = pgstat_get_local_beentry_by_index(backendIdx);
-		beentry = &local_beentry->backendStatus;
-
-		/* Database id */
-		if (beentry->st_databaseid != InvalidOid)
-			values[0] = ObjectIdGetDatum(beentry->st_databaseid);
-		else
-			nulls[0] = true;
-
-		/* Process id */
-		values[1] = Int32GetDatum(beentry->st_procpid);
-
-		/* total memory allocated */
-		values[2] = UInt64GetDatum(beentry->st_memory.total);
-
-		/* Subtotals of memory */
-		for (type=0; type < PG_ALLOC_TYPE_MAX; type++)
-			values[3 + type] = UInt64GetDatum(beentry->st_memory.subTotal[type]);
-
+		/* Get the backend's memory reservations and output the row */
+		get_backend_reservation_row(backendIdx, nulls, values);
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
 
-	return (Datum) 0;
+	return (Datum)0;
 }
 
 
 /*
- * SQL callable function to get the Postmaster's memory allocation.
- * Returns a single row similar to pg_stat_get_backend_memory();
+ * Get a backend process' memory reservations as a row of values.
  */
-Datum
-pg_stat_get_postmaster_memory(PG_FUNCTION_ARGS)
+static void
+get_backend_reservation_row(int idx,  bool *nulls, Datum *values)
 {
-	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	LocalPgBackendStatus *local_beentry;
+	PgBackendStatus *beentry;
+	pg_allocator_type type;
+
+	/* Fetch the data for the backend */
+	local_beentry = pgstat_get_local_beentry_by_index(idx);
+	beentry = &local_beentry->backendStatus;
+
+	clearRow(nulls, values, RESERVATION_COLS);
+
+	/* Database id */
+	if (beentry->st_databaseid != InvalidOid)
+		values[0] = ObjectIdGetDatum(beentry->st_databaseid);
+	else
+		nulls[0] = true;
+
+	/* Process id */
+	values[1] = Int32GetDatum(beentry->st_procpid);
+
+	/* total memory allocated */
+	values[2] = UInt64GetDatum(beentry->st_memory.total);
+
+	/* Subtotals of memory */
+	for (type = 0; type < PG_ALLOC_TYPE_MAX; type++)
+		values[3 + type] = UInt64GetDatum(beentry->st_memory.subTotal[type]);
+}
+
+
+/*
+ * Get the Postmaster's memory allocation as a row of values.
+ */
+static void
+get_postmaster_reservation_row(bool *nulls, Datum *values)
+{
 	PgStat_Memtrack *memtrack;
 	pg_allocator_type type;
 
-	/* A single row, similar to pg_stat_backend_memory */
-	Datum values[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
-	bool nulls[PG_STAT_GET_MEMORY_ALLOCATION_COLS] = {0};
+	clearRow(nulls, values, RESERVATION_COLS);
 
 	/* Fetch the values and build a row */
 	memtrack = pgstat_fetch_stat_memtrack();
-	InitMaterializedSRF(fcinfo, 0);
 
 	/* database - postmaster is not attached to a database */
 	nulls[0] = true;
@@ -233,10 +250,6 @@ pg_stat_get_postmaster_memory(PG_FUNCTION_ARGS)
 	/* Report subtotals of memory allocated */
 	for (type = 0; type < PG_ALLOC_TYPE_MAX; type++)
 		values[3 + type] = UInt64GetDatum(memtrack->postmasterMemory.subTotal[type]);
-
-	/* Return a single tuple */
-	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
-	return (Datum) 0;
 }
 
 
@@ -249,20 +262,21 @@ pg_stat_get_postmaster_memory(PG_FUNCTION_ARGS)
  *   static_shared_memory     - configured shared memory
  */
 Datum
-pg_stat_get_memory_reservation(PG_FUNCTION_ARGS)
+pg_stat_get_global_memory_tracking(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_SERVER_MEMORY_RESERVATION_COLS	4
+#define MEMTRACK_COLS	4
+
 	TupleDesc	tupdesc;
 	int64		total_memory_reserved;
-	Datum		values[PG_STAT_GET_SERVER_MEMORY_RESERVATION_COLS] = {0};
-	bool		nulls[PG_STAT_GET_SERVER_MEMORY_RESERVATION_COLS] = {0};
+	Datum		values[MEMTRACK_COLS];
+	bool		nulls[MEMTRACK_COLS];
 	PgStat_Memtrack *snap;
 
 	/* Get access to the snapshot */
 	snap = pgstat_fetch_stat_memtrack();
 
 	/* Initialise attributes information in the tuple descriptor. */
-	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_SERVER_MEMORY_RESERVATION_COLS);
+	tupdesc = CreateTemplateTupleDesc(MEMTRACK_COLS);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "total_memory_reserved",
 					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "dsm_memory_reserved",
@@ -272,6 +286,9 @@ pg_stat_get_memory_reservation(PG_FUNCTION_ARGS)
 	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "static_shared_memory",
 					   INT8OID, -1, 0);
 	BlessTupleDesc(tupdesc);
+
+	/* Start with clean row */
+	clearRow(nulls, values, MEMTRACK_COLS);
 
 	/* Get total_memory_reserved */
 	total_memory_reserved = snap->total_reserved;
@@ -293,6 +310,73 @@ pg_stat_get_memory_reservation(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
+
+PgStat_Memory my_memory_snap = {0};
+
+/*
+ * Callback function to take a snapshot of private memory reservations.
+ */
+void
+pgstat_backend_memory_reservation_cb()
+{
+	my_memory_snap = my_memory;
+}
+
+/*
+ * SQL callable function to return the memory reservations
+ * for the calling backend. This function returns current
+ * accurate numbers, whereas pg_stat_memory_reservation() returns
+ * slightly out-of-date, approximate numbers.
+ */
+Datum
+pg_stat_get_backend_memory_reservation(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	pg_allocator_type type;
+	Datum values[RESERVATION_COLS];
+	bool nulls[RESERVATION_COLS];
+
+	/* A single row, similar to pg_stat_backend_memory */
+	InitMaterializedSRF(fcinfo, 0);
+	clearRow(nulls, values, RESERVATION_COLS);
+
+	/* Get a snapshot of the current values */
+	pgstat_snapshot_fixed(PGSTAT_KIND_BACKEND_MEMORY);
+
+	/* database */
+	if (MyDatabaseId == InvalidOid)
+		nulls[0] = true;
+	else
+		values[0] = UInt32GetDatum(MyDatabaseId);
+
+	/* pid */
+	values[1] = UInt32GetDatum(MyProcPid);
+
+	/* Report total menory allocated */
+	values[2] = UInt64GetDatum(my_memory_snap.total);
+
+	/* Report subtotals of memory allocated */
+	for (type = 0; type < PG_ALLOC_TYPE_MAX; type++)
+		values[3 + type] = UInt64GetDatum(my_memory_snap.subTotal[type]);
+
+	/* Return a single tuple */
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	return (Datum) 0;
+}
+
+/*
+ * Clear out a row of values.
+ */
+static void
+clearRow(bool *nulls, Datum *values, int count)
+{
+	int idx;
+	for (idx = 0; idx < count; idx++)
+	{
+		nulls[idx] = false;
+		values[idx] = (Datum)0;
+	}
+}
 
 /*
  * Convert size in bytes to size in MB, rounding up.
