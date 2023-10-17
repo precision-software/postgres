@@ -4537,7 +4537,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   <title><structname>pg_memory_reservation</structname></title>
 
   <indexterm>
-   <primary>pg_memory_allocation</primary>
+   <primary>pg_memory_reservation</primary>
   </indexterm>
 
   <para>
@@ -4655,7 +4655,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    <title><structname>pg_backend_memory_reservation</structname></title>
 
    <indexterm>
-    <primary>pg_backend_memory_allocation</primary>
+    <primary>pg_backend_memory_reservation</primary>
    </indexterm>
 
    <para>
@@ -4782,8 +4782,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    more easily readable.
   </para>
 
-  <table id="pg-stat-server-memory-reservation-view" xreflabel="pg_stat_server_memory_allocation">
-   <title><structname>pg_stat_server_memory_reservation</structname> View</title>
+  <table id="pg-stat-server-memory-reservation-view" xreflabel="pg_stat_global_memory_tracking">
+   <title><structname>pg_stat_global_memory_tracking</structname> View</title>
    <tgroup cols="1">
     <thead>
      <row>
