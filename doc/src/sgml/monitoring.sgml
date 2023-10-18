@@ -4542,7 +4542,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
   <para>
    The <structname>pg_stat_memory_reservation</structname> view will have one
-   row per server process showing information related to the current memory
+   row per server process showing how much memory is
    reserved for that process. Due to the dynamic nature of memory allocations,
    the values may not be exact, but they should be sufficient for monitoring memory use.
    Shared memory is attributed to the backend which created the
@@ -4651,7 +4651,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
  </sect2>
 
- <sect2 id="monitoring-pg-backend_memory-allocation view">
+ <sect2 id="monitoring-pg-backend-memory-allocation-view">
    <title><structname>pg_backend_memory_allocation</structname></title>
 
    <indexterm>
@@ -4661,8 +4661,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    <para>
     The <structname>pg_backend_memory_allocation</structname> view has
     a single row showing memory allocated for the current backend process.
-    The row contains the same fields as the corresponding row in
-    the pg_memory_reservation view,
+    The row contains the same fields as <structname> pg_memory_reservation </structname>,
     except these numbers are accurate and up-to-date.
    </para>
 
