@@ -3,20 +3,20 @@
 SELECT
         pid > 0, total_reserved >= 0, init_reserved >= 0, aset_reserved >= 0, dsm_reserved >= 0, generation_reserved >= 0, slab_reserved >= 0
 FROM
-    pg_memory_reservation limit 1;
+    pg_stat_memory_reservation limit 1;
 
 -- verify the pg_stat_global_memory_tracking view exists
 SELECT
         total_memory_reserved >= 0, dsm_memory_reserved >= 0, total_memory_available >= 0, static_shared_memory >= 0
 FROM
-    pg_global_memory_tracking;
+    pg_stat_global_memory_tracking;
 
 -- verify some common backends have reserved memory
 SELECT
         total_reserved >= 0 AS result
 FROM
     pg_stat_activity ps
-        JOIN pg_memory_reservation pa ON (pa.pid = ps.pid)
+        JOIN pg_stat_memory_reservation pa ON (pa.pid = ps.pid)
 WHERE
         backend_type IN ('checkpointer', 'background writer', 'walwriter', 'autovacuum launcher');
 
@@ -24,26 +24,26 @@ WHERE
 -- For each process, the total should be the sum of subtotals
 SELECT *
 FROM
-    pg_memory_reservation
+    pg_stat_memory_reservation
 WHERE total_reserved != (init_reserved + aset_reserved + dsm_reserved + generation_reserved + slab_reserved);
 
 -- For each process, the initial allocation is >= 1 MB
 SELECT *
 FROM
-    pg_memory_reservation
+    pg_stat_memory_reservation
 WHERE
     init_reserved < 1024*1024;
 
 -- Same should be true for the current backend values
 SELECT *
 FROM
-    pg_backend_memory_reservation
+    pg_backend_memory_allocation
 WHERE total_reserved != (init_reserved + aset_reserved + dsm_reserved + generation_reserved + slab_reserved);
 
 -- For current backend process, the initial allocation is >= 1 MB
 SELECT *
 FROM
-    pg_backend_memory_reservation
+    pg_backend_memory_allocation
 WHERE
         init_reserved < 1024*1024;
 
@@ -81,26 +81,26 @@ SELECT test_allocation(5,4,5*1024,1024);
 SELECT ABS(process_private - global_private) as delta
 FROM
     (SELECT SUM(total_reserved - dsm_reserved)                             AS process_private
-    FROM pg_memory_reservation as p),
+    FROM pg_stat_memory_reservation as p),
     (SELECT (total_memory_reserved - dsm_memory_reserved - static_shared_memory) AS global_private
-    FROM pg_global_memory_tracking as g);
+    FROM pg_stat_global_memory_tracking as g);
 
 -- Verify the global dsm memory is at least the sum of processes dsm memory.
 -- The global can be larger if some process pinned dsm and than exited.
 SELECT *
 FROM
-    (SELECT SUM(dsm_reserved) as process_dsm from pg_memory_reservation),
-    (SELECT dsm_memory_reserved as global_dsm from pg_global_memory_tracking)
+    (SELECT SUM(dsm_reserved) as process_dsm from pg_stat_memory_reservation),
+    (SELECT dsm_memory_reserved as global_dsm from pg_stat_global_memory_tracking)
 WHERE
     global_dsm < process_dsm;
 
--- Verify the backend's reservations match the memory contexts
+-- Verify the backend's reservations match the memory contexts.
+-- Since we don't take snapshots, the values are dynamic and will not
+-- line up exactly.
 SELECT *, ABS(context_sum - backend_private) as delta from
     (SELECT SUM(total_bytes) as context_sum, COUNT(*) as nr_contexts, SUM(used_bytes) as used_sum from pg_backend_memory_contexts as a),
-    (SELECT total_reserved - dsm_reserved - init_reserved as backend_private from pg_backend_memory_reservation as b)
-WHERE context_sum != backend_private;
-
-select * from pg_backend_memory_contexts;
+    (SELECT total_reserved - dsm_reserved - init_reserved as backend_private from pg_backend_memory_allocation as b)
+WHERE ABS(context_sum - backend_private) > nr_contexts * 1024;
 
 -- Allocate more memory than we have available.
 -- (this should fail because we configured max_total_memory to 1024 Mb)

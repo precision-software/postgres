@@ -4652,21 +4652,21 @@ description | Waiting for a newly initialized WAL file to reach durable storage
  </sect2>
 
  <sect2 id="monitoring-pg-stat-backend_memory-reservation-view">
-   <title><structname>pg_backend_memory_reservation</structname></title>
+   <title><structname>pg_stat_backend_memory_allocation</structname></title>
 
    <indexterm>
-    <primary>pg_backend_memory_reservation</primary>
+    <primary>pg_stat_backend_memory_allocation</primary>
    </indexterm>
 
    <para>
-    The <structname>pg_backendPmemory_reservation</structname> view has
-    a single row showing memory reservations for the current backend process.
+    The <structname>pg_backend_memory_allocation</structname> view has
+    a single row showing memory allocated for the current backend process.
     Unlike the pg_memory_reservation view, these numbers are accurate
     and up-to-date.
    </para>
 
-   <table id="pg-stat-backend_memory-reservation-view" xreflabel="pg_backend_memory_reservation">
-    <title><structname>pg_backendPmemory_reservtion</structname> View</title>
+   <table id="pg-stat-backend-memory-reservation-view" xreflabel="pg_stat_backend_memory_allocation">
+    <title><structname>pg_stat_backend_memory_reservation</structname> View</title>
     <tgroup cols="1">
      <thead>
       <row>
@@ -4782,7 +4782,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    more easily readable.
   </para>
 
-  <table id="pg-stat-server-memory-reservation-view" xreflabel="pg_stat_global_memory_tracking">
+  <table id="pg-stat-global-memory-tracking-view" xreflabel="pg_stat_global_memory_tracking">
    <title><structname>pg_stat_global_memory_tracking</structname> View</title>
    <tgroup cols="1">
     <thead>

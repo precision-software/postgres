@@ -1303,6 +1303,15 @@ pg_available_extensions| SELECT e.name,
     e.comment
    FROM (pg_available_extensions() e(name, default_version, comment)
      LEFT JOIN pg_extension x ON ((e.name = x.extname)));
+pg_backend_memory_allocation| SELECT datid,
+    pid,
+    total_reserved,
+    init_reserved,
+    aset_reserved,
+    dsm_reserved,
+    generation_reserved,
+    slab_reserved
+   FROM pg_get_backend_memory_allocation() pg_get_backend_memory_allocation(datid, pid, total_reserved, init_reserved, aset_reserved, dsm_reserved, generation_reserved, slab_reserved);
 pg_backend_memory_contexts| SELECT name,
     ident,
     parent,
@@ -1816,15 +1825,6 @@ pg_stat_archiver| SELECT archived_count,
     last_failed_time,
     stats_reset
    FROM pg_stat_get_archiver() s(archived_count, last_archived_wal, last_archived_time, failed_count, last_failed_wal, last_failed_time, stats_reset);
-pg_stat_backend_memory_reservation| SELECT datid,
-    pid,
-    total_reserved,
-    init_reserved,
-    aset_reserved,
-    dsm_reserved,
-    generation_reserved,
-    slab_reserved
-   FROM pg_stat_get_backend_memory_reservation() pg_stat_get_backend_memory_reservation(datid, pid, total_reserved, init_reserved, aset_reserved, dsm_reserved, generation_reserved, slab_reserved);
 pg_stat_bgwriter| SELECT pg_stat_get_bgwriter_timed_checkpoints() AS checkpoints_timed,
     pg_stat_get_bgwriter_requested_checkpoints() AS checkpoints_req,
     pg_stat_get_checkpoint_write_time() AS checkpoint_write_time,

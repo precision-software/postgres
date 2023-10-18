@@ -355,6 +355,7 @@ AllocSetContextCreateInternal(MemoryContext parent,
 	Size		firstBlockSize;
 	AllocSet	set;
 	AllocBlock	block;
+memtrack_debug("name=%s", name);
 
 	/* ensure MemoryChunk's size is properly maxaligned */
 	StaticAssertDecl(ALLOC_CHUNKHDRSZ == MAXALIGN(ALLOC_CHUNKHDRSZ),
@@ -608,6 +609,7 @@ AllocSetDelete(MemoryContext context)
 	Size		keepersize;
 
 	Assert(AllocSetIsValid(set));
+	memtrack_debug("name=%s", context->name);
 
 #ifdef MEMORY_CONTEXT_CHECKING
 	/* Check for corruption and leaks before freeing */

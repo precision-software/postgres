@@ -76,6 +76,21 @@
 #include "utils/memtrack.h"
 #include "utils/pgstat_internal.h"
 
+#define memtrack_debug(args...)  do { \
+   int save_errno = errno;            \
+   setvbuf(stderr, NULL, _IOLBF, 256);  \
+   fprintf(stderr, "%s[%d] ", __func__, getpid()); \
+   fprintf(stderr, args);          \
+   fprintf(stderr, "\n");  \
+   errno = save_errno; \
+} while (0)
+
+#include <utils/memutils.h>
+static inline int64 contextMem()
+{
+	return (TopMemoryContext == NULL) ? 0 : MemoryContextMemAllocated(TopMemoryContext, true);
+}
+
 /* This value is a candidate to be a GUC variable.  We chose 1MB arbitrarily. */
 static const int64 allocation_allowance_refill_qty = 1024 * 1024;	/* 1MB */
 
@@ -115,7 +130,7 @@ void pgstat_backend_memory_reservation_cb(void);
 
 /* SQL Callable functions */
 extern Datum pg_stat_get_memory_reservation(PG_FUNCTION_ARGS);
-extern Datum pg_stat_get_backend_memory_reservation(PG_FUNCTION_ARGS);
+extern Datum pg_get_backend_memory_allocation(PG_FUNCTION_ARGS);
 extern Datum pg_stat_get_global_memory_tracking(PG_FUNCTION_ARGS);
 
 /*--------------------------------------------
@@ -255,6 +270,9 @@ release_tracked_memory(int64 size, pg_allocator_type type)
 static inline bool
 update_local_reservation(int64 size, pg_allocator_type type)
 {
+	memtrack_debug("size=%zd type=%d  private=%zd  context=%zd", size, type,
+				   my_memory.total - my_memory.subTotal[PG_ALLOC_DSM] - my_memory.subTotal[PG_ALLOC_INIT],
+				   contextMem());
 	/* Update our local memory counters. */
 	my_memory.total += size;
 	my_memory.subTotal[type] += size;

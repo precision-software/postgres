@@ -20,7 +20,6 @@
 
 #include "libpq/pqsignal.h"
 #include "postmaster/fork_process.h"
-#include "utils/memtrack.h"
 
 #ifndef WIN32
 /*
@@ -111,12 +110,6 @@ fork_process(void)
 				close(fd);
 			}
 		}
-
-		/*
-		 * Reset memory tracking to the initial state. (They are corrrect on
-		 * exec() but not after fork())
-		 */
-		init_tracked_memory();
 
 		/* do post-fork initialization for random number generation */
 		pg_strong_random_init();

@@ -186,5 +186,9 @@ update_global_reservation(int64 size, pg_allocator_type type)
 	Assert((int64) pg_atomic_read_u64(&global->total_memory_reserved) >= 0);
 	Assert((int64) pg_atomic_read_u64(&global->total_dsm_reserved) >= 0);
 
+	memtrack_debug("delta=%zd type=%d  private=%zd   context=%zd", delta, type,
+				   my_memory.total - my_memory.subTotal[PG_ALLOC_DSM] - my_memory.subTotal[PG_ALLOC_INIT],
+				   contextMem());
+
 	return true;
 }

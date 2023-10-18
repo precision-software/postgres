@@ -399,13 +399,6 @@ static const PgStat_KindInfo pgstat_kind_infos[PGSTAT_NUM_KINDS] = {
 		.name = "memtrack",
 		.fixed_amount = true,
 		.snapshot_cb = pgstat_memtrack_snapshot_cb,
-	},
-
-
-	[PGSTAT_KIND_BACKEND_MEMORY] = {
-		.name = "backend_memory_reservation",
-		.fixed_amount = true,
-		.snapshot_cb = pgstat_backend_memory_reservation_cb,
 	}
 };
 

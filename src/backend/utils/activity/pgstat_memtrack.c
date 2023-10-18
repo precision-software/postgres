@@ -14,7 +14,6 @@
  *	  src/backend/utils/activity/pgstat_memtrack.c
  * -------------------------------------------------------------------------
  */
-
 #include "postgres.h"
 
 #include "utils/pgstat_internal.h"
@@ -310,18 +309,6 @@ pg_stat_get_global_memory_tracking(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
-
-PgStat_Memory my_memory_snap = {0};
-
-/*
- * Callback function to take a snapshot of private memory reservations.
- */
-void
-pgstat_backend_memory_reservation_cb()
-{
-	my_memory_snap = my_memory;
-}
-
 /*
  * SQL callable function to return the memory reservations
  * for the calling backend. This function returns current
@@ -329,7 +316,7 @@ pgstat_backend_memory_reservation_cb()
  * slightly out-of-date, approximate numbers.
  */
 Datum
-pg_stat_get_backend_memory_reservation(PG_FUNCTION_ARGS)
+pg_get_backend_memory_allocation(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	pg_allocator_type type;
@@ -340,10 +327,10 @@ pg_stat_get_backend_memory_reservation(PG_FUNCTION_ARGS)
 	InitMaterializedSRF(fcinfo, 0);
 	clearRow(nulls, values, RESERVATION_COLS);
 
-	/* Get a snapshot of the current values */
-	pgstat_snapshot_fixed(PGSTAT_KIND_BACKEND_MEMORY);
-
-	/* database */
+	/*
+	 * Include database id so row has same shape as
+	 * pg_stat_get_memory_reservation().
+	 */
 	if (MyDatabaseId == InvalidOid)
 		nulls[0] = true;
 	else
@@ -353,11 +340,11 @@ pg_stat_get_backend_memory_reservation(PG_FUNCTION_ARGS)
 	values[1] = UInt32GetDatum(MyProcPid);
 
 	/* Report total menory allocated */
-	values[2] = UInt64GetDatum(my_memory_snap.total);
+	values[2] = UInt64GetDatum(my_memory.total);
 
 	/* Report subtotals of memory allocated */
 	for (type = 0; type < PG_ALLOC_TYPE_MAX; type++)
-		values[3 + type] = UInt64GetDatum(my_memory_snap.subTotal[type]);
+		values[3 + type] = UInt64GetDatum(my_memory.subTotal[type]);
 
 	/* Return a single tuple */
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
