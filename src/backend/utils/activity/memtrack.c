@@ -31,7 +31,7 @@ int64		max_total_memory_bytes = 0;
 /*
  * Private variables for tracking memory use.
  * These values are preset so memory tracking is active on startup.
- * After a fork(), they must be reset using 'init_tracked_memory()'.
+ * After a fork(), they must be reset using 'fork_tracked_memory()'.
  */
 PgStat_Memory my_memory = INITIAL_ALLOCATED_MEMORY;
 PgStat_Memory reported_memory = NO_ALLOCATED_MEMORY;
@@ -39,26 +39,25 @@ int64		reservation_lower_bound = 0;
 int64		reservation_upper_bound = 0;
 
 /*
- * Reset private memory counters to their startup values.
+ * Reset memory tracking after a fork.
+ * We actually keep the memory intact, but
+ * the memory hasn't been added to the global totals.
+ *
  * The counters are properly initialized at startup,
  * so this function only needs to be called after a fork().
  */
 void
-init_tracked_memory(void)
+fork_tracked_memory(void)
 {
-	/*
-	 * Start out with no memory allocations having been reported. Note the
-	 * initial allowance is already allocated in the private counters, and it
-	 * will be reported to the global counters once ProcGlobal is initialized.
-	 */
-	my_memory = INITIAL_ALLOCATED_MEMORY;
+	/* This new process hasn't reported any memory yet. */
 	reported_memory = NO_ALLOCATED_MEMORY;
 
-	/*
-	 * Force early allocations to be reported once ProcGlobal is initialized.
-	 */
+	/* Force allocations to be reported once ProcGlobal is initialized. */
 	reservation_lower_bound = 0;
 	reservation_upper_bound = 0;
+
+	/* Release the DSM reservations since we didn't create them. */
+	update_local_reservation(-my_memory.subTotal[PG_ALLOC_DSM], PG_ALLOC_DSM);
 }
 
 /*
@@ -135,10 +134,10 @@ update_global_reservation(int64 size, pg_allocator_type type)
 	delta = my_memory.total + size - reported_memory.total;
 
 	/*
-	 * If memory limits are set, and we are increasing our allocation, and we
-	 * not the postmaster...
+	 * If memory limits are set, we are increasing our reservation and we
+	 * are not the postmaster...
 	 */
-	if (max_total_memory_bytes > 0 && delta > 0 && MyProcPid != PostmasterPid)
+	if (max_total_memory_bytes > 0 && size > 0 && MyProcPid != PostmasterPid && delta > 0)
 	{
 		/* Update the global total memory counter subject to the upper limit. */
 		if (!pg_atomic_fetch_add_limit_u64(&global->total_memory_reserved, delta, max_total_memory_bytes, &dummy))
@@ -185,10 +184,6 @@ update_global_reservation(int64 size, pg_allocator_type type)
 	 */
 	Assert((int64) pg_atomic_read_u64(&global->total_memory_reserved) >= 0);
 	Assert((int64) pg_atomic_read_u64(&global->total_dsm_reserved) >= 0);
-
-	memtrack_debug("delta=%zd type=%d  private=%zd   context=%zd", delta, type,
-				   my_memory.total - my_memory.subTotal[PG_ALLOC_DSM] - my_memory.subTotal[PG_ALLOC_INIT],
-				   contextMem());
 
 	return true;
 }

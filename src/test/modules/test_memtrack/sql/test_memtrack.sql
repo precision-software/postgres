@@ -100,7 +100,7 @@ WHERE
 SELECT *, ABS(context_sum - backend_private) as delta from
     (SELECT SUM(total_bytes) as context_sum, COUNT(*) as nr_contexts, SUM(used_bytes) as used_sum from pg_backend_memory_contexts as a),
     (SELECT total_reserved - dsm_reserved - init_reserved as backend_private from pg_backend_memory_allocation as b)
-WHERE ABS(context_sum - backend_private) > nr_contexts * 1024;
+WHERE ABS(context_sum - backend_private) > nr_contexts * 256;
 
 -- Allocate more memory than we have available.
 -- (this should fail because we configured max_total_memory to 1024 Mb)

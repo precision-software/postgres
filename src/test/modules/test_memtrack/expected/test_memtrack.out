@@ -56,7 +56,7 @@ WHERE
 -- Same should be true for the current backend values
 SELECT *
 FROM
-    pg_stat_backend_memory_reservation
+    pg_backend_memory_allocation
 WHERE total_reserved != (init_reserved + aset_reserved + dsm_reserved + generation_reserved + slab_reserved);
  datid | pid | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
 -------+-----+----------------+---------------+---------------+--------------+---------------------+---------------
@@ -65,7 +65,7 @@ WHERE total_reserved != (init_reserved + aset_reserved + dsm_reserved + generati
 -- For current backend process, the initial allocation is >= 1 MB
 SELECT *
 FROM
-    pg_stat_backend_memory_reservation
+    pg_backend_memory_allocation
 WHERE
         init_reserved < 1024*1024;
  datid | pid | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
@@ -171,6 +171,17 @@ WHERE
     global_dsm < process_dsm;
  process_dsm | global_dsm 
 -------------+------------
+(0 rows)
+
+-- Verify the backend's reservations match the memory contexts.
+-- Since we don't take snapshots, the values are dynamic and will not
+-- line up exactly.
+SELECT *, ABS(context_sum - backend_private) as delta from
+    (SELECT SUM(total_bytes) as context_sum, COUNT(*) as nr_contexts, SUM(used_bytes) as used_sum from pg_backend_memory_contexts as a),
+    (SELECT total_reserved - dsm_reserved - init_reserved as backend_private from pg_backend_memory_allocation as b)
+WHERE ABS(context_sum - backend_private) > nr_contexts * 256;
+ context_sum | nr_contexts | used_sum | backend_private | delta 
+-------------+-------------+----------+-----------------+-------
 (0 rows)
 
 -- Allocate more memory than we have available.
