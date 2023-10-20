@@ -1303,15 +1303,15 @@ pg_available_extensions| SELECT e.name,
     e.comment
    FROM (pg_available_extensions() e(name, default_version, comment)
      LEFT JOIN pg_extension x ON ((e.name = x.extname)));
-pg_backend_memory_allocation| SELECT datid,
-    pid,
+pg_backend_memory_allocation| SELECT pid,
+    total_top_context,
     total_reserved,
     init_reserved,
     aset_reserved,
     dsm_reserved,
     generation_reserved,
     slab_reserved
-   FROM pg_get_backend_memory_allocation() pg_get_backend_memory_allocation(datid, pid, total_reserved, init_reserved, aset_reserved, dsm_reserved, generation_reserved, slab_reserved);
+   FROM pg_get_backend_memory_allocation() pg_get_backend_memory_allocation(pid, total_top_context, total_reserved, init_reserved, aset_reserved, dsm_reserved, generation_reserved, slab_reserved);
 pg_backend_memory_contexts| SELECT name,
     ident,
     parent,

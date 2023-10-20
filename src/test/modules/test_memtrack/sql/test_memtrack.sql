@@ -94,13 +94,11 @@ FROM
 WHERE
     global_dsm < process_dsm;
 
--- Verify the backend's reservations match the memory contexts.
--- Since we don't take snapshots, the values are dynamic and will not
--- line up exactly.
-SELECT *, ABS(context_sum - backend_private) as delta from
-    (SELECT SUM(total_bytes) as context_sum, COUNT(*) as nr_contexts, SUM(used_bytes) as used_sum from pg_backend_memory_contexts as a),
-    (SELECT total_reserved - dsm_reserved - init_reserved as backend_private from pg_backend_memory_allocation as b)
-WHERE ABS(context_sum - backend_private) > nr_contexts * 256;
+-- Verify the backend's reservations match the memory context actuals
+-- We don't take snapshots, but this is a single process so no race conditions. Delta should be 0.
+WITH actuals AS (SELECT total_reserved - dsm_reserved - init_reserved as backend_private, * from pg_backend_memory_allocation)
+SELECT ABS(total_top_context - backend_private) as delta, * from actuals
+WHERE total_top_context != backend_private;
 
 -- Allocate more memory than we have available.
 -- (this should fail because we configured max_total_memory to 1024 Mb)

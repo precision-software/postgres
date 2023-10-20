@@ -318,26 +318,26 @@ pg_stat_get_global_memory_tracking(PG_FUNCTION_ARGS)
 Datum
 pg_get_backend_memory_allocation(PG_FUNCTION_ARGS)
 {
+#define BACKEND_COLS (PG_ALLOC_TYPE_MAX + 3)
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	pg_allocator_type type;
-	Datum values[RESERVATION_COLS];
-	bool nulls[RESERVATION_COLS];
+	Datum values[BACKEND_COLS];
+	bool nulls[BACKEND_COLS];
 
-	/* A single row, similar to pg_stat_backend_memory */
+	/* A single row */
 	InitMaterializedSRF(fcinfo, 0);
-	clearRow(nulls, values, RESERVATION_COLS);
-
-	/*
-	 * Include database id so row has same shape as
-	 * pg_stat_get_memory_reservation().
-	 */
-	if (MyDatabaseId == InvalidOid)
-		nulls[0] = true;
-	else
-		values[0] = UInt32GetDatum(MyDatabaseId);
+	clearRow(nulls, values, BACKEND_COLS);
 
 	/* pid */
-	values[1] = UInt32GetDatum(MyProcPid);
+	values[0] = UInt32GetDatum(MyProcPid);
+
+	/*
+	 * Get the total memory from scanning the constexts.
+	 */
+	if (TopMemoryContext == NULL)
+		nulls[1] = true;
+	else
+		values[1] = UInt64GetDatum(MemoryContextMemAllocated(TopMemoryContext, true));
 
 	/* Report total menory allocated */
 	values[2] = UInt64GetDatum(my_memory.total);

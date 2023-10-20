@@ -76,6 +76,30 @@
 #include "utils/memtrack.h"
 #include "utils/pgstat_internal.h"
 
+
+
+#define memtrack_check() do { \
+    int64 top_context = contextMem(); \
+    int64 private = my_memory.total - my_memory.subTotal[PG_ALLOC_INIT] - my_memory.subTotal[PG_ALLOC_DSM]; \
+    memtrack_debug("delta=%zd  top_context=%zd  private=%zd", private-top_context, top_context, private);\
+} while (0)
+
+#define memtrack_debug(args...)  do { \
+   int save_errno = errno;            \
+   setvbuf(stderr, NULL, _IOLBF, 256);  \
+   fprintf(stderr, "%s[%d] ", __func__, getpid()); \
+   fprintf(stderr, args);          \
+   fprintf(stderr, "\n");  \
+   errno = save_errno; \
+} while (0)
+
+#include <utils/memutils.h>
+static inline int64 contextMem()
+{
+	return (TopMemoryContext == NULL) ? 0 : MemoryContextMemAllocated(TopMemoryContext, true);
+}
+
+
 /* This value is a candidate to be a GUC variable.  We chose 1MB arbitrarily. */
 static const int64 allocation_allowance_refill_qty = 1024 * 1024;	/* 1MB */
 

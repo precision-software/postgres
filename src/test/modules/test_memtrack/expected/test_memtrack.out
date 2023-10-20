@@ -58,8 +58,8 @@ SELECT *
 FROM
     pg_backend_memory_allocation
 WHERE total_reserved != (init_reserved + aset_reserved + dsm_reserved + generation_reserved + slab_reserved);
- datid | pid | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
--------+-----+----------------+---------------+---------------+--------------+---------------------+---------------
+ pid | total_top_context | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
+-----+-------------------+----------------+---------------+---------------+--------------+---------------------+---------------
 (0 rows)
 
 -- For current backend process, the initial allocation is >= 1 MB
@@ -68,8 +68,8 @@ FROM
     pg_backend_memory_allocation
 WHERE
         init_reserved < 1024*1024;
- datid | pid | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
--------+-----+----------------+---------------+---------------+--------------+---------------------+---------------
+ pid | total_top_context | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
+-----+-------------------+----------------+---------------+---------------+--------------+---------------------+---------------
 (0 rows)
 
 CREATE EXTENSION test_memtrack;
@@ -173,15 +173,13 @@ WHERE
 -------------+------------
 (0 rows)
 
--- Verify the backend's reservations match the memory contexts.
--- Since we don't take snapshots, the values are dynamic and will not
--- line up exactly.
-SELECT *, ABS(context_sum - backend_private) as delta from
-    (SELECT SUM(total_bytes) as context_sum, COUNT(*) as nr_contexts, SUM(used_bytes) as used_sum from pg_backend_memory_contexts as a),
-    (SELECT total_reserved - dsm_reserved - init_reserved as backend_private from pg_backend_memory_allocation as b)
-WHERE ABS(context_sum - backend_private) > nr_contexts * 256;
- context_sum | nr_contexts | used_sum | backend_private | delta 
--------------+-------------+----------+-----------------+-------
+-- Verify the backend's reservations match the memory context actuals
+-- We don't take snapshots, but this is a single process so no race conditions. Delta should be 0.
+WITH actuals AS (SELECT total_reserved - dsm_reserved - init_reserved as backend_private, * from pg_backend_memory_allocation)
+SELECT ABS(total_top_context - backend_private) as delta, * from actuals
+WHERE total_top_context != backend_private;
+ delta | backend_private | pid | total_top_context | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
+-------+-----------------+-----+-------------------+----------------+---------------+---------------+--------------+---------------------+---------------
 (0 rows)
 
 -- Allocate more memory than we have available.
