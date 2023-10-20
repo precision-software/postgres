@@ -18,6 +18,7 @@
 
 #include "utils/pgstat_internal.h"
 #include "utils/memtrack.h"
+#include "utils/memutils_internal.h"
 #include "utils/tuplestore.h"
 #include "funcapi.h"
 #include "storage/pg_shmem.h"
@@ -26,6 +27,7 @@ inline static Size asMB(Size bytes);
 static void get_postmaster_reservation_row(bool *nulls, Datum *values);
 static void get_backend_reservation_row(int idx, bool *nulls, Datum *values);
 static void clearRow(bool *nulls, Datum *values, int count);
+static int64 getContextMemoryTotal(void);
 
 /*
  * Report postmaster memory allocations to pgstat.
@@ -337,7 +339,7 @@ pg_get_backend_memory_allocation(PG_FUNCTION_ARGS)
 	if (TopMemoryContext == NULL)
 		nulls[1] = true;
 	else
-		values[1] = UInt64GetDatum(MemoryContextMemAllocated(TopMemoryContext, true));
+		values[1] = UInt64GetDatum(getContextMemoryTotal());
 
 	/* Report total menory allocated */
 	values[2] = UInt64GetDatum(my_memory.total);
@@ -349,6 +351,18 @@ pg_get_backend_memory_allocation(PG_FUNCTION_ARGS)
 	/* Return a single tuple */
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	return (Datum) 0;
+}
+
+/*
+ * How much memory is allocated to contexts.
+ * Scan active contexts starting at the top context, and add in freed contexts
+ * from the various allocators.
+ */
+static int64
+getContextMemoryTotal()
+{
+	return MemoryContextMemAllocated(TopMemoryContext, true) +
+	       AllocSetGetFreeMem();
 }
 
 /*

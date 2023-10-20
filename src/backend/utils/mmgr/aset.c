@@ -1512,6 +1512,25 @@ AllocSetStats(MemoryContext context,
 	}
 }
 
+#define countof(array) (sizeof(array) / sizeof(array[0]))
+
+/*
+ * Get the amount of memory attributed to deleted contexts.
+ * (which are on free list rather than actually deleted)
+ */
+int64
+AllocSetGetFreeMem()
+{
+	MemoryContext ctx;
+	int64 total = 0;
+
+	for (int idx = 0; idx < countof(context_freelists); idx++)
+		for (ctx = (void *)context_freelists[idx].first_free; ctx != NULL;  ctx = ctx->nextchild)
+			total += ctx->mem_allocated;
+
+	return total;
+}
+
 
 #ifdef MEMORY_CONTEXT_CHECKING
 
