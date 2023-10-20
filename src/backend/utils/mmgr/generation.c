@@ -263,7 +263,7 @@ GenerationContextCreate(MemoryContext parent,
 						parent,
 						name);
 
-	((MemoryContext) set)->mem_allocated = firstBlockSize;
+	((MemoryContext) set)->mem_allocated = allocSize;
 
 	return (MemoryContext) set;
 }
@@ -326,7 +326,7 @@ GenerationDelete(MemoryContext context)
 	/* Reset to release all releasable GenerationBlocks */
 	GenerationReset(context);
 	/* And free the context header and keeper block */
-	free_tracked(context, MAXALIGN(sizeof(GenerationContext)) + context->mem_allocated, PG_ALLOC_GENERATION);
+	free_tracked(context, context->mem_allocated, PG_ALLOC_GENERATION);  // TODO: don't add if earlier change also made.
 }
 
 /*
@@ -1024,7 +1024,7 @@ GenerationCheck(MemoryContext context)
 	GenerationContext *gen = (GenerationContext *) context;
 	const char *name = context->name;
 	dlist_iter	iter;
-	Size		total_allocated = 0;
+	Size		total_allocated = sizeof(GenerationContext);
 
 	/* walk all blocks in this context */
 	dlist_foreach(iter, &gen->blocks)

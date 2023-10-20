@@ -27,7 +27,6 @@ inline static Size asMB(Size bytes);
 static void get_postmaster_reservation_row(bool *nulls, Datum *values);
 static void get_backend_reservation_row(int idx, bool *nulls, Datum *values);
 static void clearRow(bool *nulls, Datum *values, int count);
-static int64 getContextMemoryTotal(void);
 
 /*
  * Report postmaster memory allocations to pgstat.
@@ -358,7 +357,7 @@ pg_get_backend_memory_allocation(PG_FUNCTION_ARGS)
  * Scan active contexts starting at the top context, and add in freed contexts
  * from the various allocators.
  */
-static int64
+int64
 getContextMemoryTotal()
 {
 	return MemoryContextMemAllocated(TopMemoryContext, true) +

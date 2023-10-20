@@ -61,6 +61,7 @@ static void validateArgs(int nWorkers, pg_allocator_type type, int nBlocks, int 
 static void sendRequest(WorkerPool * pool, int worker, Action action, pg_allocator_type type, int nBlocks, int blockSize);
 static void processReply(WorkerPool * pool, int worker, Action actions, pg_allocator_type type, int nBlocks, int blockSize);
 static Datum exercise_worker(FunctionCallInfo fcinfo, char *workerFunction);
+static void checkAllocations();
 
 /* Test the memory tracking features standalone */
 PGDLLEXPORT Datum test_memtrack(PG_FUNCTION_ARGS);
@@ -378,6 +379,8 @@ test_allocation_worker(Datum arg)
 		/* Send the response */
 		result = workerSend(resp, sizeof(resp[1]));
 
+		checkAllocations();
+
 	} while (result == SHM_MQ_SUCCESS);
 
 	workerExit(0);
@@ -522,4 +525,17 @@ freeDSMBlocks(int nBlocks, int blockSize)
 
 
 	return true;
+}
+
+
+/*
+ * Compare top context allocations with our private memory numbers.
+ * They should be the same.
+ */
+static void
+checkAllocations()
+{
+	int64 my_private = my_memory.total - my_memory.subTotal[PG_ALLOC_INIT] - my_memory.subTotal[PG_ALLOC_DSM];
+	int64 context = getContextMemoryTotal();
+	Assert(my_private == context);
 }

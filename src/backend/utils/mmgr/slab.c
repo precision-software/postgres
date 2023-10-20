@@ -416,6 +416,7 @@ SlabContextCreate(MemoryContext parent,
 						parent,
 						name);
 
+	((MemoryContext)slab)->mem_allocated = Slab_CONTEXT_HDRSZ(slab->chunksPerBlock);
 	return (MemoryContext) slab;
 }
 
@@ -467,7 +468,7 @@ SlabReset(MemoryContext context)
 
 	slab->curBlocklistIndex = 0;
 
-	Assert(context->mem_allocated == 0);
+	Assert(context->mem_allocated == Slab_CONTEXT_HDRSZ(((SlabContext *) context)->chunksPerBlock));
 }
 
 /*
@@ -850,7 +851,7 @@ SlabIsEmpty(MemoryContext context)
 {
 	Assert(SlabIsValid((SlabContext *) context));
 
-	return (context->mem_allocated == 0);
+	return (context->mem_allocated == Slab_CONTEXT_HDRSZ(((SlabContext *) context)->chunksPerBlock));
 }
 
 /*
@@ -1085,7 +1086,7 @@ SlabCheck(MemoryContext context)
 	/* the stored empty blocks are tracked in mem_allocated too */
 	nblocks += dclist_count(&slab->emptyblocks);
 
-	Assert(nblocks * slab->blockSize == context->mem_allocated);
+	Assert(nblocks * slab->blockSize + Slab_CONTEXT_HDRSZ(((SlabContext *) context)->chunksPerBlock) == context->mem_allocated);
 }
 
 #endif							/* MEMORY_CONTEXT_CHECKING */

@@ -112,6 +112,7 @@ void pgstat_report_backend_memory(void);
 void pgstat_report_postmaster_memory(void);
 void pgstat_init_memtrack(PgStatShared_Memtrack *global);
 void pgstat_backend_memory_reservation_cb(void);
+int64 getContextMemoryTotal(void);
 
 /* SQL Callable functions */
 extern Datum pg_stat_get_memory_reservation(PG_FUNCTION_ARGS);
