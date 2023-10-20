@@ -425,7 +425,6 @@ AllocSetContextCreateInternal(MemoryContext parent,
 
 			((MemoryContext) set)->mem_allocated =
 				KeeperBlock(set)->endptr - ((char *) set);
-			memtrack_check();
 
 			return (MemoryContext) set;
 		}
@@ -519,7 +518,6 @@ AllocSetContextCreateInternal(MemoryContext parent,
 						name);
 
 	((MemoryContext) set)->mem_allocated = firstBlockSize;
-	memtrack_check();
 
 	return (MemoryContext) set;
 }
@@ -585,7 +583,6 @@ AllocSetReset(MemoryContext context)
 			/* Normal case, release the block */
 			context->mem_allocated -= block->endptr - ((char *) block);
 			free_tracked(block, block->endptr - ((char *) block), PG_ALLOC_ASET);
-			memtrack_check();
 		}
 		block = next;
 	}
@@ -624,7 +621,7 @@ AllocSetDelete(MemoryContext context)
 	 * If the context is a candidate for a freelist, put it into that freelist
 	 * instead of destroying it.
 	 */
-	if (false && set->freeListIndex >= 0)
+	if (set->freeListIndex >= 0)
 	{
 		AllocSetFreeList *freelist = &context_freelists[set->freeListIndex];
 
@@ -659,7 +656,6 @@ AllocSetDelete(MemoryContext context)
 		freelist->first_free = set;
 		freelist->num_free++;
 
-		memtrack_check();
 		return;
 	}
 
@@ -681,7 +677,6 @@ AllocSetDelete(MemoryContext context)
 
 	/* Finally, free the context header, including the keeper block */
 	free_tracked(set, keepersize, PG_ALLOC_ASET);
-	memtrack_check();
 }
 
 /*
@@ -728,7 +723,6 @@ AllocSetAlloc(MemoryContext context, Size size)
 			return NULL;
 
 		context->mem_allocated += blksize;
-		memtrack_check();
 
 		block->aset = set;
 		block->freeptr = block->endptr = ((char *) block) + blksize;
@@ -942,7 +936,6 @@ AllocSetAlloc(MemoryContext context, Size size)
 			return NULL;
 
 		context->mem_allocated += blksize;
-		memtrack_check();
 
 		block->aset = set;
 		block->freeptr = ((char *) block) + ALLOC_BLOCKHDRSZ;
@@ -1041,7 +1034,6 @@ AllocSetFree(void *pointer)
 
 		set->header.mem_allocated -= block->endptr - ((char *) block);
 		free_tracked(block, block->freeptr - ((char *) block), PG_ALLOC_ASET);
-		memtrack_check();
 	}
 	else
 	{
@@ -1182,8 +1174,6 @@ AllocSetRealloc(void *pointer, Size size)
 			set->blocks = block;
 		if (block->next)
 			block->next->prev = block;
-
-		memtrack_check();
 
 #ifdef MEMORY_CONTEXT_CHECKING
 #ifdef RANDOMIZE_ALLOCATED_MEMORY
