@@ -2299,3 +2299,4 @@ WHERE icoll != 0 AND
  indexrelid | indrelid | iclass | icoll 
 ------------+----------+--------+-------
 (0 rows)
+
