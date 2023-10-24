@@ -38,15 +38,9 @@ WHERE
 SELECT *
 FROM
     pg_backend_memory_allocation
-WHERE total_reserved != (init_reserved + aset_reserved + dsm_reserved + generation_reserved + slab_reserved);
-
--- For current backend process, the initial allocation is >= 1 MB
-SELECT *
-FROM
-    pg_backend_memory_allocation
-WHERE
-        init_reserved < 1024*1024;
-
+WHERE total_top_context_allocated <> (aset_allocated + dsm_allocated + generation_allocated + slab_allocated) OR
+      total_allocated <> (aset_allocated + dsm_allocated + generation_allocated + slab_allocated) OR
+	  total_top_context_allocated <> total_allocated;
 
 CREATE EXTENSION test_memtrack;
 
@@ -93,12 +87,6 @@ FROM
     (SELECT dsm_memory_reserved as global_dsm from pg_stat_global_memory_tracking)
 WHERE
     global_dsm < process_dsm;
-
--- Verify the backend's reservations match the memory context actuals
--- We don't take snapshots, but this is a single process so no race conditions. Delta should be 0.
-WITH actuals AS (SELECT total_reserved - dsm_reserved - init_reserved as backend_private, * from pg_backend_memory_allocation)
-SELECT ABS(total_top_context - backend_private) as delta, * from actuals
-WHERE total_top_context != backend_private;
 
 -- Allocate more memory than we have available.
 -- (this should fail because we configured max_total_memory to 1024 Mb)

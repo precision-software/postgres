@@ -169,7 +169,7 @@ update_global_reservation(int64 size, pg_allocator_type type)
 	if (MyProcPid == PostmasterPid)
 		pgstat_report_postmaster_memory();
 	else
-	    pgstat_report_backend_memory();
+		pgstat_report_backend_memory();
 
 	/* Remember the values we just reported */
 	reported_memory = my_memory;

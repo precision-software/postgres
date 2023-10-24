@@ -148,7 +148,6 @@ pgstat_memtrack_snapshot_cb(void)
 /*
  * SQL callable function to get the memory allocation of PG backends.
  * Returns a row for each backend, consisting of:
- *    datid   						- backend's database id, null if not attached
  *    pid     						- backend's process id
  *    allocated_bytes				- total number of bytes allocated by backend
  *    init_allocated_bytes			- subtotal attributed to each process at startup
@@ -160,7 +159,7 @@ pgstat_memtrack_snapshot_cb(void)
 Datum
 pg_stat_get_memory_reservation(PG_FUNCTION_ARGS)
 {
-#define RESERVATION_COLS    (3 + PG_ALLOC_TYPE_MAX)
+#define RESERVATION_COLS    (2 + PG_ALLOC_TYPE_MAX)
 	int num_backends;
 	int backendIdx;
 	Datum values[RESERVATION_COLS];
@@ -180,7 +179,6 @@ pg_stat_get_memory_reservation(PG_FUNCTION_ARGS)
 	num_backends = pgstat_fetch_stat_numbackends();
 	for (backendIdx = 1; backendIdx <= num_backends; backendIdx++)
 	{
-
 		/* Get the backend's memory reservations and output the row */
 		get_backend_reservation_row(backendIdx, nulls, values);
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
@@ -206,21 +204,15 @@ get_backend_reservation_row(int idx,  bool *nulls, Datum *values)
 
 	clearRow(nulls, values, RESERVATION_COLS);
 
-	/* Database id */
-	if (beentry->st_databaseid != InvalidOid)
-		values[0] = ObjectIdGetDatum(beentry->st_databaseid);
-	else
-		nulls[0] = true;
-
 	/* Process id */
-	values[1] = Int32GetDatum(beentry->st_procpid);
+	values[0] = Int32GetDatum(beentry->st_procpid);
 
 	/* total memory allocated */
-	values[2] = UInt64GetDatum(beentry->st_memory.total);
+	values[1] = UInt64GetDatum(beentry->st_memory.total);
 
 	/* Subtotals of memory */
 	for (type = 0; type < PG_ALLOC_TYPE_MAX; type++)
-		values[3 + type] = UInt64GetDatum(beentry->st_memory.subTotal[type]);
+		values[2 + type] = UInt64GetDatum(beentry->st_memory.subTotal[type]);
 }
 
 
@@ -238,18 +230,15 @@ get_postmaster_reservation_row(bool *nulls, Datum *values)
 	/* Fetch the values and build a row */
 	memtrack = pgstat_fetch_stat_memtrack();
 
-	/* database - postmaster is not attached to a database */
-	nulls[0] = true;
-
 	/*  postmaster pid */
-	values[1] = PostmasterPid;
+	values[0] = PostmasterPid;
 
 	/* Report total menory allocated */
-	values[2] = UInt64GetDatum(memtrack->postmasterMemory.total);
+	values[1] = UInt64GetDatum(memtrack->postmasterMemory.total);
 
 	/* Report subtotals of memory allocated */
 	for (type = 0; type < PG_ALLOC_TYPE_MAX; type++)
-		values[3 + type] = UInt64GetDatum(memtrack->postmasterMemory.subTotal[type]);
+		values[2 + type] = UInt64GetDatum(memtrack->postmasterMemory.subTotal[type]);
 }
 
 
@@ -333,19 +322,20 @@ pg_get_backend_memory_allocation(PG_FUNCTION_ARGS)
 	values[0] = UInt32GetDatum(MyProcPid);
 
 	/*
-	 * Get the total memory from scanning the constexts.
+	 * Get the total memory from scanning the contexts.
 	 */
 	if (TopMemoryContext == NULL)
 		nulls[1] = true;
 	else
 		values[1] = UInt64GetDatum(getContextMemoryTotal());
 
-	/* Report total menory allocated */
-	values[2] = UInt64GetDatum(my_memory.total);
+	/* Report total memory actually allocated, so skip INIT type */
+	for (type = 1; type < PG_ALLOC_TYPE_MAX; type++)
+		values[2] += UInt64GetDatum(my_memory.subTotal[type]);
 
 	/* Report subtotals of memory allocated */
-	for (type = 0; type < PG_ALLOC_TYPE_MAX; type++)
-		values[3 + type] = UInt64GetDatum(my_memory.subTotal[type]);
+	for (type = 1; type < PG_ALLOC_TYPE_MAX; type++)
+		values[2 + type] = UInt64GetDatum(my_memory.subTotal[type]);
 
 	/* Return a single tuple */
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
@@ -361,7 +351,7 @@ int64
 getContextMemoryTotal()
 {
 	return MemoryContextMemAllocated(TopMemoryContext, true) +
-	       AllocSetGetFreeMem();
+		   AllocSetGetFreeMem();
 }
 
 /*

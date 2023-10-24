@@ -39,8 +39,8 @@ SELECT *
 FROM
     pg_stat_memory_reservation
 WHERE total_reserved != (init_reserved + aset_reserved + dsm_reserved + generation_reserved + slab_reserved);
- datid | pid | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
--------+-----+----------------+---------------+---------------+--------------+---------------------+---------------
+ pid | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
+-----+----------------+---------------+---------------+--------------+---------------------+---------------
 (0 rows)
 
 -- For each process, the initial allocation is >= 1 MB
@@ -49,27 +49,19 @@ FROM
     pg_stat_memory_reservation
 WHERE
     init_reserved < 1024*1024;
- datid | pid | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
--------+-----+----------------+---------------+---------------+--------------+---------------------+---------------
+ pid | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
+-----+----------------+---------------+---------------+--------------+---------------------+---------------
 (0 rows)
 
 -- Same should be true for the current backend values
 SELECT *
 FROM
     pg_backend_memory_allocation
-WHERE total_reserved != (init_reserved + aset_reserved + dsm_reserved + generation_reserved + slab_reserved);
- pid | total_top_context | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
------+-------------------+----------------+---------------+---------------+--------------+---------------------+---------------
-(0 rows)
-
--- For current backend process, the initial allocation is >= 1 MB
-SELECT *
-FROM
-    pg_backend_memory_allocation
-WHERE
-        init_reserved < 1024*1024;
- pid | total_top_context | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
------+-------------------+----------------+---------------+---------------+--------------+---------------------+---------------
+WHERE total_top_context_allocated <> (aset_allocated + dsm_allocated + generation_allocated + slab_allocated) OR
+      total_allocated <> (aset_allocated + dsm_allocated + generation_allocated + slab_allocated) OR
+	  total_top_context_allocated <> total_allocated;
+ pid | total_top_context_allocated | total_allocated | aset_allocated | dsm_allocated | generation_allocated | slab_allocated 
+-----+-----------------------------+-----------------+----------------+---------------+----------------------+----------------
 (0 rows)
 
 CREATE EXTENSION test_memtrack;
@@ -171,15 +163,6 @@ WHERE
     global_dsm < process_dsm;
  process_dsm | global_dsm 
 -------------+------------
-(0 rows)
-
--- Verify the backend's reservations match the memory context actuals
--- We don't take snapshots, but this is a single process so no race conditions. Delta should be 0.
-WITH actuals AS (SELECT total_reserved - dsm_reserved - init_reserved as backend_private, * from pg_backend_memory_allocation)
-SELECT ABS(total_top_context - backend_private) as delta, * from actuals
-WHERE total_top_context != backend_private;
- delta | backend_private | pid | total_top_context | total_reserved | init_reserved | aset_reserved | dsm_reserved | generation_reserved | slab_reserved 
--------+-----------------+-----+-------------------+----------------+---------------+---------------+--------------+---------------------+---------------
 (0 rows)
 
 -- Allocate more memory than we have available.
