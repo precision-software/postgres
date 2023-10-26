@@ -469,9 +469,8 @@ typedef struct XLogCtlData
 
 	XLogSegNo	lastRemovedSegNo;	/* latest removed/recycled XLOG segment */
 
-	/* Fake LSN counter, for unlogged relations. Protected by ulsn_lck. */
-	XLogRecPtr	unloggedLSN;
-	slock_t		ulsn_lck;
+	/* Fake LSN counter for unlogged relations. Updated atomically. */
+	pg_atomic_uint64 unloggedLSN;
 
 	/* Time and LSN of last xlog segment switch. Protected by WALWriteLock. */
 	pg_time_t	lastSegSwitchTime;
@@ -4294,14 +4293,7 @@ DataChecksumsEnabled(void)
 XLogRecPtr
 GetFakeLSNForUnloggedRel(void)
 {
-	XLogRecPtr	nextUnloggedLSN;
-
-	/* increment the unloggedLSN counter, need SpinLock */
-	SpinLockAcquire(&XLogCtl->ulsn_lck);
-	nextUnloggedLSN = XLogCtl->unloggedLSN++;
-	SpinLockRelease(&XLogCtl->ulsn_lck);
-
-	return nextUnloggedLSN;
+	return pg_atomic_fetch_add_u64(&XLogCtl->unloggedLSN, 1);
 }
 
 /*
@@ -4714,7 +4706,6 @@ XLOGShmemInit(void)
 
 	SpinLockInit(&XLogCtl->Insert.insertpos_lck);
 	SpinLockInit(&XLogCtl->info_lck);
-	SpinLockInit(&XLogCtl->ulsn_lck);
 }
 
 /*
@@ -5319,9 +5310,9 @@ StartupXLOG(void)
 	 * the unlogged LSN counter can be reset too.
 	 */
 	if (ControlFile->state == DB_SHUTDOWNED)
-		XLogCtl->unloggedLSN = ControlFile->unloggedLSN;
+		pg_atomic_init_u64(&XLogCtl->unloggedLSN, ControlFile->unloggedLSN);
 	else
-		XLogCtl->unloggedLSN = FirstNormalUnloggedLSN;
+		pg_atomic_init_u64(&XLogCtl->unloggedLSN, FirstNormalUnloggedLSN);
 
 	/*
 	 * Copy any missing timeline history files between 'now' and the recovery
@@ -6903,9 +6894,7 @@ CreateCheckPoint(int flags)
 	 * unused on non-shutdown checkpoints, but seems useful to store it always
 	 * for debugging purposes.
 	 */
-	SpinLockAcquire(&XLogCtl->ulsn_lck);
-	ControlFile->unloggedLSN = XLogCtl->unloggedLSN;
-	SpinLockRelease(&XLogCtl->ulsn_lck);
+	ControlFile->unloggedLSN = pg_atomic_read_u64(&XLogCtl->unloggedLSN);
 
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
