@@ -191,4 +191,48 @@ extern int	durable_unlink(const char *fname, int elevel);
 extern void SyncDataDirectory(void);
 extern int	data_sync_elevel(int elevel);
 
+/* Operations on virtual files -- Sequential I/O */
+extern ssize_t FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info);
+extern ssize_t FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info);
+extern off_t FileTell(File file);
+extern off_t FileSeek(File file, off_t offset);
+
+/* Operations on virtual files --- similar to fread/fwrite */
+extern ssize_t FilePrintf(File file, const char *format, ...) pg_attribute_printf(2,3);
+extern ssize_t FileScanf(File file, const char *format, ...) pg_attribute_printf(2,3);
+extern ssize_t FilePuts(File, const char *string);
+extern ssize_t FileGetc(File file);
+extern ssize_t FilePutc(int c, File file);
+
+/* Error handling on virtual files -- similar to feof/ferror */
+extern int FileEof(File file);           /* Reset on every read */
+extern bool FileError(File file);        /* Persists until cleared */
+extern bool FileClearError(File file);   /* Clears both Eof and error */
+
+extern const char *FileErrorMsg(File file);
+extern int FileErrorCode(File file);
+
+/* Internal helpers for error handling */
+extern int setFileError(File file, int err, const char *format, ...);
+extern int updateFileError(File file, int err, const char *format, ...);
+extern int copyFileError(File dst, File src);
+
+/* Some nicer names */
+static inline File FileOpen(const char *name, int fileFlags) {return PathNameOpenFile(name, fileFlags);}
+
+/* Declare a "debug" macro */
+#ifdef DEBUG
+#define file_debug(...) \
+    do {  \
+        int save_errno = errno; \
+        fprintf(stderr, __VA_ARGS__); \
+        /* elog(DEBUG2, __VA_ARGS__);  */ \
+        errno = save_errno;  \
+    } while (0)
+
+#else
+#define file_debug(...) ((void)0)
+#endif
+
+
 #endif							/* FD_H */

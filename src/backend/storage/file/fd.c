@@ -4001,7 +4001,7 @@ assign_debug_io_direct(const char *newval, void *extra)
 /* Point to the Vfd struct for the given file descriptor */
 static inline Vfd* getVfd(File file)
 {
-	Assert(file >= 0 && file < MAXIMUM_VFD);
+	Assert(file >= 0 && file < SizeVfdCache);
 	return &VfdCache[file];
 }
 
@@ -4036,7 +4036,7 @@ File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	bool append;
 	off_t position = 0;
 
-	debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x\n", fileName, fileFlags, fileMode);
+	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x\n", fileName, fileFlags, fileMode);
 
 	/* VFDs don't implement O_APPEND. We will position to FileSize instead. */
 	append = (fileFlags & O_APPEND) != 0;
@@ -4079,7 +4079,7 @@ File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
  */
 int FileClose(File file)
 {
-	debug("FileClose: name=%s, file=%d\n", getName(file), file);
+	file_debug("FileClose: name=%s, file=%d\n", getName(file), file);
 
 	/* If invalid vfd or if already closed, then EBADF */
 	if (file < 0 || file >= SizeVfdCache || getVfd(file)->fd == -1)
@@ -4092,7 +4092,7 @@ int FileClose(File file)
 	if (FileClose_Internal(file) == -1)
 	    return updateFileError(-1, errno, "Unable to close file: %s", getName(file));
 
-	debug("FileClose(done): file=%d\n", file);
+	file_debug("FileClose(done): file=%d\n", file);
 
 	return 0;
 }
@@ -4102,19 +4102,19 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 {
 	ssize_t actual;
 
-	debug("FileRead: name=%s file=%d  amount=%zd offset=%lld\n", getName(file), file, amount, offset);
+	file_debug("FileRead: name=%s file=%d  amount=%zd offset=%lld\n", getName(file), file, amount, offset);
 	Assert(offset >= 0);
-	Assert((ssize_t)amount > 0);
+	Assert((ssize_t)amount >= 0);
 
 	/* Read the data as requested */
 	actual = FileRead_Internal(file, buffer, amount, offset, wait_event_info);
-	getVfd(file)->eof = (actual == 0);
+	getVfd(file)->eof = (actual == 0 && amount > 0);
 
 	/* If successful, update the file offset */
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	debug("FileRead(done): file=%d  name=%s  actual=%zd\n", file, getName(file), actual);
+	file_debug("FileRead(done): file=%d  name=%s  actual=%zd\n", file, getName(file), actual);
 	return actual;
 }
 
@@ -4123,7 +4123,7 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 {
 	ssize_t actual;
 
-	debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld\n", getName(file), file, amount, offset);
+	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld\n", getName(file), file, amount, offset);
 	Assert(offset >= 0 && (ssize_t)amount > 0);
 
 	/* Write the data as requested */
@@ -4133,7 +4133,7 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	debug("FileWrite(done): file=%d  name=%s  actual=%zd\n", file, getName(file), actual);
+	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd\n", file, getName(file), actual);
 
 	return actual;
 }
