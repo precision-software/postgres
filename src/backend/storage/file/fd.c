@@ -1375,7 +1375,13 @@ AllocateVfd(void)
 
 	DO_DB(elog(LOG, "AllocateVfd. Size %zu", SizeVfdCache));
 
-	Assert(SizeVfdCache > 0);	/* InitFileAccess not called? */
+	/*
+	 * If not already done, initialize the VFD infrastructure.
+	 * VFDs are now used in a variety of places, possibly
+	 * before other initialization has taken place.
+	 */
+	if (SizeVfdCache == 0)
+		InitFileAccess();
 
 	if (VfdCache[0].nextFree == 0)
 	{
