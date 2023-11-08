@@ -112,6 +112,7 @@ extern ssize_t	FileWrite(File file, const void *buffer, size_t amount, off_t off
 extern int	FileSync(File file, uint32 wait_event_info);
 extern int	FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info);
 extern int	FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info);
+extern int PathNameFileSync(const char *pathName, uint32 wait_event_info);
 
 extern off_t FileSize(File file);
 extern int	FileTruncate(File file, off_t offset, uint32 wait_event_info);
@@ -221,11 +222,15 @@ extern int copyFileError(File dst, File src);
 static inline File FileOpen(const char *name, int fileFlags) {return PathNameOpenFile(name, fileFlags);}
 
 /* Declare a "debug" macro */
-#ifdef DEBUG
+#define FILE_DEBUG
+#ifdef FILE_DEBUG
 #define file_debug(...) \
     do {  \
         int save_errno = errno; \
-        fprintf(stderr, __VA_ARGS__); \
+        setvbuf(stderr, NULL, _IOLBF, 256); \
+		fprintf(stderr, "%s(%d): ", __func__, getpid());     \
+		fprintf(stderr, __VA_ARGS__); \
+		fprintf(stderr, "\n");\
         /* elog(DEBUG2, __VA_ARGS__);  */ \
         errno = save_errno;  \
     } while (0)

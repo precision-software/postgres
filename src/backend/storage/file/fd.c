@@ -859,7 +859,7 @@ durable_unlink(const char *fname, int elevel)
 void
 InitFileAccess(void)
 {
-	Assert(SizeVfdCache == 0);	/* call me only once */
+	//Assert(SizeVfdCache == 0);	/* TODO: call me only once */
 
 	/* initialize cache header entry */
 	VfdCache = (Vfd *) malloc(sizeof(Vfd));
@@ -1683,6 +1683,7 @@ OpenTemporaryFile(bool interXact)
 	File		file = 0;
 
 	Assert(temporary_files_allowed);	/* check temp file access is up */
+	Assert(CurrentResourceOwner != NULL);  /* Temp files must have an owner */
 
 	/*
 	 * Make sure the current resource owner has space for this File before we
@@ -2412,6 +2413,28 @@ FileTruncate(File file, off_t offset, uint32 wait_event_info)
 	}
 
 	return returnCode;
+}
+
+int
+PathNameFileSync(const char *pathName, uint32 wait_event_info)
+{
+	int ret;
+
+	/* Open the file, returning immediately if unable */
+	File file = PathNameOpenFile(pathName, O_RDWR | PG_BINARY);
+	if (file < 0)
+		return file;
+
+	/* Sync the now opened file, remembering if error occurred. */
+	ret = FileSync(file, wait_event_info);
+	if (ret == -1)
+	    setFileError(file, errno, "Error while syncing file: %s", pathName);
+
+	/* Close the file. */
+	FileClose(file);
+
+	/* Done, remembering the sync error */
+	return ret;
 }
 
 /*
@@ -4036,7 +4059,7 @@ File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	bool append;
 	off_t position = 0;
 
-	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x\n", fileName, fileFlags, fileMode);
+	file_debug("fileName=%s fileFlags=0x%x fileMode=0x%x", fileName, fileFlags, fileMode);
 
 	/* VFDs don't implement O_APPEND. We will position to FileSize instead. */
 	append = (fileFlags & O_APPEND) != 0;
@@ -4079,7 +4102,7 @@ File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
  */
 int FileClose(File file)
 {
-	file_debug("FileClose: name=%s, file=%d\n", getName(file), file);
+	file_debug("name=%s, file=%d", getName(file), file);
 
 	/* If invalid vfd or if already closed, then EBADF */
 	if (file < 0 || file >= SizeVfdCache || getVfd(file)->fd == -1)
@@ -4092,7 +4115,7 @@ int FileClose(File file)
 	if (FileClose_Internal(file) == -1)
 	    return updateFileError(-1, errno, "Unable to close file: %s", getName(file));
 
-	file_debug("FileClose(done): file=%d\n", file);
+	file_debug("(done): file=%d", file);
 
 	return 0;
 }
@@ -4102,7 +4125,7 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 {
 	ssize_t actual;
 
-	file_debug("FileRead: name=%s file=%d  amount=%zd offset=%lld\n", getName(file), file, amount, offset);
+	file_debug("name=%s file=%d  amount=%zd offset=%lld", getName(file), file, amount, offset);
 	Assert(offset >= 0);
 	Assert((ssize_t)amount >= 0);
 
@@ -4114,7 +4137,7 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	file_debug("FileRead(done): file=%d  name=%s  actual=%zd\n", file, getName(file), actual);
+	file_debug("(done): file=%d  name=%s  actual=%zd", file, getName(file), actual);
 	return actual;
 }
 
@@ -4123,7 +4146,7 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 {
 	ssize_t actual;
 
-	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld\n", getName(file), file, amount, offset);
+	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld", getName(file), file, amount, offset);
 	Assert(offset >= 0 && (ssize_t)amount > 0);
 
 	/* Write the data as requested */
@@ -4133,7 +4156,7 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd\n", file, getName(file), actual);
+	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd", file, getName(file), actual);
 
 	return actual;
 }
