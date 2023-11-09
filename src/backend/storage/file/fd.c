@@ -828,6 +828,7 @@ durable_rename(const char *oldfile, const char *newfile, int elevel)
 int
 durable_unlink(const char *fname, int elevel)
 {
+	file_debug("fname=%s elevel=%d", fname, elevel);
 	if (unlink(fname) < 0)
 	{
 		ereport(elevel,
@@ -1654,6 +1655,7 @@ void
 PathNameDeleteTemporaryDir(const char *dirname)
 {
 	struct stat statbuf;
+	file_debug("dirname=%s", dirname);
 
 	/* Silently ignore missing directory. */
 	if (stat(dirname, &statbuf) != 0 && errno == ENOENT)
@@ -1688,6 +1690,7 @@ OpenTemporaryFile(bool interXact)
 {
 	File		file = 0;
 
+	file_debug("interxact=%e", interXact);
 	Assert(temporary_files_allowed);	/* check temp file access is up */
 	Assert(CurrentResourceOwner != NULL);  /* Temp files must have an owner */
 
@@ -1865,6 +1868,7 @@ File
 PathNameOpenTemporaryFile(const char *path, int mode)
 {
 	File		file;
+	file_debug("path=%s  mode=%d", path, mode);
 
 	Assert(temporary_files_allowed);	/* check temp file access is up */
 
@@ -1897,6 +1901,7 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 {
 	struct stat filestats;
 	int			stat_errno;
+	file_debug("path=%s errOnFail=%d", path, error_on_failure);
 
 	/* Get the final size for pgstat reporting. */
 	if (stat(path, &filestats) != 0)
@@ -2004,6 +2009,7 @@ FileClose_Internal(File file)
 			stat_errno = 0;
 
 		/* in any case do the unlink */
+		file_debug("(unlink) fileName=%s", vfdP->fileName);
 		if (unlink(vfdP->fileName))
 		{
 			save_errno = errno;
@@ -2088,6 +2094,7 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 {
 	int			returnCode;
 
+	file_debug("file=%d offset=%zd nbytes=%zd", file, offset, nbytes);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileWriteback: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
@@ -2267,6 +2274,7 @@ int
 FileSync(File file, uint32 wait_event_info)
 {
 	int			returnCode;
+	file_debug("file=%d", file);
 
 	Assert(FileIsValid(file));
 
@@ -2295,6 +2303,7 @@ FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
 {
 	int			returnCode;
 	ssize_t		written;
+	file_debug("file=%d offset=%lld amount=%lld", file, offset, amount);
 
 	Assert(FileIsValid(file));
 
@@ -2378,6 +2387,7 @@ retry:
 off_t
 FileSize(File file)
 {
+	int64 size;
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileSize %d (%s)",
@@ -2389,13 +2399,16 @@ FileSize(File file)
 			return (off_t) -1;
 	}
 
-	return lseek(VfdCache[file].fd, 0, SEEK_END);
+	size = lseek(VfdCache[file].fd, 0, SEEK_END);
+	file_debug("file=0x%x  size=%zd", file, size);
+	return size;
 }
 
 int
 FileTruncate(File file, off_t offset, uint32 wait_event_info)
 {
 	int			returnCode;
+	file_debug("file=0x%x  offset=%lld", file, offset);
 
 	Assert(FileIsValid(file));
 
@@ -2425,6 +2438,7 @@ int
 PathNameFileSync(const char *pathName, uint32 wait_event_info)
 {
 	int ret;
+	file_debug("pathName=%s", pathName);
 
 	/* Open the file, returning immediately if unable */
 	File file = PathNameOpenFile(pathName, O_RDWR | PG_BINARY);
@@ -2575,6 +2589,7 @@ FILE *
 AllocateFile(const char *name, const char *mode)
 {
 	FILE	   *file;
+	file_debug("name=%s mode=%s", name, mode);
 
 	DO_DB(elog(LOG, "AllocateFile: Allocated %d (%s)",
 			   numAllocatedDescs, name));
@@ -2635,6 +2650,7 @@ OpenTransientFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	int			fd;
 
+	file_debug("fileName=%s flags=0x%x  fileMode=0x%x", fileName, fileFlags, fileMode);
 	DO_DB(elog(LOG, "OpenTransientFile: Allocated %d (%s)",
 			   numAllocatedDescs, fileName));
 
@@ -2773,6 +2789,7 @@ int
 FreeFile(FILE *file)
 {
 	int			i;
+	file_debug("file=%p", file);
 
 	DO_DB(elog(LOG, "FreeFile: Allocated %d", numAllocatedDescs));
 
@@ -2801,6 +2818,7 @@ int
 CloseTransientFile(int fd)
 {
 	int			i;
+	file_debug("fd=%d", fd);
 
 	DO_DB(elog(LOG, "CloseTransientFile: Allocated %d", numAllocatedDescs));
 
@@ -3163,8 +3181,8 @@ AtEOXact_Files(bool isCommit)
 
 /*
  * BeforeShmemExit_Files
- *
- * before_shmem_exit hook to clean up temp files during backend shutdown.
+ *Patch from earlier.  Need to fix createdb writing of version file.	4f51c8d7c7	John Morris <john.morris@crunchydata.com>	Nov 2, 2023 at 2:01 PM
+les during backend shutdown.
  * Here, we want to clean up *all* temp files including interXact ones.
  */
 static void
@@ -3194,6 +3212,7 @@ static void
 CleanupTempFiles(bool isCommit, bool isProcExit)
 {
 	Index		i;
+	file_debug("isCommit=%d  isProcExit=%d", isCommit, isProcExit);
 
 	/*
 	 * Careful here: at proc_exit we need extra cleanup, not just
@@ -3364,6 +3383,7 @@ RemovePgTempFilesInDir(const char *tmpdirname, bool missing_ok, bool unlink_all)
 			}
 			else
 			{
+				file_debug("(unlink) rm_path=%s", rm_path);
 				if (unlink(rm_path) < 0)
 					ereport(LOG,
 							(errcode_for_file_access(),
@@ -3426,6 +3446,7 @@ RemovePgTempRelationFilesInDbspace(const char *dbspacedirname)
 		snprintf(rm_path, sizeof(rm_path), "%s/%s",
 				 dbspacedirname, de->d_name);
 
+		file_debug("(unlink) path=%s", rm_path);
 		if (unlink(rm_path) < 0)
 			ereport(LOG,
 					(errcode_for_file_access(),
@@ -4065,7 +4086,7 @@ File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	bool append;
 	off_t position = 0;
 
-	file_debug("fileName=%s fileFlags=0x%x fileMode=0x%x", fileName, fileFlags, fileMode);
+	file_debug("fileName=%s/%s fileFlags=0x%x fileMode=0x%x", getwd(NULL), fileName, fileFlags, fileMode);
 
 	/* VFDs don't implement O_APPEND. We will position to FileSize instead. */
 	append = (fileFlags & O_APPEND) != 0;
@@ -4257,6 +4278,7 @@ FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_inf
 off_t
 FileSeek(File file, off_t offset)
 {
+	file_debug("file=%d  offset=%lld", file, offset);
 	getVfd(file)->offset = offset;
 	return offset;
 }
@@ -4316,6 +4338,11 @@ int FileErrorCode(File file)
 	return errorCode;
 }
 
+
+/*
+ * Set error information for the current file.
+ * For compatibility, sets errno as a side effect.
+ */
 int setFileError(File file, int errorCode, const char *fmt, ...)
 {
 	va_list args;
@@ -4328,6 +4355,7 @@ int setFileError(File file, int errorCode, const char *fmt, ...)
 	va_start(args, fmt);
 	vsnprintf(vfd->errorMsg, sizeof(vfd->errorMsg), fmt, args);
 	va_end(args);
+	file_debug("file=%d msg=%s", file, vfd->errorMsg);
 
 	/* Restore the error code for compatibility */
 	errno = vfd->errorCode;
@@ -4340,7 +4368,7 @@ int setFileError(File file, int errorCode, const char *fmt, ...)
 /*
  * Report an error, unless one has alread been reported.
  * Replicated code with setFileError. Another solution
- * would be to have a version which accepted a vararg parameter.
+ * would be to have a common version which accepted a vararg parameter.
  */
 int updateFileError(File file, int errorCode, const char *fmt, ...)
 {
@@ -4349,7 +4377,10 @@ int updateFileError(File file, int errorCode, const char *fmt, ...)
 
 	/* if we already have an error, don't overwrite it */
 	if (vfd->errorCode != 0)
+	{
+		errno = vfd->errorCode;
 		return -1;
+	}
 
 	/* Save the errno */
 	vfd->errorCode = errorCode;
