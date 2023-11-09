@@ -4270,7 +4270,7 @@ FileTell(File file)
 	return getVfd(file)->offset;
 }
 
-/* ===================================================================
+/*
  * Error handling code.
  * These functions are similar to ferror(), but can be accessed even when the file is closed or -1.
  * This added feature allows error info to be fetched after a failed "open" or "close" call.
@@ -4336,6 +4336,12 @@ int setFileError(File file, int errorCode, const char *fmt, ...)
 	return -1;
 }
 
+
+/*
+ * Report an error, unless one has alread been reported.
+ * Replicated code with setFileError. Another solution
+ * would be to have a version which accepted a vararg parameter.
+ */
 int updateFileError(File file, int errorCode, const char *fmt, ...)
 {
     va_list args;
@@ -4360,6 +4366,12 @@ int updateFileError(File file, int errorCode, const char *fmt, ...)
 	return -1;
 }
 
+
+/*
+ * Copy error info from one vfd to another.
+ * More for implementing encryption and other
+ * layered file I/O.
+ */
 int copyFileError(File dst, File src)
 {
 	Vfd *vfdDst = getVfdErr(dst);

@@ -12,8 +12,6 @@
  *-------------------------------------------------------------------------
  */
 
-//#define DEBUG
-
 /*
  * calls:
  *
@@ -222,7 +220,7 @@ extern int copyFileError(File dst, File src);
 static inline File FileOpen(const char *name, int fileFlags) {return PathNameOpenFile(name, fileFlags);}
 
 /* Declare a "debug" macro */
-//#define FILE_DEBUG
+#define FILE_DEBUG
 #ifdef FILE_DEBUG
 #define file_debug(...) \
     do {  \
