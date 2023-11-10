@@ -2438,10 +2438,11 @@ int
 PathNameFileSync(const char *pathName, uint32 wait_event_info)
 {
 	int ret;
+	File file;
 	file_debug("pathName=%s", pathName);
 
 	/* Open the file, returning immediately if unable */
-	File file = PathNameOpenFile(pathName, O_RDWR | PG_BINARY);
+	file = FileOpen(pathName, O_RDWR | PG_BINARY);
 	if (file < 0)
 		return file;
 
