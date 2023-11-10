@@ -1690,7 +1690,7 @@ OpenTemporaryFile(bool interXact)
 {
 	File		file = 0;
 
-	file_debug("interxact=%e", interXact);
+	file_debug("interxact=%d", interXact);
 	Assert(temporary_files_allowed);	/* check temp file access is up */
 	Assert(CurrentResourceOwner != NULL);  /* Temp files must have an owner */
 
@@ -2094,7 +2094,7 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 {
 	int			returnCode;
 
-	file_debug("file=%d offset=%zd nbytes=%zd", file, offset, nbytes);
+	file_debug("file=%d offset=%lld nbytes=%zd", file, offset, nbytes);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileWriteback: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
