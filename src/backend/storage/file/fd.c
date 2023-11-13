@@ -206,6 +206,11 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
+
+	int 	    errorCode;        /* Code of the most recent error */
+	char        errorMsg[121];	 /* The most recent error message */
+	bool		eof;	         /* Result of last read */
+	off_t 		offset; 		 /* Current position in file */
 } Vfd;
 
 /*
@@ -848,6 +853,7 @@ durable_rename(const char *oldfile, const char *newfile, int elevel)
 int
 durable_unlink(const char *fname, int elevel)
 {
+	file_debug("fname=%s elevel=%d", fname, elevel);
 	if (unlink(fname) < 0)
 	{
 		ereport(elevel,
@@ -879,7 +885,7 @@ durable_unlink(const char *fname, int elevel)
 void
 InitFileAccess(void)
 {
-	Assert(SizeVfdCache == 0);	/* call me only once */
+	//Assert(SizeVfdCache == 0);	/* TODO: call me only once */
 
 	/* initialize cache header entry */
 	VfdCache = (Vfd *) malloc(sizeof(Vfd));
@@ -1395,7 +1401,13 @@ AllocateVfd(void)
 
 	DO_DB(elog(LOG, "AllocateVfd. Size %zu", SizeVfdCache));
 
-	Assert(SizeVfdCache > 0);	/* InitFileAccess not called? */
+	/*
+	 * If not already done, initialize the VFD infrastructure.
+	 * VFDs are now used in a variety of places, possibly
+	 * before other initialization has taken place.
+	 */
+	if (SizeVfdCache == 0)
+		InitFileAccess();
 
 	if (VfdCache[0].nextFree == 0)
 	{
@@ -1561,8 +1573,8 @@ PathNameOpenFile(const char *fileName, int fileFlags)
  * it will be interpreted relative to the process' working directory
  * (which should always be $PGDATA when this code is running).
  */
-File
-PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
+static File
+PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	char	   *fnamecopy;
 	File		file;
@@ -1668,6 +1680,7 @@ void
 PathNameDeleteTemporaryDir(const char *dirname)
 {
 	struct stat statbuf;
+	file_debug("dirname=%s", dirname);
 
 	/* Silently ignore missing directory. */
 	if (stat(dirname, &statbuf) != 0 && errno == ENOENT)
@@ -1702,7 +1715,9 @@ OpenTemporaryFile(bool interXact)
 {
 	File		file = 0;
 
+	file_debug("interxact=%d", interXact);
 	Assert(temporary_files_allowed);	/* check temp file access is up */
+	Assert(CurrentResourceOwner != NULL);  /* Temp files must have an owner */
 
 	/*
 	 * Make sure the current resource owner has space for this File before we
@@ -1878,6 +1893,7 @@ File
 PathNameOpenTemporaryFile(const char *path, int mode)
 {
 	File		file;
+	file_debug("path=%s  mode=%d", path, mode);
 
 	Assert(temporary_files_allowed);	/* check temp file access is up */
 
@@ -1910,6 +1926,7 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 {
 	struct stat filestats;
 	int			stat_errno;
+	file_debug("path=%s errOnFail=%d", path, error_on_failure);
 
 	/* Get the final size for pgstat reporting. */
 	if (stat(path, &filestats) != 0)
@@ -1951,10 +1968,11 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 /*
  * close a file when done with it
  */
-void
-FileClose(File file)
+static int
+FileClose_Internal(File file)
 {
 	Vfd		   *vfdP;
+	int 	   save_errno = 0;
 
 	Assert(FileIsValid(file));
 
@@ -1968,6 +1986,7 @@ FileClose(File file)
 		/* close the file */
 		if (close(vfdP->fd) != 0)
 		{
+			save_errno = errno;
 			/*
 			 * We may need to panic on failure to close non-temporary files;
 			 * see LruDelete.
@@ -2015,17 +2034,21 @@ FileClose(File file)
 			stat_errno = 0;
 
 		/* in any case do the unlink */
+		file_debug("(unlink) fileName=%s", vfdP->fileName);
 		if (unlink(vfdP->fileName))
+		{
+			save_errno = errno;
 			ereport(LOG,
 					(errcode_for_file_access(),
-					 errmsg("could not delete file \"%s\": %m", vfdP->fileName)));
+						errmsg("could not delete file \"%s\": %m", vfdP->fileName)));
+		}
 
 		/* and last report the stat results */
 		if (stat_errno == 0)
 			ReportTemporaryFileUsage(vfdP->fileName, filestats.st_size);
 		else
 		{
-			errno = stat_errno;
+			save_errno = errno = stat_errno;
 			ereport(LOG,
 					(errcode_for_file_access(),
 					 errmsg("could not stat file \"%s\": %m", vfdP->fileName)));
@@ -2040,6 +2063,14 @@ FileClose(File file)
 	 * Return the Vfd slot to the free list
 	 */
 	FreeVfd(file);
+
+	if (save_errno != 0)
+	{
+		errno = save_errno;
+		return -1;
+	}
+
+	return 0;
 }
 
 /*
@@ -2088,6 +2119,7 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 {
 	int			returnCode;
 
+	file_debug("file=%d offset=%lld nbytes=%zd", file, offset, nbytes);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileWriteback: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
@@ -2109,8 +2141,8 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 	pgstat_report_wait_end();
 }
 
-int
-FileRead(File file, void *buffer, size_t amount, off_t offset,
+static ssize_t
+FileRead_Internal(File file, void *buffer, size_t amount, off_t offset,
 		 uint32 wait_event_info)
 {
 	int			returnCode;
@@ -2165,8 +2197,8 @@ retry:
 	return returnCode;
 }
 
-int
-FileWrite(File file, const void *buffer, size_t amount, off_t offset,
+static ssize_t
+FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset,
 		  uint32 wait_event_info)
 {
 	int			returnCode;
@@ -2267,6 +2299,7 @@ int
 FileSync(File file, uint32 wait_event_info)
 {
 	int			returnCode;
+	file_debug("file=%d", file);
 
 	Assert(FileIsValid(file));
 
@@ -2295,6 +2328,7 @@ FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
 {
 	int			returnCode;
 	ssize_t		written;
+	file_debug("file=%d offset=%lld amount=%lld", file, offset, amount);
 
 	Assert(FileIsValid(file));
 
@@ -2378,6 +2412,7 @@ retry:
 off_t
 FileSize(File file)
 {
+	int64 size;
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileSize %d (%s)",
@@ -2389,13 +2424,16 @@ FileSize(File file)
 			return (off_t) -1;
 	}
 
-	return lseek(VfdCache[file].fd, 0, SEEK_END);
+	size = lseek(VfdCache[file].fd, 0, SEEK_END);
+	file_debug("file=0x%x  size=%zd", file, size);
+	return size;
 }
 
 int
 FileTruncate(File file, off_t offset, uint32 wait_event_info)
 {
 	int			returnCode;
+	file_debug("file=0x%x  offset=%lld", file, offset);
 
 	Assert(FileIsValid(file));
 
@@ -2419,6 +2457,30 @@ FileTruncate(File file, off_t offset, uint32 wait_event_info)
 	}
 
 	return returnCode;
+}
+
+int
+PathNameFileSync(const char *pathName, uint32 wait_event_info)
+{
+	int ret;
+	File file;
+	file_debug("pathName=%s", pathName);
+
+	/* Open the file, returning immediately if unable */
+	file = FileOpen(pathName, O_RDWR | PG_BINARY);
+	if (file < 0)
+		return file;
+
+	/* Sync the now opened file, remembering if error occurred. */
+	ret = FileSync(file, wait_event_info);
+	if (ret == -1)
+	    setFileError(file, errno, "Error while syncing file: %s", pathName);
+
+	/* Close the file. */
+	FileClose(file);
+
+	/* Done, remembering the sync error */
+	return ret;
 }
 
 /*
@@ -2553,6 +2615,7 @@ FILE *
 AllocateFile(const char *name, const char *mode)
 {
 	FILE	   *file;
+	file_debug("name=%s mode=%s", name, mode);
 
 	DO_DB(elog(LOG, "AllocateFile: Allocated %d (%s)",
 			   numAllocatedDescs, name));
@@ -2613,6 +2676,7 @@ OpenTransientFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	int			fd;
 
+	file_debug("fileName=%s flags=0x%x  fileMode=0x%x", fileName, fileFlags, fileMode);
 	DO_DB(elog(LOG, "OpenTransientFile: Allocated %d (%s)",
 			   numAllocatedDescs, fileName));
 
@@ -2751,6 +2815,7 @@ int
 FreeFile(FILE *file)
 {
 	int			i;
+	file_debug("file=%p", file);
 
 	DO_DB(elog(LOG, "FreeFile: Allocated %d", numAllocatedDescs));
 
@@ -2779,6 +2844,7 @@ int
 CloseTransientFile(int fd)
 {
 	int			i;
+	file_debug("fd=%d", fd);
 
 	DO_DB(elog(LOG, "CloseTransientFile: Allocated %d", numAllocatedDescs));
 
@@ -3141,8 +3207,8 @@ AtEOXact_Files(bool isCommit)
 
 /*
  * BeforeShmemExit_Files
- *
- * before_shmem_exit hook to clean up temp files during backend shutdown.
+ *Patch from earlier.  Need to fix createdb writing of version file.	4f51c8d7c7	John Morris <john.morris@crunchydata.com>	Nov 2, 2023 at 2:01 PM
+les during backend shutdown.
  * Here, we want to clean up *all* temp files including interXact ones.
  */
 static void
@@ -3172,6 +3238,7 @@ static void
 CleanupTempFiles(bool isCommit, bool isProcExit)
 {
 	Index		i;
+	file_debug("isCommit=%d  isProcExit=%d", isCommit, isProcExit);
 
 	/*
 	 * Careful here: at proc_exit we need extra cleanup, not just
@@ -3342,6 +3409,7 @@ RemovePgTempFilesInDir(const char *tmpdirname, bool missing_ok, bool unlink_all)
 			}
 			else
 			{
+				file_debug("(unlink) rm_path=%s", rm_path);
 				if (unlink(rm_path) < 0)
 					ereport(LOG,
 							(errcode_for_file_access(),
@@ -3404,6 +3472,7 @@ RemovePgTempRelationFilesInDbspace(const char *dbspacedirname)
 		snprintf(rm_path, sizeof(rm_path), "%s/%s",
 				 dbspacedirname, de->d_name);
 
+		file_debug("(unlink) path=%s", rm_path);
 		if (unlink(rm_path) < 0)
 			ereport(LOG,
 					(errcode_for_file_access(),
@@ -4018,4 +4087,379 @@ static char *
 ResOwnerPrintFile(Datum res)
 {
 	return psprintf("File %d", DatumGetInt32(res));
+}
+
+
+/*******************************************************************************
+* The following functions add sequential and error handling to the VFD routines.
+* They are mostly wrappers around the original VFD routines,
+* which have been renamed by appending "_internal".
+*/
+
+/* Point to the Vfd struct for the given file descriptor */
+static inline Vfd* getVfd(File file)
+{
+	Assert(file >= 0 && file < SizeVfdCache);
+	return &VfdCache[file];
+}
+
+/* Point to the Vfd struct, or a dummy Vfd if the file descriptor is -1 */
+static inline Vfd* getVfdErr(File file)
+{
+	/* Allocate a static Vfd to handle the file = -1 case */
+	static Vfd dummyVfd[1] = {{.fileName = "dummy(-1)"}};
+
+	if (file == -1)
+		return dummyVfd;
+	else
+		return getVfd(file);
+}
+
+static const char *getName(File file)
+{
+	return getVfdErr(file)->fileName;
+}
+
+/*
+ * Open a file
+ * If an error occurs, returns -1 and set up error information
+ * so FileError(-1) will return true. Note errno is set for compatibility.
+ *
+ * We must be sure to release *all* resources if we fail to open the file.
+ * It should be the same as though never opened.
+ */
+File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
+{
+	File file = -1;
+	bool append;
+	off_t position = 0;
+
+	file_debug("fileName=%s/%s fileFlags=0x%x fileMode=0x%x", getwd(NULL), fileName, fileFlags, fileMode);
+
+	/* VFDs don't implement O_APPEND. We will position to FileSize instead. */
+	append = (fileFlags & O_APPEND) != 0;
+	fileFlags &= ~O_APPEND;
+
+	/* Clear any previous error information */
+	FileClearError(-1);
+
+	/* Open the VFD */
+	file = PathNameOpenFilePerm_Internal(fileName, fileFlags, fileMode);
+	if (file == -1)
+		return setFileError(-1, errno, "Unable to open file: %s", fileName);
+
+	/* Position at end of file if appending. This only impacts WriteSeq and ReadSeq. */
+	if (append) {
+
+		/* Get the size of the file */
+		position = FileSize(file);
+		if (position == -1) {
+			FileClose(file);
+			return setFileError(-1, errno, "Unable to O_APPEND to file: %s", fileName);
+		}
+	}
+
+	/* Success!. Save the desired position */
+	getVfd(file)->offset = position;
+	FileClearError(file);
+
+	return file;
+}
+
+/*
+ * Close a file. Like FileOpen(), the error information is saved in the dummy "-1" file,
+ * but it can also be accessed using the closed virtual file descriptor.
+ *
+ * Close has special error handling. If the vfd already has an error, we don't
+ * overwrite it.  This is because the error may have been set by a previous
+ * operation on the file, and we don't want to lose that information.
+ * However, the return value will always be 0 if we closed the file successfully.
+ */
+int FileClose(File file)
+{
+	file_debug("name=%s, file=%d", getName(file), file);
+
+	/* If invalid vfd or if already closed, then EBADF */
+	if (file < 0 || file >= SizeVfdCache || getVfd(file)->fd == -1)
+		return setFileError(-1, EBADF, "FileClose: invalid file descriptor %d", file);
+
+	/* Save any existing error information */
+	copyFileError(-1, file);
+
+	/* Close the file */
+	if (FileClose_Internal(file) == -1)
+	    return updateFileError(-1, errno, "Unable to close file: %s", getName(file));
+
+	file_debug("(done): file=%d", file);
+
+	return 0;
+}
+
+
+ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
+{
+	ssize_t actual;
+
+	file_debug("name=%s file=%d  amount=%zd offset=%lld", getName(file), file, amount, offset);
+	Assert(offset >= 0);
+	Assert((ssize_t)amount >= 0);
+
+	/* Read the data as requested */
+	actual = FileRead_Internal(file, buffer, amount, offset, wait_event_info);
+	getVfd(file)->eof = (actual == 0 && amount > 0);
+
+	/* If successful, update the file offset */
+	if (actual >= 0)
+		getVfd(file)->offset = offset + actual;
+
+	file_debug("(done): file=%d  name=%s  actual=%zd", file, getName(file), actual);
+	return actual;
+}
+
+
+ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
+{
+	ssize_t actual;
+
+	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld", getName(file), file, amount, offset);
+	Assert(offset >= 0 && (ssize_t)amount > 0);
+
+	/* Write the data as requested */
+	actual = FileWrite_Internal(file, buffer, amount, offset, wait_event_info);
+
+	/* If successful, update the file offset */
+	if (actual >= 0)
+		getVfd(file)->offset = offset + actual;
+
+	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd", file, getName(file), actual);
+
+	return actual;
+}
+
+
+
+
+/*========================================================================================
+ * Routines to emuulate C library FILE routines (fgetc, fprintf, ...)
+ */
+
+/*
+ * Similar to fgetc. Probably best if used with buffered files.
+ */
+ssize_t
+FileGetc(File file)
+{
+	char c;
+	int ret = (int)FileReadSeq(file, &c, 1, 0);
+	if (ret <= 0)
+		ret = EOF;
+	return ret;
+}
+
+/* Similar to fputc */
+ssize_t FilePutc(int c, File file)
+{
+	char cbuf;
+	cbuf = c;
+	if (FileWriteSeq(file, &cbuf, 1, 0) <= 0)
+		c = EOF;
+	return c;
+}
+
+/*
+ * A temporary equivalent of fprintf.
+ * This version limits text to what fits in a local buffer.
+ * Ultimately, we need to update the internal snprintf.c (dopr) to spill
+ * to temporary files.
+ */
+ssize_t FilePrintf(File file, const char *format, ...)
+{
+	va_list args;
+	char buffer[4*1024]; /* arbitrary size, big enough? */
+	int size;
+
+	va_start(args, format);
+	size = vsnprintf(buffer, sizeof(buffer), format, args);
+	va_end(args);
+
+	if (size < 0 || size >= sizeof(buffer))
+		ereport(ERROR,
+				errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+				errmsg("FilePrintf buffer overflow - %d characters exceeded %lu buffer", size, sizeof(buffer)));
+
+	return FileWriteSeq(file, buffer, Min(size, sizeof(buffer)-1), 0);
+}
+
+ssize_t FileScanf(File file, const char *format, ...)
+{
+	Assert(false); /* Not implemented */
+	return -1;
+}
+
+ssize_t FilePuts(File file, const char *string)
+{
+	return FileWriteSeq(file, string, strlen(string), 0);
+}
+
+/*
+ * Read sequentially from the file.
+ */
+ssize_t
+FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info)
+{
+	return FileRead(file, buffer, amount, getVfd(file)->offset, wait_event_info);
+}
+
+/*
+ * Write sequentially to the file.
+ */
+ssize_t
+FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info)
+{
+	return FileWrite(file, buffer, amount, getVfd(file)->offset, wait_event_info);
+}
+
+/*
+ * Seek to an absolute position within the file.
+ * Relative positions can be calculated using FileTell or FileSize.
+ */
+off_t
+FileSeek(File file, off_t offset)
+{
+	file_debug("file=%d  offset=%lld", file, offset);
+	getVfd(file)->offset = offset;
+	return offset;
+}
+
+/*
+ * Tell us the current file position
+ */
+off_t
+FileTell(File file)
+{
+	return getVfd(file)->offset;
+}
+
+/*
+ * Error handling code.
+ * These functions are similar to ferror(), but can be accessed even when the file is closed or -1.
+ * This added feature allows error info to be fetched after a failed "open" or "close" call.
+ */
+
+/* True if an error occurred on the file.  (EOF is not an error) */
+bool FileError(File file)
+{
+	return FileErrorCode(file) != 0;
+}
+
+/* True if the last read generated an EOF */
+int FileEof(File file)
+{
+	return getVfd(file)->eof;
+}
+
+/* Clears an error, and is true if an error had been encountered */
+bool FileClearError(File file)
+{
+	Vfd *vfd = getVfdErr(file);
+	bool hasError = vfd->errorCode != 0;
+	vfd->errorCode = 0;
+	vfd->errorMsg[0] = '\0';
+	vfd->eof = false;
+	return hasError;
+}
+
+/* Get a pointer to the error message */
+const char *FileErrorMsg(File file)
+{
+	return getVfdErr(file)->errorMsg;
+}
+
+/*
+ * Get the errno associated the file.
+ * As a side effect, restores errno to the value it had when the error occurred.
+ */
+int FileErrorCode(File file)
+{
+	int errorCode = getVfdErr(file)->errorCode;
+	errno = errorCode;
+	return errorCode;
+}
+
+
+/*
+ * Set error information for the current file.
+ * For compatibility, sets errno as a side effect.
+ */
+int setFileError(File file, int errorCode, const char *fmt, ...)
+{
+	va_list args;
+	Vfd *vfd = getVfdErr(file);
+
+	/* Save the errno */
+	vfd->errorCode = errorCode;
+
+	/* Format the error message */
+	va_start(args, fmt);
+	vsnprintf(vfd->errorMsg, sizeof(vfd->errorMsg), fmt, args);
+	va_end(args);
+	file_debug("file=%d msg=%s", file, vfd->errorMsg);
+
+	/* Restore the error code for compatibility */
+	errno = vfd->errorCode;
+
+	/* Return -1 to indicate an error */
+	return -1;
+}
+
+
+/*
+ * Report an error, unless one has alread been reported.
+ * Replicated code with setFileError. Another solution
+ * would be to have a common version which accepted a vararg parameter.
+ */
+int updateFileError(File file, int errorCode, const char *fmt, ...)
+{
+    va_list args;
+	Vfd *vfd = getVfdErr(file);
+
+	/* if we already have an error, don't overwrite it */
+	if (vfd->errorCode != 0)
+	{
+		errno = vfd->errorCode;
+		return -1;
+	}
+
+	/* Save the errno */
+	vfd->errorCode = errorCode;
+
+	/* Format the error message */
+	va_start(args, fmt);
+	vsnprintf(vfd->errorMsg, sizeof(vfd->errorMsg), fmt, args);
+	va_end(args);
+
+	/* Restore the error code for compatibility */
+	errno = vfd->errorCode;
+
+	/* Return -1 to indicate an error */
+	return -1;
+}
+
+
+/*
+ * Copy error info from one vfd to another.
+ * More for implementing encryption and other
+ * layered file I/O.
+ */
+int copyFileError(File dst, File src)
+{
+	Vfd *vfdDst = getVfdErr(dst);
+	Vfd *vfdSrc = getVfdErr(src);
+
+	/* Copy the error code and message */
+	vfdDst->errorCode = vfdSrc->errorCode;
+	strncpy(vfdDst->errorMsg, vfdSrc->errorMsg, sizeof(vfdDst->errorMsg));
+
+	/* Return -1 to indicate an error */
+	return -1;
 }
