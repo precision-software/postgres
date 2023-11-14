@@ -1283,8 +1283,8 @@ ReadTwoPhaseFile(TransactionId xid, bool missing_ok)
 	char		path[MAXPGPATH];
 	char	   *buf;
 	TwoPhaseFileHeader *hdr;
-	int			fd;
-	struct stat stat;
+	File		file;
+	int64 		size;
 	uint32		crc_offset;
 	pg_crc32c	calc_crc,
 				file_crc;
@@ -1292,8 +1292,8 @@ ReadTwoPhaseFile(TransactionId xid, bool missing_ok)
 
 	TwoPhaseFilePath(path, xid);
 
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
-	if (fd < 0)
+	file = FileOpen(path, O_RDONLY | PG_BINARY);
+	if (file < 0)
 	{
 		if (missing_ok && errno == ENOENT)
 			return NULL;
@@ -1309,23 +1309,24 @@ ReadTwoPhaseFile(TransactionId xid, bool missing_ok)
 	 * we can't guarantee that we won't get an out of memory error anyway,
 	 * even on a valid file.
 	 */
-	if (fstat(fd, &stat))
+	size = FileSize(file);
+	if (size < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not stat file \"%s\": %m", path)));
 
-	if (stat.st_size < (MAXALIGN(sizeof(TwoPhaseFileHeader)) +
+	if (size < (MAXALIGN(sizeof(TwoPhaseFileHeader)) +
 						MAXALIGN(sizeof(TwoPhaseRecordOnDisk)) +
 						sizeof(pg_crc32c)) ||
-		stat.st_size > MaxAllocSize)
+		size > MaxAllocSize)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg_plural("incorrect size of file \"%s\": %lld byte",
 							   "incorrect size of file \"%s\": %lld bytes",
-							   (long long int) stat.st_size, path,
-							   (long long int) stat.st_size)));
+							   (long long int) size, path,
+							   (long long int) size)));
 
-	crc_offset = stat.st_size - sizeof(pg_crc32c);
+	crc_offset = size - sizeof(pg_crc32c);
 	if (crc_offset != MAXALIGN(crc_offset))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
@@ -1335,11 +1336,10 @@ ReadTwoPhaseFile(TransactionId xid, bool missing_ok)
 	/*
 	 * OK, slurp in the file.
 	 */
-	buf = (char *) palloc(stat.st_size);
+	buf = (char *) palloc(size);
 
-	pgstat_report_wait_start(WAIT_EVENT_TWOPHASE_FILE_READ);
-	r = read(fd, buf, stat.st_size);
-	if (r != stat.st_size)
+	r = FileReadSeq(file, buf, size, WAIT_EVENT_TWOPHASE_FILE_READ);
+	if (r != size)
 	{
 		if (r < 0)
 			ereport(ERROR,
@@ -1348,12 +1348,10 @@ ReadTwoPhaseFile(TransactionId xid, bool missing_ok)
 		else
 			ereport(ERROR,
 					(errmsg("could not read file \"%s\": read %d of %lld",
-							path, r, (long long int) stat.st_size)));
+							path, r, (long long int) size)));
 	}
 
-	pgstat_report_wait_end();
-
-	if (CloseTransientFile(fd) != 0)
+	if (FileClose(file) != 0) // TODO: move up front, relyng on read error not being overwritten by close. Otherwise, throws error without closeihg file.
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", path)));
@@ -1365,7 +1363,8 @@ ReadTwoPhaseFile(TransactionId xid, bool missing_ok)
 				 errmsg("invalid magic number stored in file \"%s\"",
 						path)));
 
-	if (hdr->total_len != stat.st_size)
+
+	if (hdr->total_len != size)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("invalid size stored in file \"%s\"",
@@ -1715,7 +1714,7 @@ RecreateTwoPhaseFile(TransactionId xid, void *content, int len)
 {
 	char		path[MAXPGPATH];
 	pg_crc32c	statefile_crc;
-	int			fd;
+	File		file;
 
 	/* Recompute CRC */
 	INIT_CRC32C(statefile_crc);
@@ -1724,17 +1723,15 @@ RecreateTwoPhaseFile(TransactionId xid, void *content, int len)
 
 	TwoPhaseFilePath(path, xid);
 
-	fd = OpenTransientFile(path,
-						   O_CREAT | O_TRUNC | O_WRONLY | PG_BINARY);
-	if (fd < 0)
+	file = FileOpen(path, O_CREAT | O_TRUNC | O_WRONLY | PG_BINARY);
+	if (file < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not recreate file \"%s\": %m", path)));
 
 	/* Write content and CRC */
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_TWOPHASE_FILE_WRITE);
-	if (write(fd, content, len) != len)
+	if (FileWriteSeq(file, content, len, WAIT_EVENT_TWOPHASE_FILE_WRITE) != len)
 	{
 		/* if write didn't set errno, assume problem is no disk space */
 		if (errno == 0)
@@ -1743,7 +1740,7 @@ RecreateTwoPhaseFile(TransactionId xid, void *content, int len)
 				(errcode_for_file_access(),
 				 errmsg("could not write file \"%s\": %m", path)));
 	}
-	if (write(fd, &statefile_crc, sizeof(pg_crc32c)) != sizeof(pg_crc32c))
+	if (FileWriteSeq(file, &statefile_crc, sizeof(pg_crc32c), WAIT_EVENT_TWOPHASE_FILE_WRITE) != sizeof(pg_crc32c))
 	{
 		/* if write didn't set errno, assume problem is no disk space */
 		if (errno == 0)
@@ -1752,20 +1749,17 @@ RecreateTwoPhaseFile(TransactionId xid, void *content, int len)
 				(errcode_for_file_access(),
 				 errmsg("could not write file \"%s\": %m", path)));
 	}
-	pgstat_report_wait_end();
 
 	/*
 	 * We must fsync the file because the end-of-replay checkpoint will not do
 	 * so, there being no GXACT in shared memory yet to tell it to.
 	 */
-	pgstat_report_wait_start(WAIT_EVENT_TWOPHASE_FILE_SYNC);
-	if (pg_fsync(fd) != 0)
+	if (FileSync(file, WAIT_EVENT_TWOPHASE_FILE_SYNC) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", path)));
-	pgstat_report_wait_end();
 
-	if (CloseTransientFile(fd) != 0)
+	if (FileClose(file) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", path)));
