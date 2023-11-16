@@ -45,6 +45,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <storage/iostack.h>
 
 typedef int File;
 
@@ -207,35 +208,17 @@ extern ssize_t FilePutc(int c, File file);
 extern int FileEof(File file);           /* Reset on every read */
 extern bool FileError(File file);        /* Persists until cleared */
 extern bool FileClearError(File file);   /* Clears both Eof and error */
-
 extern const char *FileErrorMsg(File file);
 extern int FileErrorCode(File file);
 
-/* Internal helpers for error handling */
+/* Internal helpers for error handling */ // make static
 extern int setFileError(File file, int err, const char *format, ...);
 extern int updateFileError(File file, int err, const char *format, ...);
 extern int copyFileError(File dst, File src);
+extern bool badFile(File file);
 
 /* A preferred name. */
-static inline File FileOpen(const char *name, int fileFlags) {return PathNameOpenFile(name, fileFlags);}
-
-/* Declare a "debug" macro */
-//#define FILE_DEBUG
-#ifdef FILE_DEBUG
-#define file_debug(...) \
-    do {  \
-        int save_errno = errno; \
-        setvbuf(stderr, NULL, _IOLBF, 256); \
-		fprintf(stderr, "%s(%d): ", __func__, getpid());     \
-		fprintf(stderr, __VA_ARGS__); \
-		fprintf(stderr, "\n");\
-        /* elog(DEBUG2, __VA_ARGS__);  */ \
-        errno = save_errno;  \
-    } while (0)
-
-#else
-#define file_debug(...) ((void)0)
-#endif
-
+extern File FileOpen(const char *name, int fileFlags);
+extern File FileOpenPerm(const char *name, int fileFlags, mode_t perm);
 
 #endif							/* FD_H */

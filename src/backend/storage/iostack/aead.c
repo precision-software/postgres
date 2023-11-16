@@ -1,0 +1,879 @@
+/*
+ *
+ * TODO: integrate with postgres encryption
+ * TODO: consider allocating blockSize header to keep things aligned.
+ * TODO: option to skip MAC so block sizes don't change. (aids alignment)
+ */
+//#define DEBUG
+#include <stdlib.h>
+#include <assert.h>
+#include <fcntl.h>
+
+#include <openssl/opensslv.h>
+#include <openssl/ssl.h>
+#include <openssl/evp.h>
+#include <openssl/err.h>
+#include <openssl/rand.h>
+
+#include "storage/iostack.h"
+#include "utils/wait_event.h"
+#include "packed.h"
+
+/* Interface */
+typedef struct Aead Aead;
+
+/* Forward references */
+static off_t aeadSize(Aead *this);
+static bool openSSLError(int code);
+void generateNonce(Byte *nonce, Byte *iv, size_t ivSize, size_t seqNr);
+ssize_t aead_encrypt(Aead *this, const Byte *plainBlock, size_t plainSize, Byte *header,
+                  size_t headerSize, Byte *cipherBlock, size_t cipherSize, Byte *tag, ssize_t blockNr);
+ssize_t aead_decrypt(Aead *this, Byte *plainText, size_t plainSize, Byte *header,
+                  size_t headerSize, Byte *cipherText, size_t cipherSize, Byte *tag, ssize_t blockNr);
+bool aeadCipherSetup(Aead *this, char *cipherName);
+bool aeadConfigure(Aead *this);
+size_t paddingSize(Aead *this, size_t suggestedSize);
+static bool needsFinalBlock(Aead *this);
+off_t cryptOffset(Aead *this, off_t plainOffset);
+size_t cryptSize(Aead *this, size_t plainSize);
+bool aeadHeaderRead(Aead *this);
+bool aeadHeaderWrite(Aead *this);
+static ssize_t setOpenSSLError(Aead *this, ssize_t ret);
+static Aead *aeadCleanup(Aead *this);
+
+
+/**
+ * Converter structure for encrypting and decrypting TLS Blocks.
+ */
+#define MAX_CIPHER_NAME 64
+#define MAX_AEAD_HEADER_SIZE 1024
+#define HEADER_SEQUENCE_NUMBER ((size_t)-1)
+struct Aead
+{
+	/* Always at beginning of structure */
+    IoStack ioStack;
+
+    /* Configuration. */
+    Byte key[EVP_MAX_KEY_LENGTH];       /* The key for encrypting/decrypting */
+    char cipherName[MAX_CIPHER_NAME];   /* The name of the cipher, if encrypting a new file. */
+    size_t suggestedSize;                   /* The plaintext block size, if encrypting a new file */
+
+    /* Cipher State (based on the encryption algorithm and the file header) */
+    size_t keySize;              /* The size of the key in bytes */
+    size_t ivSize;               /* Size of the initialization vector, typically same as cryptSize */
+    size_t cipherBlockSize;      /* Size of the cipher block. (typically 16 bytes for AES) */
+    size_t tagSize;              /* Size of the MAC tag to authenticate the encrypted block. */
+    bool hasPadding;             /* Whether cipher block padding is added to the encrypted blocks */
+    Byte iv[EVP_MAX_IV_LENGTH];  /* The initialization vector for the sequence of blocks. */
+    EVP_CIPHER *cipher;          /* The libcrypto cipher structure */
+    EVP_CIPHER_CTX *ctx;         /* libcrypto context. */
+
+    /* Our state after we've opened the encrypted file */
+    ssize_t headerSize;            /* Size of the header we read/wrote to the encrypted file */
+    size_t blockNr;               /* The block sequence number, starting at 0 and incrementing. */
+	Byte *cryptBuf;               /* Buffer to hold the current encrypted block */
+    size_t cryptSize;             /* The size of the encrypted blocks */
+	Byte *plainBuf;               /* A buffer to temporarily hold a decrypted block. */
+	size_t plainSize;             /* The size of the decrypted blocks */
+
+    bool readable;
+    bool writable;
+	bool open;
+
+    /* Plaintext positions used to decide if we need to add zero length block at end. */
+	bool sizeConfirmed;           /* true if we know the actual plain text file size */
+    off_t fileSize;               /* actual plaintext size if confirmed, biggest seen so far if not confirmed */
+    off_t maxWritePosition;       /* Biggest plaintext position after writing */
+};
+
+
+/**
+ * Open an encrypted file.
+ * @param path - the path or file name.
+ * @param oflag - the open flags, say O_RDONLY or O_CREATE.
+ * @param mode - if creating a file, the permissions.
+ * @return - Error status.
+ */
+static Aead *aeadOpen(Aead *proto, const char *path, int oflags, int mode)
+{
+
+	/* Is the file readable/writable? */
+	bool writable = (oflags & O_ACCMODE) != O_RDONLY;
+	bool readable = (oflags & O_ACCMODE) != O_WRONLY;
+
+	/* Even if we are write only, we need to read the file to verify header (unless O_TRUNC?) */
+	if (!readable)
+		oflags = (oflags & ~O_ACCMODE) | O_RDWR;
+
+	/* Open our successor and clone ourself */
+	IoStack *next = stackOpen(nextStack(proto), path, oflags, mode);
+	Aead *this = aeadNew(proto->cipherName, proto->suggestedSize, proto->key, proto->keySize, next);
+	this->ioStack.openVal = next->openVal;
+	if (next->openVal < 0)
+		return aeadCleanup(this);
+
+	/* Our successor must be byte oriented to support header */
+	Assert(next->blockSize == 1);
+
+	/* Track the file size as we know it so far, so we avoid having to query fileSize to get it */
+	this->maxWritePosition = 0;
+	this->fileSize = 0;
+	this->sizeConfirmed = (oflags & O_TRUNC) != 0;
+
+	/* Keep track of whether we are readable/writable */
+	this->readable = readable;
+	this->writable = writable;
+
+	/* Read the downstream file to get header information and configure encryption */
+	if (!aeadConfigure(this))
+	    return aeadCleanup(this);
+
+	/* Inform our caller of our file's plaintext blocksize */
+	thisStack(this)->blockSize = this->plainSize;
+
+	/* Allocate our own buffers based on the encryption config */
+	this->cryptBuf = malloc(this->cryptSize);
+	if (this->cryptBuf == NULL)
+	{
+		stackCheckError(this, -1, "Unable to allocate encryption buffer of size %zd", this->cryptSize);
+		return aeadCleanup(this);
+	}
+
+	this->plainBuf = malloc(this->plainSize);
+	if (this->plainBuf == NULL)
+	{
+		stackCheckError(this, -1, "Unable to allocate plaintext buffer of size %zd", this->plainSize);
+		return aeadCleanup(this);
+	}
+
+	/* Inform our caller of our file's plaintext blocksize */
+	thisStack(this)->blockSize = this->plainSize;
+	return this;
+}
+
+
+/**
+ * Read a block of encrypted data into our internal buffer, placing plaintext into the caller's buffer.
+ */
+static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
+{
+    file_debug("aeadRead: size=%zd  offset=%lld maxWrite=%lld fileSize=%lld\n",
+          size, offset, this->maxWritePosition, this->fileSize);
+	Assert(offset >= 0);
+
+	/* If we are positioned at EOF, then return EOF */
+	if (this->sizeConfirmed && offset >= this->fileSize)
+	{
+		thisStack(this)->eof = true;
+		return 0;
+	}
+
+	/* All reads must be aligned (unless EOF) */
+	if (offset % this->plainSize != 0)
+		return (stackSetError(this, -1, "Encryption: read from offset (%lld) not aligned (%lld)", offset, this->plainSize), -1);
+
+	assert(offset % thisStack(this)->blockSize == 0);
+
+	/* Translate our offset to our successor's offset */
+	off_t cipherOffset = cryptOffset(this, offset);
+
+    /* Read a block of downstream encrypted text into our buffer. */
+    ssize_t actual = stackReadAll(nextStack(this), this->cryptBuf, this->cryptSize, cipherOffset);
+    if (actual <= 0)
+        return copyNextError(this, actual);
+
+    /* Extract the tag from the end of our buffer. */
+    Byte tag[EVP_MAX_MD_SIZE];
+    size_t cipherTextSize = actual - this->tagSize;
+    memcpy(tag, this->cryptBuf + cipherTextSize, this->tagSize);
+
+    /* Decrypt the ciphertext from our buffer into our caller's buffer */
+	ssize_t blockNr = (offset / this->plainSize); /* TODO: add as parameter to aead_decrypt? */
+    ssize_t plainSize = aead_decrypt(this, buf, size, NULL, 0, this->cryptBuf, cipherTextSize, tag, blockNr);
+    if (plainSize < 0)
+        return plainSize;
+
+	/* Track our position for EOF handling */
+    this->sizeConfirmed |= (plainSize < this->plainSize);
+	this->fileSize = MAX(this->fileSize, offset + plainSize);
+	this->ioStack.eof = (plainSize == 0);
+
+    /* Return the number of plaintext bytes read. */
+    return plainSize;
+}
+
+/**
+ * Encrypt data into our internal buffer and write to the output file.
+ *   @param buf - data to be converted.
+ *   @param size - number of bytes to be converted.
+ *   @param error - error status, both input and output.
+ *   @returns - number of bytes actually used.
+ */
+static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
+{
+    file_debug("aeadWrite: size=%zd  offset=%lld maxWrite=%lld fileSize=%lld\n",
+          size, offset, this->maxWritePosition, (off_t)this->fileSize);
+	Assert(offset >= 0);
+
+	/* All writes must be aligned */
+	if (offset % this->plainSize != 0)
+		return (stackSetError(this, -1, "Encryption: write to offset (%lld) not aligned (%lld)", offset, this->plainSize), -1);
+
+	/* Writing a partial block before end of file would cause corruption in the file */
+	if (size < this->plainSize && offset + size < this->fileSize)
+		return (stackSetError(this, -1, "Encryption: partial block before end of file causes corruption"), -1);
+
+    /* Encrypt one record of data into our buffer */
+    Byte tag[EVP_MAX_MD_SIZE];
+    size_t plainSize = MIN(size, this->plainSize);
+	ssize_t blockNr = offset / this->plainSize;
+    size_t cipherSize = aead_encrypt(this, buf, plainSize, NULL, 0, this->cryptBuf, this->cryptSize - this->tagSize, tag, blockNr);
+
+    /* Append the tag to the encrypted data */
+    memcpy(this->cryptBuf + cipherSize, tag, this->tagSize);
+    cipherSize += this->tagSize;
+
+	/* Translate our offset to our successor's offset */
+	off_t cipherOffset = cryptOffset(this, offset);
+
+    /* Write the encrypted block out */
+    if (stackWriteAll(nextStack(this), this->cryptBuf, cipherSize, cipherOffset) != cipherSize)
+	    return copyNextError(this, -1);
+
+    /* Track our position for EOF handling */
+    this->maxWritePosition = MAX(this->maxWritePosition, offset+plainSize);
+	this->fileSize  = MAX(this->fileSize, this->maxWritePosition);
+
+
+
+    return plainSize;
+}
+
+/**
+ * Close this encryption stack releasing resources.
+ */
+static ssize_t aeadClose(Aead *this)
+{
+	file_debug("aeadClose: openVal=%zd maxWrite=%lld fileSize=%lld\n", this->ioStack.openVal, this->maxWritePosition, this->fileSize);
+
+	/*
+	 * If not already done, add a partial (empty) block to mark the end of encrypted data.
+	 * If writing a block, we need to absolutely know our file size. needsFinalBlock()
+	 * will update file size if necessary.
+	 */
+	if (needsFinalBlock(this))
+	{
+		off_t size = stackSize(this);
+		if (size == -1)
+			return false;
+		aeadWrite(this, NULL, 0, size);  /* sets errno and msg */
+	}
+
+	/* Release resources, including closing the downstream file */
+	aeadCleanup(this);
+	file_debug("aeadClose(done): code=%d msg=%s\n", stackErrorCode(this), stackErrorMsg(this));
+	return stackError(this)? -1: 0;
+}
+
+
+/*
+ * Do we need to write a final empty block?
+ * This is a complicated question because we may have been
+ * writing blocks in random order, and the downstream file
+ * may or may not already have a partial block at the end.
+ * This code tries a series of tests, ranging from cheapest
+ * to most expensive. In the end, it might overwrite an existing
+ * empty record, but it always ensures there is a final, partial
+ * block at the end of the file.
+ */
+static bool needsFinalBlock(Aead *this)
+{
+	/* file is read only. No need.*/
+	if (!this->writable) return false;
+
+	/* We didn't overwrite the end of the file. No need. */
+	if (this->fileSize > this->maxWritePosition) return false;
+
+	/* The biggest I/O we know of was a partial block. No need. */
+	if (this->fileSize % this->plainSize != 0) return false;
+
+	/* If our file size was accurate, then we DO need to write a final block */
+	if (this->sizeConfirmed)  return true;
+
+	/* Downstream file has more blocks than we wrote. No need. */
+	off_t nextSize = stackSize(nextStack(this)); // TODO: error check
+	if (cryptOffset(this, this->fileSize) < nextSize) return false;
+
+	 /* Get accurate file size info and retry */
+	 this->fileSize = aeadSize(this);
+	 this->sizeConfirmed = true;
+
+	 /* The last block definitely was a partial block. No need. */
+	 if (this->fileSize % this->plainSize != 0) return false;
+
+	 /* The downstream file has extra data, presumably an empty block. No need. */
+	 if (cryptOffset(this, this->fileSize) < nextSize) return false;
+
+     /* If here, then we need to write a final empty block */
+	 return true;
+}
+
+/*
+ * Return the size of the plaintext file.
+ * Note this is not a trivial calculation. In some cases
+ * it requires decrypting the final block to get an accurate size.
+ */
+static off_t aeadSize(Aead *this)
+{
+	file_debug("aeadSize  confirmed=%d  size=%lld\n", this->sizeConfirmed, this->fileSize);
+	/* If we already know the file size, then we are done */
+	if (this->sizeConfirmed)
+		return this->fileSize;
+
+	/* Get the index of the last cipher block in the downstream encrypted file */
+	off_t cryptFileSize = stackSize(nextStack(this));
+	if (cryptFileSize < 0)
+		return copyNextError(this, -1);
+
+	/* If the actual file doesn't have a full header, then there is an error. */
+	if (cryptFileSize < this->headerSize)
+		return stackSetError(this, -1, "Encryption header too small %d, should be %d\n", cryptFileSize, this->headerSize);
+
+	/* If the cipher file has only a header, then our size is 0 (with no partial block)*/
+	if (cryptFileSize == this->headerSize)
+	{
+		this->fileSize = 0;
+		this->sizeConfirmed = true;
+		return this->fileSize;
+	}
+
+    /* Get the index of the last block in the encrypted file */
+	off_t lastBlock = (cryptFileSize - this->headerSize) / this->cryptSize;
+	if ((cryptFileSize - this->headerSize) % this->cryptSize == 0)
+		lastBlock--;
+	Assert(lastBlock >= 0);
+
+	/* Read and decrypt the last block. Because of possible padding, we need to decrypt to determine size. */
+	/* TODO: Don't need to read last block if there is no fill */
+	ssize_t lastBlockSize = aeadRead(this, this->plainBuf, this->plainSize, lastBlock * this->plainSize);
+	if (lastBlockSize < 0)
+		return -1;
+
+    /* Cache the file size so we know it in the future */
+    this->fileSize = lastBlock * this->plainSize + lastBlockSize;
+	this->sizeConfirmed = true;
+
+	/* done */
+	file_debug("aeadSize (done) fileSize=%lld  lastSize=%zd\n", this->fileSize, lastBlockSize);
+	return this->fileSize;
+}
+
+static ssize_t aeadTruncate(Aead *this, off_t offset)
+{
+	/* If truncating at a partial block, read in the block being truncated */
+	off_t blockOffset = ROUNDDOWN(offset, this->plainSize);
+	if (blockOffset != offset)
+	{
+		ssize_t blockSize = aeadRead(this, this->plainBuf, this->plainSize, blockOffset);
+		if (blockSize < 0)
+			return blockSize;
+
+		/* Make sure the block is big enough to be truncated */
+		if (blockSize < offset-blockOffset)
+			return stackSetError(this, -1, "AeadTruncate - file is smaller than truncate offset");
+	}
+
+	/* Truncate the downstream file at the beginning of the block */
+	off_t cryptOff = cryptOffset(this, blockOffset);
+	ssize_t retval = stackTruncate(nextStack(this), cryptOff);
+	if (retval < 0)
+		return copyNextError(this, retval);
+
+	/* Set the new file size to the beginning of the block */
+	this->fileSize = blockOffset;
+	this->sizeConfirmed = true;
+
+	/* If we have a partial block, then write it out */
+	if (offset != blockOffset)
+	    if (aeadWrite(this, this->plainBuf, offset-blockOffset, blockOffset) < 0)
+		    return -1;
+
+	return 0;
+}
+
+
+static ssize_t aeadSync(Aead *this)
+{
+	/* Sync the downstream file */
+	int retval = stackSync(nextStack(this));
+	if (retval < 0)
+	    copyNextError(this, retval);
+	return retval;
+}
+
+/**
+ * Abstract interface for the encryption ioStack.
+ */
+IoStackInterface aeadInterface = {
+	.fnOpen = (IoStackOpen) aeadOpen,
+	.fnRead = (IoStackRead) aeadRead,
+	.fnWrite = (IoStackWrite) aeadWrite,
+	.fnClose = (IoStackClose) aeadClose,
+	.fnTruncate = (IoStackTruncate) aeadTruncate,
+	.fnSize = (IoStackSize) aeadSize,
+	.fnSync = (IoStackSync) aeadSync,
+};
+
+/*
+ * Create a new aead encryption/decryption filter
+ */
+void *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keySize, void *next)
+{
+    Aead *this = malloc(sizeof(Aead));
+	*this = (Aead) {
+		.suggestedSize = suggestedSize,
+		.keySize = keySize,
+		.ioStack = (IoStack) {
+			.iface = &aeadInterface,
+			.next = next,
+		}
+	};
+
+    /* Copy in the key and cipher name without overwriting memory. We'll validate later. */
+    memcpy(this->key, key, MIN(keySize, sizeof(this->key)));
+    strlcpy(this->cipherName, cipherName, sizeof(this->cipherName));
+
+    return thisStack(this);
+}
+
+
+/*
+ * Calculate the size of an encrypted block give the size of the plaintext block
+ */
+size_t cryptSize(Aead *this, size_t plainSize)
+{
+	return plainSize + this->tagSize + paddingSize(this, plainSize);
+}
+
+/*
+ * Calculate the file offset of an encrypted block, given the file offset of a plaintext block.
+ * Note this only works for block boundaries.
+ */
+off_t cryptOffset(Aead *this, off_t plainOffset)
+{
+	return plainOffset / this->plainSize * this->cryptSize + this->headerSize;
+}
+
+/*
+ * Configure encryption, whether creating or reading.
+ */
+bool aeadConfigure(Aead *this)
+{
+    /* If able to read header (or error) then done */
+	stackClearError(this);
+    if (aeadHeaderRead(this))
+		return !stackError(this);
+
+    /* If no header and the file isn't writable, then we're done. */
+	if (!this->writable)
+		return stackSetError(this, -1, "Readonly file doesn't have encryption header");
+
+	/* Write out a new header */
+	this->fileSize = 0;
+	this->sizeConfirmed = true;
+	return aeadHeaderWrite(this);
+}
+
+
+/*
+ * Read the header from the encrypted file.
+ * Returns true if header actually read, false if EOF or error occurred.
+ * Need to test for EOF with fileEOF()
+ */
+bool aeadHeaderRead(Aead *this)
+{
+
+    /* Read the header */
+    Byte header[MAX_AEAD_HEADER_SIZE] = {0};
+    ssize_t headerSize = stackReadSized(nextStack(this), header, sizeof(header), 0);
+	if (headerSize <= 0)
+		return copyNextError(this, false);
+
+    /* Remember the full header size as stored in the file. Since it was a "sized" write, add 4 bytes for the size field. */
+    this->headerSize = headerSize + 4;
+
+    /* Extract the various fields from the header, ensuring safe memory references */
+    Byte *bp = header;
+    Byte *end = header + headerSize;
+
+    /* Get the plain text record size for this encrypted file. */
+    this->plainSize = unpack4(&bp, end);
+    if (this->plainSize > MAX_BLOCK_SIZE)
+        return stackSetError(this, -1, "AEAD header size (%zd) exceeds %zd", this->plainSize, MAX_BLOCK_SIZE);
+
+    /* Get the cipher name */
+    size_t nameSize = unpack1(&bp, end);
+    if (nameSize > sizeof(this->cipherName) - 1)  /* allow for null termination */
+        return stackSetError(this, -1, "Cipher name in header is too large");
+    unpackBytes(&bp, end, (Byte *)this->cipherName, nameSize);
+    this->cipherName[nameSize] = '\0';
+
+    /* Get the initialization vector */
+    this->ivSize = unpack1(&bp, end);
+    if (this->ivSize > sizeof(this->iv))
+        return stackSetError(this, -1, "Initialization vector size (%zd) exceeeds %zd", this->ivSize, sizeof(this->iv));
+    unpackBytes(&bp, end, this->iv, this->ivSize);
+
+    /* Get the empty cipher text block */
+    Byte emptyBlock[EVP_MAX_BLOCK_LENGTH];
+    size_t emptySize = unpack1(&bp, end);
+    if (emptySize > sizeof(emptyBlock))
+        return stackSetError(this, -1, "Empty cipher block in header is too large");
+    unpackBytes(&bp, end, emptyBlock, emptySize);
+
+    /* Get the MAC tag */
+    Byte tag[EVP_MAX_MD_SIZE];
+    this->tagSize = unpack1(&bp, end);
+    if (this->tagSize > sizeof(tag))
+        return stackSetError(this, -1, "Authentication tag is too large");
+    unpackBytes(&bp, end, tag, this->tagSize);
+
+    /* Verify we haven't overflowed. Ideally, we should have bp == end */
+    if (bp > end)
+        return stackSetError(this, -1, "Invalid AEAD header in file");
+
+    /* Lookup the cipher and its parameters. */
+    if (!aeadCipherSetup(this, this->cipherName))
+        return false;
+
+    /* Validate the header after removing the empty block and tag. */
+    Byte plainEmpty[0];
+    size_t validateSize = headerSize - this->tagSize - 1 - emptySize - 1;
+    if (aead_decrypt(this, plainEmpty, sizeof(plainEmpty),
+         header, validateSize, emptyBlock, emptySize, tag, HEADER_SEQUENCE_NUMBER) != 0)
+		return false;
+
+    /* Cache the ciphertext size for a full plaintext record */
+    this->cryptSize = cryptSize(this, this->plainSize);
+	return true;
+}
+
+
+bool aeadHeaderWrite(Aead *this)
+{
+    /* Configure the cipher parameters. */
+    if (!aeadCipherSetup(this, this->cipherName))
+		return false;
+
+    /* Generate an initialization vector. */
+    RAND_bytes(this->iv, (int)this->ivSize);
+
+    /* Declare a local buffer to hold the header we're creating */
+    Byte header[MAX_AEAD_HEADER_SIZE];
+    Byte *bp = header;
+    Byte *end = header + sizeof(header);
+
+    /* Plaintext record size for this file. */
+	this->plainSize = this->suggestedSize;
+    pack4(&bp, end, this->plainSize);
+
+    /* Cipher name */
+    pack1(&bp, end, strlen(this->cipherName));
+    packBytes(&bp, end, (Byte *)this->cipherName, strlen(this->cipherName));
+
+    /* Initialization vector */
+    pack1(&bp, end, this->ivSize);
+    packBytes(&bp, end, this->iv, this->ivSize);
+
+    /* Verify we haven't overflowed our buffer. */
+    if (bp > end)
+        return stackSetError(this, -1, "Trying to write a header which is too large");
+
+    /* Encrypt an empty plaintext block and authenticate the header. */
+    Byte emptyCiphertext[EVP_MAX_BLOCK_LENGTH];
+    Byte emptyPlaintext[0];
+    Byte tag[EVP_MAX_MD_SIZE];
+    size_t emptyCipherSize = aead_encrypt(this, emptyPlaintext, 0, header, bp-header,
+			 emptyCiphertext, sizeof(emptyCiphertext), tag, HEADER_SEQUENCE_NUMBER);
+    if (emptyCipherSize != paddingSize(this, 0) || emptyCipherSize > 256)
+        return stackSetError(this, -1, "Size of cipher padding for empty record was miscalculated");
+
+    /* Add the empty block and tag to the header */
+    pack1(&bp, end, emptyCipherSize);
+    packBytes(&bp, end, emptyCiphertext, emptyCipherSize);
+    pack1(&bp, end, this->tagSize);
+    packBytes(&bp, end, tag, this->tagSize);
+
+    /* Verify we haven't overflowed the header */
+    if (bp+this->tagSize >= end)
+        return stackSetError(this, -1, "Encryption file header was too large.");
+
+    /* Write the header to the output file */
+    if (stackWriteSized(nextStack(this), header, bp - header, 0) <= 0)
+		return copyNextError(this, false);
+
+    /* Remember the header size. Since we did a "sized" write, add 4 bytes for the record size. */
+    this->headerSize = bp - header + 4;
+	this->cryptSize = cryptSize(this, this->plainSize);
+	return true;
+}
+
+
+/**
+ * Helper function to get the cipher details.
+ * TODO: move the encryption fields into a substructure of Aead, so this code doesn't need to know about IoStacks.
+ */
+bool aeadCipherSetup(Aead *this, char *cipherName)
+{
+    /* Save the cipher name. The name must be an exact match to a libcrypto name. */
+    /* TODO KLUDGE: The cipher name is already in this->cipherName. Don't copy if already there ... FIX IT!  */
+    if (this->cipherName != cipherName) /* comparing pointers */
+        strlcpy(this->cipherName, cipherName, sizeof(this->cipherName));
+
+    /* Create an OpenSSL cipher context. */
+    this->ctx = EVP_CIPHER_CTX_new();
+	if (this->ctx == NULL)
+		return setOpenSSLError(this, false);
+
+    /* Lookup cipher by name. */
+    this->cipher = EVP_CIPHER_fetch(NULL, this->cipherName, NULL);
+    if (this->cipher == NULL)
+        return stackSetError(this, -1, "Encryption problem - cipher name %w not recognized", this->cipherName);
+
+    /* Verify cipher is an AEAD cipher */
+    /* TODO: should be possible */
+
+    /* Get the properties of the selected cipher */
+    this->ivSize = EVP_CIPHER_iv_length(this->cipher);
+    if (this->keySize != EVP_CIPHER_key_length(this->cipher))
+        return stackSetError(this, -1, "Cipher key is the wrong size");
+    this->cipherBlockSize = EVP_CIPHER_block_size(this->cipher);
+    this->hasPadding = (this->cipherBlockSize != 1);
+    this->tagSize = 16;  /* TODO: EVP_CIPHER_CTX_get_tag_length(this->ctx); But only after initialized. */
+
+	return true;
+}
+
+
+/*
+ * Calculate how much padding is added when encrypting a record.
+ */
+size_t paddingSize(Aead *this, size_t recordSize)
+{
+    return (this->hasPadding)
+       ? this->cipherBlockSize - (recordSize % this->cipherBlockSize)
+       : 0;
+}
+
+
+/*
+ * Encrypt one record of plain text, generating one (slightly larger) record of cipher text.
+ *  @param this - aaed converter
+ *  @param plainText - the text to be encrypted.
+ *  @param plainSize - size of the text to be encrypted
+ *  @param header - text to be authenticated but not encrypted.
+ *  @param headerSize - size of header. If 0, then header can be NULL.
+ *  @param cipherText - the output encrypted text
+ *  @param cryptSize - the size of the buffer on input, actual size on output.
+ *  @param tag - the output MAC tag of size this->tagSize
+ *  @param blockNr - used to generate nonce
+ *  @return - the actual size of the encrypted ciphertext or -1 on error.
+ */
+ssize_t
+aead_encrypt(Aead *this,
+             const Byte *plainText, size_t plainSize,
+             Byte *header, size_t headerSize,
+             Byte *cipherText, size_t cipherSize,
+             Byte *tag, ssize_t blockNr)
+{
+
+    //file_debug("Encrypt: plainText='%.*s' plainSize=%zd  cipher=%s\n", (int)sizeMin(plainSize,64), plainText, plainSize, this->cipherName);
+    file_debug("Encrypt: plainSize=%zd  cipher=%s plainText='%.*s'\n",
+          plainSize, this->cipherName, (int)plainSize, plainText);
+	file_debug("    headerSize=%zd  header=%s\n", headerSize, asHex(header, headerSize));
+    /* Reinitialize the encryption context to start a new record */
+    EVP_CIPHER_CTX_reset(this->ctx);
+
+    /* Generate nonce by XOR'ing the initialization vector with the sequence number */
+    Byte nonce[EVP_MAX_IV_LENGTH];
+    generateNonce(nonce, this->iv, this->ivSize, blockNr);
+    file_debug("Encrypt: iv=%s  blockNr=%zd  nonce=%s  key=%s\n",
+          asHex(this->iv, this->ivSize), blockNr, asHex(nonce, this->ivSize), asHex(this->key, this->keySize));
+
+    /* Configure the cipher with the key and nonce */
+    if (!EVP_CipherInit_ex2(this->ctx, this->cipher, this->key, nonce, 1, NULL))
+        return setOpenSSLError(this, -1);
+
+    /* Include the header, if any, in the digest */
+    if (headerSize > 0)
+    {
+        int zero = 0;
+        if (!EVP_CipherUpdate(this->ctx, NULL, &zero, header, (int)headerSize))
+            return setOpenSSLError(this, false);
+    }
+
+    /* Encrypt the plaintext if any. */
+    int cipherUpdateSize = 0;
+    if (plainSize > 0)
+    {
+        cipherUpdateSize = (int)cipherSize;
+        if (!EVP_CipherUpdate(this->ctx, (Byte *)cipherText, &cipherUpdateSize, plainText, (int)plainSize))
+            return setOpenSSLError(this, -1);
+    }
+
+    /* Finalise the plaintext encryption. This can generate data, usually padding, even if there is no plain text. */
+    int cipherFinalSize = (int)cipherSize - cipherUpdateSize;
+    if (!EVP_CipherFinal_ex(this->ctx, (Byte *)cipherText + cipherUpdateSize, &cipherFinalSize))
+        return setOpenSSLError(this, -1);
+
+    /* Get the authentication tag  */
+    if (!EVP_CIPHER_CTX_ctrl(this->ctx, EVP_CTRL_AEAD_GET_TAG, (int)this->tagSize, tag))
+        return setOpenSSLError(this, -1);
+
+    file_debug("Encrypt: tag=%s cryptSize=%d cipherText=%.128s \n", asHex(tag, this->tagSize), cipherUpdateSize+cipherFinalSize, asHex(cipherText, cipherUpdateSize + cipherFinalSize));
+    /* Output size combines both the encyption (update) and the finalization. */
+    return cipherUpdateSize + cipherFinalSize;
+}
+
+/*
+ * Decrypt one record of ciphertext, generating one (slightly smaller?) record of plain text.
+ * This routine implements a generic AEAD interface.
+ *  @param this - aaed converter
+ *  @param plainText - the text to be encrypted.
+ *  @param plainSize - size of the text to be encrypted
+ *  @param header - text to be authenticated but not encrypted.
+ *  @param headerSize - size of header. If 0, then header can be NULL.
+ *  @param cipherText - the output encrypted text
+ *  @param cryptSize - the size of the buffer on input, actual size on output.
+ *  @param tag - the output MAC tag of size this->tagSize
+ *  @param error - Keep track of errors.
+ */
+ssize_t
+aead_decrypt(Aead *this,
+             Byte *plainText, size_t plainSize,
+             Byte *header, size_t headerSize,
+             Byte *cipherText, size_t cipherSize,
+             Byte *tag, ssize_t blockNr)
+{
+    file_debug("Decrypt:  cryptSize=%zd  cipher=%s  cipherText=%.128s \n", cipherSize, this->cipherName,  asHex(cipherText, cipherSize));
+	file_debug("    headerSize=%zd  header=%s\n", headerSize, asHex(header, headerSize));
+    /* Reinitialize the encryption context to start a new record */
+    EVP_CIPHER_CTX_reset(this->ctx);
+
+    /* Generate nonce by XOR'ing the initialization vector with the sequence number */
+    Byte nonce[EVP_MAX_IV_LENGTH];
+    generateNonce(nonce, this->iv, this->ivSize, blockNr);
+    file_debug("Decrypt: iv=%s  blockNr=%zd  nonce=%s  key=%s  tag=%s\n",
+          asHex(this->iv, this->ivSize), blockNr, asHex(nonce, this->ivSize), asHex(this->key, this->keySize), asHex(tag, this->tagSize));
+
+    /* Configure the cipher with key and initialization vector */
+    if (!EVP_CipherInit_ex2(this->ctx, this->cipher, this->key, nonce, 0, NULL))
+        return setOpenSSLError(this, -1);
+
+    /* Set the MAC tag we need to match */
+    if (!EVP_CIPHER_CTX_ctrl(this->ctx, EVP_CTRL_AEAD_SET_TAG, (int)this->tagSize, tag))
+        return setOpenSSLError(this, -1);
+
+    /* Include the header, if any, in the digest */
+    if (headerSize > 0)
+    {
+        int zero = 0;
+        if (!EVP_CipherUpdate(this->ctx, NULL, &zero, header, (int)headerSize))
+            return setOpenSSLError(this, -1);
+    }
+
+    /* Decrypt the body if any. We have two pieces: update and final. */
+    int plainUpdateSize = 0;
+    if (cipherSize > 0)
+    {
+        plainUpdateSize = (int)plainSize;
+        if (!EVP_CipherUpdate(this->ctx, plainText, &plainUpdateSize, cipherText, (int)cipherSize))
+            return setOpenSSLError(this, -1);
+    }
+
+    /* Finalise the decryption. This can, but probably won't, generate plaintext. */
+    int plainFinalSize = (int)plainSize - plainUpdateSize; /* CipherFinal expects "int" */
+    if (!EVP_CipherFinal_ex(this->ctx, plainText + plainUpdateSize, &plainFinalSize) && ERR_get_error() != 0)
+        return setOpenSSLError(this, -1);
+
+    /* Output plaintext size combines the update part of the encryption and the finalization. */
+    ssize_t plainActual = plainUpdateSize + plainFinalSize;
+    file_debug("Decrypt:  plainActual=%zd plainText='%.*s'\n", plainActual, (int)plainActual, plainText);
+    return plainActual;
+}
+
+
+/*
+ * Create a "nonce" (number used once) by XOR'ing a sequence number
+ * with an initialization vector (IV).
+ *
+ * As described in RFC 8446  for TLS 1.3,
+ *  - extend the sequence number with zeros to match the IV size.
+ *  - process the sequence number in network (big endian) order.
+ *  - XOR the IV and sequence bytes to create the nonce.
+ */
+void generateNonce(Byte *nonce, Byte *iv, size_t ivSize, size_t seqNr)
+{
+    /* Starting at the right, create the nonce moving left one byte at a time */
+    Byte *nonceP = nonce + ivSize;
+    Byte *ivP = iv + ivSize;
+    while (nonceP > nonce)
+    {
+        /* Move the pointers leftward in unison */
+        nonceP--; ivP--;
+
+        /* Create the nonce byte by XOR'ing sequence number with IV. */
+        *nonceP = (Byte)seqNr ^ *ivP;
+
+        /* get next higher byte of the sequence number, rolling off to zero. */
+        seqNr = seqNr >> 8;
+    }
+}
+
+/*
+ * Convenience function to build an SSL error and return zero.
+ */
+static ssize_t setOpenSSLError(Aead *this, ssize_t ret)
+{
+	int code = ERR_get_error();
+	char *msg = ERR_error_string(code, NULL);
+	return stackSetError(this, ret, "OpenSSL error: (%d) %s", code, msg);
+}
+
+
+static Aead *aeadCleanup(Aead *this)
+{
+	IoStack *next = this->ioStack.next;
+
+	/* Close the downstream layer if opened */
+	if (next != NULL && next->openVal >= 0)
+		stackClose(next);
+	this->ioStack.openVal = -1;
+
+	/* If we have no errors, then report error info from successor */
+	if (!stackError(this) && next != NULL && stackError(next))
+		copyNextError(this, -1);
+
+	/* Free the next layer if allocated */
+	if (next != NULL)
+		free(next);
+	this->ioStack.next = NULL;
+
+	/* Free the buffers if allocated */
+	if (this->cryptBuf != NULL)
+		free(this->cryptBuf);
+	this->cryptBuf = NULL;
+	if (this->plainBuf != NULL)
+		free(this->plainBuf);
+	this->plainBuf = NULL;
+
+	/* Free the OpenSSL structures */
+	if (this->ctx != NULL)
+		EVP_CIPHER_CTX_free(this->ctx);
+	this->ctx = NULL;
+	if (this->cipher != NULL)
+		EVP_CIPHER_free(this->cipher);
+	this->cipher = NULL;
+
+	return this;
+}

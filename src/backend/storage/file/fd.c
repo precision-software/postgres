@@ -96,6 +96,7 @@
 #include "portability/mem.h"
 #include "postmaster/startup.h"
 #include "storage/fd.h"
+#include "storage/iostack_internal.h"
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
@@ -207,10 +208,8 @@ typedef struct vfd
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
 
-	int 	    errorCode;        /* Code of the most recent error */
-	char        errorMsg[121];	 /* The most recent error message */
-	bool		eof;	         /* Result of last read */
 	off_t 		offset; 		 /* Current position in file */
+	IoStack 	*ioStack;		 /* Points to I/O stack for this file */
 } Vfd;
 
 /*
@@ -362,6 +361,11 @@ static int	fsync_parent_path(const char *fname, int elevel);
 /* ResourceOwner callbacks to hold virtual file descriptors */
 static void ResOwnerReleaseFile(Datum res);
 static char *ResOwnerPrintFile(Datum res);
+
+/* Fetch data based on the file index */
+static inline IoStack *getStack(File file);
+static inline IoStack *getErrStack(File file);
+static inline Vfd *getVfd(File file);
 
 static const ResourceOwnerDesc file_resowner_desc =
 {
@@ -2142,15 +2146,14 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 }
 
 static ssize_t
-FileRead_Internal(File file, void *buffer, size_t amount, off_t offset,
-		 uint32 wait_event_info)
+FileRead_Internal(File file, void *buffer, size_t amount, off_t offset)
 {
 	int			returnCode;
 	Vfd		   *vfdP;
 
 	Assert(FileIsValid(file));
 
-	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %zu %p",
+	DO_DB(elog(LOG, "FileRead_Internal: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
@@ -2162,10 +2165,7 @@ FileRead_Internal(File file, void *buffer, size_t amount, off_t offset,
 	vfdP = &VfdCache[file];
 
 retry:
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_pread(vfdP->fd, buffer, amount, offset);
-	pgstat_report_wait_end();
-
 	if (returnCode < 0)
 	{
 		/*
@@ -2198,15 +2198,14 @@ retry:
 }
 
 static ssize_t
-FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset,
-		  uint32 wait_event_info)
+FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset)
 {
 	int			returnCode;
 	Vfd		   *vfdP;
 
 	Assert(FileIsValid(file));
 
-	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %zu %p",
+	DO_DB(elog(LOG, "FileWrite_Internal: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
@@ -2244,9 +2243,7 @@ FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset,
 
 retry:
 	errno = 0;
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_pwrite(VfdCache[file].fd, buffer, amount, offset);
-	pgstat_report_wait_end();
 
 	/* if write didn't set errno, assume problem is no disk space */
 	if (returnCode != amount && errno == 0)
@@ -2271,7 +2268,7 @@ retry:
 	else
 	{
 		/*
-		 * See comments in FileRead()
+		 * See comments in FileRead_Internal()
 		 */
 #ifdef WIN32
 		DWORD		error = GetLastError();
@@ -2296,14 +2293,14 @@ retry:
 }
 
 int
-FileSync(File file, uint32 wait_event_info)
+FileSync_internal(File file, uint32 wait_event_info)
 {
 	int			returnCode;
 	file_debug("file=%d", file);
 
 	Assert(FileIsValid(file));
 
-	DO_DB(elog(LOG, "FileSync: %d (%s)",
+	DO_DB(elog(LOG, "FileSync_Internal: %d (%s)",
 			   file, VfdCache[file].fileName));
 
 	returnCode = FileAccess(file);
@@ -2410,7 +2407,7 @@ retry:
 }
 
 off_t
-FileSize(File file)
+FileSize_internal(File file)
 {
 	int64 size;
 	Assert(FileIsValid(file));
@@ -2430,24 +2427,21 @@ FileSize(File file)
 }
 
 int
-FileTruncate(File file, off_t offset, uint32 wait_event_info)
+FileTruncate_internal(File file, off_t offset)
 {
 	int			returnCode;
 	file_debug("file=0x%x  offset=%lld", file, offset);
 
 	Assert(FileIsValid(file));
 
-	DO_DB(elog(LOG, "FileTruncate %d (%s)",
+	DO_DB(elog(LOG, "FileTruncate_Internal %d (%s)",
 			   file, VfdCache[file].fileName));
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
 
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_ftruncate(VfdCache[file].fd, offset);
-	pgstat_report_wait_end();
-
 	if (returnCode == 0 && VfdCache[file].fileSize > offset)
 	{
 		/* adjust our state for truncation of a temp file */
@@ -2484,15 +2478,14 @@ PathNameFileSync(const char *pathName, uint32 wait_event_info)
 }
 
 /*
- * Return the pathname associated with an open file.
- *
- * The returned string points to an internal buffer, which is valid until
- * the file is closed.
+ * Return the pathname associated with an open file,
+ *  or a dummy name if the file is not open.
  */
 char *
 FilePathName(File file)
 {
-	Assert(FileIsValid(file));
+	if (!FileIsValid(file))
+		return "BADFILE(closed or -1)";
 
 	return VfdCache[file].fileName;
 }
@@ -4096,6 +4089,7 @@ ResOwnerPrintFile(Datum res)
 * which have been renamed by appending "_internal".
 */
 
+
 /* Point to the Vfd struct for the given file descriptor */
 static inline Vfd* getVfd(File file)
 {
@@ -4103,140 +4097,33 @@ static inline Vfd* getVfd(File file)
 	return &VfdCache[file];
 }
 
-/* Point to the Vfd struct, or a dummy Vfd if the file descriptor is -1 */
-static inline Vfd* getVfdErr(File file)
+static inline IoStack *getStack(File file)
 {
-	/* Allocate a static Vfd to handle the file = -1 case */
-	static Vfd dummyVfd[1] = {{.fileName = "dummy(-1)"}};
-
-	if (file == -1)
-		return dummyVfd;
-	else
-		return getVfd(file);
+	return getVfd(file)->ioStack;
 }
 
-static const char *getName(File file)
+static inline IoStack *getErrStack(File file)
 {
-	return getVfdErr(file)->fileName;
+	/* If file is -1 or closed, return a dummy stack */
+	static IoStack dummyStack[1] = {{0}};
+	if (!FileIsValid(file))
+		return dummyStack;
+
+	/* Return the proper stack if all is OK */
+	return getStack(file);
 }
+
 
 /*
- * Open a file
- * If an error occurs, returns -1 and set up error information
- * so FileError(-1) will return true. Note errno is set for compatibility.
- *
- * We must be sure to release *all* resources if we fail to open the file.
- * It should be the same as though never opened.
+ * Convenience wrapper to set EBADF if the file index is bad
  */
-File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
+bool
+badFile(File file)
 {
-	File file = -1;
-	bool append;
-	off_t position = 0;
-
-	file_debug("fileName=%s/%s fileFlags=0x%x fileMode=0x%x", getwd(NULL), fileName, fileFlags, fileMode);
-
-	/* VFDs don't implement O_APPEND. We will position to FileSize instead. */
-	append = (fileFlags & O_APPEND) != 0;
-	fileFlags &= ~O_APPEND;
-
-	/* Clear any previous error information */
-	FileClearError(-1);
-
-	/* Open the VFD */
-	file = PathNameOpenFilePerm_Internal(fileName, fileFlags, fileMode);
-	if (file == -1)
-		return setFileError(-1, errno, "Unable to open file: %s", fileName);
-
-	/* Position at end of file if appending. This only impacts WriteSeq and ReadSeq. */
-	if (append) {
-
-		/* Get the size of the file */
-		position = FileSize(file);
-		if (position == -1) {
-			FileClose(file);
-			return setFileError(-1, errno, "Unable to O_APPEND to file: %s", fileName);
-		}
-	}
-
-	/* Success!. Save the desired position */
-	getVfd(file)->offset = position;
-	FileClearError(file);
-
-	return file;
+	if (FileIsValid(file))
+		return false;
+	setFileError(-1, EBADF, "EBADF");
 }
-
-/*
- * Close a file. Like FileOpen(), the error information is saved in the dummy "-1" file,
- * but it can also be accessed using the closed virtual file descriptor.
- *
- * Close has special error handling. If the vfd already has an error, we don't
- * overwrite it.  This is because the error may have been set by a previous
- * operation on the file, and we don't want to lose that information.
- * However, the return value will always be 0 if we closed the file successfully.
- */
-int FileClose(File file)
-{
-	file_debug("name=%s, file=%d", getName(file), file);
-
-	/* If invalid vfd or if already closed, then EBADF */
-	if (file < 0 || file >= SizeVfdCache || getVfd(file)->fd == -1)
-		return setFileError(-1, EBADF, "FileClose: invalid file descriptor %d", file);
-
-	/* Save any existing error information */
-	copyFileError(-1, file);
-
-	/* Close the file */
-	if (FileClose_Internal(file) == -1)
-	    return updateFileError(-1, errno, "Unable to close file: %s", getName(file));
-
-	file_debug("(done): file=%d", file);
-
-	return 0;
-}
-
-
-ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
-{
-	ssize_t actual;
-
-	file_debug("name=%s file=%d  amount=%zd offset=%lld", getName(file), file, amount, offset);
-	Assert(offset >= 0);
-	Assert((ssize_t)amount >= 0);
-
-	/* Read the data as requested */
-	actual = FileRead_Internal(file, buffer, amount, offset, wait_event_info);
-	getVfd(file)->eof = (actual == 0 && amount > 0);
-
-	/* If successful, update the file offset */
-	if (actual >= 0)
-		getVfd(file)->offset = offset + actual;
-
-	file_debug("(done): file=%d  name=%s  actual=%zd", file, getName(file), actual);
-	return actual;
-}
-
-
-ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
-{
-	ssize_t actual;
-
-	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld", getName(file), file, amount, offset);
-	Assert(offset >= 0 && (ssize_t)amount > 0);
-
-	/* Write the data as requested */
-	actual = FileWrite_Internal(file, buffer, amount, offset, wait_event_info);
-
-	/* If successful, update the file offset */
-	if (actual >= 0)
-		getVfd(file)->offset = offset + actual;
-
-	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd", file, getName(file), actual);
-
-	return actual;
-}
-
-
 
 
 /*========================================================================================
@@ -4327,6 +4214,8 @@ off_t
 FileSeek(File file, off_t offset)
 {
 	file_debug("file=%d  offset=%lld", file, offset);
+	if (badFile(file))
+		return -1;
 	getVfd(file)->offset = offset;
 	return offset;
 }
@@ -4337,6 +4226,8 @@ FileSeek(File file, off_t offset)
 off_t
 FileTell(File file)
 {
+	if (badFile(file))
+		return -1;
 	return getVfd(file)->offset;
 }
 
@@ -4355,24 +4246,19 @@ bool FileError(File file)
 /* True if the last read generated an EOF */
 int FileEof(File file)
 {
-	return getVfd(file)->eof;
+	return getErrStack(file)->eof;
 }
 
 /* Clears an error, and is true if an error had been encountered */
 bool FileClearError(File file)
 {
-	Vfd *vfd = getVfdErr(file);
-	bool hasError = vfd->errorCode != 0;
-	vfd->errorCode = 0;
-	vfd->errorMsg[0] = '\0';
-	vfd->eof = false;
-	return hasError;
+	return stackClearError(getErrStack(file));
 }
 
 /* Get a pointer to the error message */
 const char *FileErrorMsg(File file)
 {
-	return getVfdErr(file)->errorMsg;
+	return getErrStack(file)->errMsg;
 }
 
 /*
@@ -4381,9 +4267,7 @@ const char *FileErrorMsg(File file)
  */
 int FileErrorCode(File file)
 {
-	int errorCode = getVfdErr(file)->errorCode;
-	errno = errorCode;
-	return errorCode;
+	return stackErrorCode(getErrStack(file));
 }
 
 
@@ -4394,19 +4278,9 @@ int FileErrorCode(File file)
 int setFileError(File file, int errorCode, const char *fmt, ...)
 {
 	va_list args;
-	Vfd *vfd = getVfdErr(file);
-
-	/* Save the errno */
-	vfd->errorCode = errorCode;
-
-	/* Format the error message */
 	va_start(args, fmt);
-	vsnprintf(vfd->errorMsg, sizeof(vfd->errorMsg), fmt, args);
+	stackVSetError(getErrStack(file), errorCode, fmt, args);
 	va_end(args);
-	file_debug("file=%d msg=%s", file, vfd->errorMsg);
-
-	/* Restore the error code for compatibility */
-	errno = vfd->errorCode;
 
 	/* Return -1 to indicate an error */
 	return -1;
@@ -4421,25 +4295,15 @@ int setFileError(File file, int errorCode, const char *fmt, ...)
 int updateFileError(File file, int errorCode, const char *fmt, ...)
 {
     va_list args;
-	Vfd *vfd = getVfdErr(file);
 
-	/* if we already have an error, don't overwrite it */
-	if (vfd->errorCode != 0)
-	{
-		errno = vfd->errorCode;
+	/* If there is already an error, don't overwrite it */
+	if (FileError(file))
 		return -1;
-	}
-
-	/* Save the errno */
-	vfd->errorCode = errorCode;
 
 	/* Format the error message */
 	va_start(args, fmt);
-	vsnprintf(vfd->errorMsg, sizeof(vfd->errorMsg), fmt, args);
+	stackVSetError(getErrStack(file), errorCode, fmt, args);
 	va_end(args);
-
-	/* Restore the error code for compatibility */
-	errno = vfd->errorCode;
 
 	/* Return -1 to indicate an error */
 	return -1;
@@ -4447,19 +4311,175 @@ int updateFileError(File file, int errorCode, const char *fmt, ...)
 
 
 /*
- * Copy error info from one vfd to another.
- * More for implementing encryption and other
- * layered file I/O.
+ * Wrapper for backwards compatibility
  */
-int copyFileError(File dst, File src)
+File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
-	Vfd *vfdDst = getVfdErr(dst);
-	Vfd *vfdSrc = getVfdErr(src);
+	return FileOpenPerm(fileName, fileFlags, fileMode);
+}
 
-	/* Copy the error code and message */
-	vfdDst->errorCode = vfdSrc->errorCode;
-	strncpy(vfdDst->errorMsg, vfdSrc->errorMsg, sizeof(vfdDst->errorMsg));
+/*
+ * Preferred procedure for opening a file
+ */
+File FileOpen(const char *fileName, int fileFlags)
+{
+	return FileOpenPerm(fileName, fileFlags, pg_file_create_mode);
+}
 
-	/* Return -1 to indicate an error */
-	return -1;
+File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
+{
+	File file;
+	IoStack *proto;
+	IoStack *ioStack;
+	bool append;
+	Vfd *vfdP;
+
+	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x\n", fileName, fileFlags, fileMode);
+
+	/* Allocate an I/O stack for this file. */
+	proto = selectIoStack(fileName, fileFlags, fileMode);
+
+	/* I/O stacks don't implement O_APPEND, so position to FileSize instead */
+	append = (fileFlags & O_APPEND) != 0;
+	fileFlags &= ~O_APPEND;
+
+	/* Open the  prototype I/O stack */
+	ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
+	file = (File)ioStack->openVal;
+	if (file < 0)
+	{
+		free(ioStack);
+		return -1;
+	}
+
+	/* Save the I/O stack in the vfd structure */
+	vfdP = getVfd(file);
+	vfdP->ioStack = ioStack;
+
+	/* Position at end of file if appending. This only impacts WriteSeq and ReadSeq. */
+	vfdP->offset = append ? FileSize(file): 0;
+	if (vfdP->offset == -1) {
+		FileClose(file);
+		return -1;
+	}
+
+	return file;
+}
+
+/*
+ * Close a file.
+ */
+int FileClose(File file)
+{
+	int retval;
+	file_debug("FileClose: name=%s, file=%d  iostack=%p\n", FilePathNAME(file), file, getStack(file));
+
+	/* Make sure we are dealing with an open file */
+	if (badFile(file))
+	    return -1;
+
+	/* Close the file.  The low level routine will invalidate the "file" index */
+	retval = stackClose(getStack(file));
+
+	/* No matter what, release the memory on Close */
+	free(getVfd(file)->ioStack);
+	getVfd(file)->ioStack = NULL;
+	file_debug("FileClose(done): file=%d retval=%d\n", file, retval);
+
+	/* Restore errno in case it was reset. */
+	FileErrorCode(-1);
+	return retval;
+}
+
+
+ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
+{
+	file_debug("FileRead: name=%s file=%d  amount=%zd offset=%lld\n", FilePathNAME(file), file, amount, offset);
+	Assert(offset >= 0);
+	Assert((ssize_t)amount > 0);
+
+	if (badFile(file))
+		return -1;
+
+	if (offset < 0 || amount < 0)
+		return setFileError(file, EINVAL, "");
+
+	/* Read the data as requested */
+	pgstat_report_wait_start(wait_event_info);
+	ssize_t actual = stackReadAll(getStack(file), buffer, amount, offset);
+	pgstat_report_wait_end();
+
+	/* If successful, update the file offset */
+	if (actual >= 0)
+		getVfd(file)->offset = offset + actual;
+
+	file_debug("FileRead(done): file=%d  name=%s  actual=%zd\n", file, FilePathNAME(file), actual);
+	return actual;
+}
+
+
+ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
+{
+	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld\n", FilePathNAME(file), file, amount, offset);
+
+	if (badFile(file))
+		return -1;
+
+	if (offset < 0 || amount < 0)
+        return setFileError(file, EINVAL, "");
+
+	/* Write the data as requested */
+	pgstat_report_wait_start(wait_event_info);
+	ssize_t actual = stackWriteAll(getStack(file), buffer, amount, offset);
+	pgstat_report_wait_end();
+
+	/* If successful, update the file offset */
+	if (actual >= 0)
+		getVfd(file)->offset = offset + actual;
+
+	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd\n", file, FilePathNAME(file), actual);
+	return actual;
+}
+
+int FileSync(File file, uint32 wait_event_info)
+{
+	int retval;
+
+	if (badFile(file))
+		return -1;
+
+	pgstat_report_wait_start(wait_event_info);
+	retval = stackSync(getStack(file));
+	pgstat_report_wait_end();
+
+	return retval;
+}
+
+
+off_t FileSize(File file)
+{
+	off_t size;
+    if (badFile(file))
+        return  -1;
+
+	size = stackSize(getStack(file));
+	file_debug("FileSize: name=%s file=%d  size=%lld\n", FilePathNAME(file), file, size);
+	return size;
+}
+
+ssize_t FileBlockSize(File file)
+{
+	if (badFile(file))
+		return -1;
+	return getStack(file)->blockSize;
+}
+
+int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
+{
+	if (badFile(file))
+		return -1;
+	pgstat_report_wait_start(wait_event_info);
+	int retval = (int)stackTruncate(getStack(file), offset);
+	pgstat_report_wait_end();
+	return retval;
 }
