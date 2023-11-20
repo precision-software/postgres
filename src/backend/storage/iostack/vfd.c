@@ -29,20 +29,6 @@
 #include "storage/iostack_internal.h"
 
 /*
- * Hooks into internal fd.c routines.
- * We are the only users of these hooks, so externs are here rather than in fd.h
- * where anybody could access them.
- */
-extern File PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode);
-extern int FileClose_Internal(File file);
-extern ssize_t FileRead_Internal(File file, void *buffer, size_t amount, off_t offset);
-extern ssize_t FileWrite_Internal(File file, const void *buffer, size_t amount);
-extern int FileSync_Internal(File file);
-extern off_t FileSize_Internal(File file);
-extern int	FileTruncate_Internal(File file, off_t offset);
-
-
-/*
  * Bottom of an I/O stack using PostgreSql's Virtual File Descriptors.
  */
 typedef struct VfdStack
@@ -55,7 +41,7 @@ typedef struct VfdStack
 /*
  * Open a file using a virtual file descriptor.
  */
-static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, int mode)
+static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, mode_t mode)
 {
 	/* Clone the bottom prototype. */
 	VfdBottom *this = vfdStackNew(); /* No parameters to copy */
@@ -67,66 +53,74 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, int mo
 	this->file = PathNameOpenFilePerm_Internal(path, oflags, mode);
 	stackCheckError(this, this->file, "Unable to open vfd file %s", path);
 
-	/* We are byte oriented and can support all block sizes */
+	/* We are byte oriented and can support all block sizes TODO allow blockSize to support O_DIRECT */
 	thisStack(this)->blockSize = 1;
 	thisStack(this)->openVal = this->file;
 
 	/* Always return a new I/O stack structure. It contains error info if problems occurred. */
-	file_debug("(done): file=%d  name=%s oflags=0x%x  mode=0x%x\n", this->file, path, oflags, mode);
+	file_debug("(done): file=%d  name=%s oflags=0x%x  mode=0x%x", this->file, path, oflags, mode);
 	return this;
 }
 
 /*
  * Write a random block of data to a virtual file descriptor.
  */
-static ssize_t vfdWrite(VfdBottom *this, const Byte *buf, size_t bufSize, off_t offset)
+static ssize_t
+vfdWrite(VfdBottom *this, const Byte *buf, ssize_t bufSize, off_t offset)
 {
-	ssize_t actual = FileWrite_Internal(this->file, buf, bufSize);
-	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd\n", this->file, FilePathName(this->file), bufSize, offset, actual);
+	ssize_t actual = FileWrite_Internal(this->file, buf, bufSize, offset);
+	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd", this->file, FilePathName(this->file), bufSize, offset, actual);
 	return stackCheckError(this, actual, "Unable to write to file");
 }
 
 /*
  * Read a random block of data from a virtual file descriptor.
  */
-static ssize_t vfdRead(VfdBottom *this, Byte *buf, size_t bufSize, off_t offset, uint32 wait_event_info)
+static ssize_t
+vfdRead(VfdBottom *this, Byte *buf, ssize_t bufSize, off_t offset)
 {
+	ssize_t actual;
 	Assert(bufSize > 0 && offset >= 0);
 
-	ssize_t actual = FileRead_Internal(this->file, buf, bufSize, offset);
-	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd\n", this->file, FilePathName(this->file), bufSize, offset, actual);
+	actual = FileRead_Internal(this->file, buf, bufSize, offset);
+	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd", this->file, FilePathName(this->file), bufSize, offset, actual);
 	return stackCheckError(this, actual, "Unable to read from file %s", FilePathName(this->file));
 }
 
 /*
  * Close the virtual file descriptor.
  */
-static ssize_t vfdClose(VfdBottom *this)
+static ssize_t
+vfdClose(VfdBottom *this)
 {
-	file_debug("file=%d name=%s\n", this->file, FilePathName(this->file));
+	ssize_t retval;
+	file_debug("file=%d name=%s", this->file, FilePathName(this->file));
 
 	/* Check if the file is already closed */
 	if (badFile(this->file))
 	    return -1;
 
 	/* Close the file for real. */
-	int retval = FileClose_Internal(this->file);
+	retval = FileClose_Internal(this->file);
 
 	/* Note: We allocated ioStack in FileOpen, so we will free it in FileClose */
-	file_debug("(done): file=%d  retval=%d\n", this->file, retval);
+	file_debug("(done): file=%d  retval=%zd", this->file, retval);
 
 	this->file = -1; /* Just to be sure */
 	return stackCheckError(this, retval, "Unable to close file");
 }
 
 
-static ssize_t vfdSync(VfdBottom *this)
+static ssize_t
+vfdSync(VfdBottom *this)
 {
 	int retval = FileSync_Internal(this->file);
 	return stackCheckError(this, retval, "Unable to sync file");
 }
 
-static off_t vfdSize(VfdBottom *this)
+
+static off_t
+vfdSize(VfdBottom *this)
 {
 	off_t offset = FileSize_Internal(this->file);
 	return stackCheckError(this, offset, "Unable to get file size");
@@ -135,8 +129,13 @@ static off_t vfdSize(VfdBottom *this)
 
 static bool vfdTruncate(VfdBottom *this, off_t offset)
 {
-	int retval = FileTruncate_Internal(this->file, offset);
-	return stackCheckError(this, retval, "Unable to truncate file") >= 0;
+
+	bool success;
+	success = FileTruncate_Internal(this->file, offset) >= 0;
+	if (!success)
+		stackSetError(this, errno, "Unable to truncate file %s(%d). errno=%d", /* TODO: Include error message */
+					  FilePathName(this->file), this->file, errno);
+	return success;
 }
 
 

@@ -65,13 +65,13 @@ struct IoStack
 /*
  * A set of functions each IoStack must provide.
  */
-typedef IoStack *(*IoStackOpen)(void *this, const char *path, int mode, int perm);
-typedef ssize_t (*IoStackRead)(void *this, Byte *buf, size_t size, off_t offset);
-typedef ssize_t (*IoStackWrite)(void *this, const Byte *buf, size_t size, off_t offset);
+typedef IoStack *(*IoStackOpen)(void *this, const char *path, int mode, mode_t perm);
+typedef ssize_t (*IoStackRead)(void *this, Byte *buf, ssize_t size, off_t offset);
+typedef ssize_t (*IoStackWrite)(void *this, const Byte *buf, ssize_t size, off_t offset);
 typedef ssize_t (*IoStackSync)(void *this);
 typedef ssize_t (*IoStackClose)(void *this);
 typedef off_t (*IoStackSize)(void *this);
-typedef ssize_t (*IoStackTruncate) (void *this, off_t offset);
+typedef bool (*IoStackTruncate) (void *this, off_t offset);
 
 struct IoStackInterface {
 	IoStackOpen fnOpen;
@@ -139,12 +139,12 @@ inline static
 bool stackClearError(void *thisVoid)
 {
 	IoStack *this = thisVoid;
-	bool retVal = stackError(this);
+	bool hadError = stackError(this);
 	errno = this->errNo;
 	this->errNo = 0;
 	this->errMsg[0] = 0;
 	this->eof = false;
-	return retVal;
+	return hadError;
 }
 
 /*
@@ -157,6 +157,18 @@ const char * stackErrorMsg(void *this)
 	return ((IoStack *)this)->errMsg;
 }
 
+/*
+ * Get the error code, setting errno as a side effect.
+ */
+inline static int
+stackErrorNo(void *thisVoid)
+{
+	IoStack *this = thisVoid;
+	errno = this->errNo;
+	return this->errNo;
+}
+
+
 /* Additional open flags to support encryption/compresion */
 #define PG_RAW            (0 << 28)
 #define PG_ENCRYPT        (1 << 28)
@@ -165,8 +177,25 @@ const char * stackErrorMsg(void *this)
 #define PG_TESTSTACK      (4 << 28)
 #define PG_PLAIN          (5 << 20)
 
-
 #define PG_STACK_MASK     (7 << 28)
+
+/* Declare a "debug" macro */
+//#define FILE_DEBUG
+#ifdef FILE_DEBUG
+#define file_debug(...) \
+    do {  \
+        int save_errno = errno; \
+        setvbuf(stderr, NULL, _IOLBF, 256); \
+		fprintf(stderr, "%s(%d): ", __func__, getpid());     \
+		fprintf(stderr, __VA_ARGS__); \
+		fprintf(stderr, "\n");\
+        /* elog(DEBUG2, __VA_ARGS__);  */ \
+        errno = save_errno;  \
+    } while (0)
+
+#else
+#define file_debug(...) ((void)0)
+#endif
 
 
 #endif /*FILTER_IoStack_H */

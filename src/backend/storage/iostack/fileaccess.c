@@ -49,7 +49,7 @@ File FileOpen(const char *fileName, int fileFlags)
 
 File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
-	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x\n", fileName, fileFlags, fileMode);
+	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x", fileName, fileFlags, fileMode);
 	/* Allocate an I/O stack for this file. */
 	IoStack *proto = selectIoStack(fileName, fileFlags, fileMode);
 
@@ -90,7 +90,7 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
  */
 int FileClose(File file)
 {
-	file_debug("FileClose: name=%s, file=%d  iostack=%p\n", FilePathNAME(file), file, getStack(file));
+	file_debug("FileClose: name=%s, file=%d  iostack=%p", FilePathName(file), file, getStack(file));
 	/* Make sure we are dealing with an open file */
 	if (file < 0 || getStack(file) == NULL)
 	{
@@ -110,7 +110,7 @@ int FileClose(File file)
 
 	/* No matter what, release the memory on Close */
 	free(stack);  /* TODO: do we need to restore errno? */
-	file_debug("FileClose(done): file=%d retval=%d\n", file, retval);
+	file_debug("FileClose(done): file=%d retval=%d", file, retval);
 
 	return (int)checkIoStackError(-1, retval);
 }
@@ -118,7 +118,7 @@ int FileClose(File file)
 
 ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
-	file_debug("FileRead: name=%s file=%d  amount=%zd offset=%lld\n", FilePathNAME(file), file, amount, offset);
+	file_debug("FileRead: name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 	Assert(offset >= 0);
 	Assert((ssize_t)amount > 0);
 
@@ -133,14 +133,14 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	file_debug("FileRead(done): file=%d  name=%s  actual=%zd\n", file, FilePathNAME(file), actual);
+	file_debug("FileRead(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;
 }
 
 
 ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
-	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld\n", FilePathNAME(file), file, amount, offset);
+	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 	Assert(offset >= 0 && (ssize_t)amount > 0);
 
 	/* Write the data as requested */
@@ -152,7 +152,7 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd\n", file, FilePathNAME(file), actual);
+	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;
 }
 
@@ -168,7 +168,7 @@ int FileSync(File file, uint32 wait_event_info)
 off_t FileSize(File file)
 {
 	off_t size = stackSize(getStack(file));
-	file_debug("FileSize: name=%s file=%d  size=%lld\n", FilePathNAME(file), file, size);
+	file_debug("FileSize: name=%s file=%d  size=%lld", FilePathName(file), file, size);
 	return size;
 }
 
@@ -399,7 +399,7 @@ IoStack *ioStackCompressEncrypt;	/* Compressed and encrypted with session key */
  */
 static IoStack *selectIoStack(const char *path, int oflags, int mode)
 {
-	file_debug("IoStackNew: name=%s  oflags=0x%x  mode=o%o\n", path, oflags, mode);
+	file_debug("IoStackNew: name=%s  oflags=0x%x  mode=o%o", path, oflags, mode);
 
 	/* Set up the I/O prototype stacks if not already done */
 	if (!ioStacksInitialized)
@@ -413,7 +413,7 @@ static IoStack *selectIoStack(const char *path, int oflags, int mode)
 		case PG_ENCRYPT:          return ioStackEncrypt;
 		case PG_ENCRYPT_PERM:     return ioStackEncryptPerm;
 		case PG_TESTSTACK:        return ioStackTest;
-		case 0:                   file_debug("Raw mode: path=%s oflags=0x%x\n", path, oflags); return ioStackRaw;
+		case 0:                   file_debug("Raw mode: path=%s oflags=0x%x", path, oflags); return ioStackRaw;
 
 		default: elog(FATAL, "Unrecognized I/O Stack oflag 0x%x", (oflags & PG_STACK_MASK));
 	}

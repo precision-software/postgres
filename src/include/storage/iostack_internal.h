@@ -20,7 +20,16 @@ This is a "header only" file.
 
 #include "storage/iostack.h"
 
+/* Initialize I/O stacks.*/
 extern void ioStackSetup(void);
+
+/* To assist testing */
+extern void setTestStack(IoStack *proto);
+
+/*
+ * The following stack eleements.
+ */
+extern void *vfdStackNew(void);
 
 /*
  * Quick and dirty debug function to display a buffer in hex.
@@ -65,7 +74,8 @@ static inline char *asHex(uint8_t *buf, size_t size)
  * Set (vararg) error info for the I/O stack,
  *   setting errno and returning -1 for convenience.
  */
-inline static int stackVSetError(IoStack *stack, int errorCode, const char *fmt, args)
+inline static int
+stackVSetError(IoStack *stack, int errorCode, const char *fmt, va_list args)
 {
 	stack->errNo = errorCode;
 	vsnprintf(stack->errMsg, sizeof(stack->errMsg), fmt, args);
@@ -77,11 +87,12 @@ inline static int stackVSetError(IoStack *stack, int errorCode, const char *fmt,
  * Format error info for the I/O stack, return -1 for convenience.
  * Sets errno as a side effect.
  */
-int stackSetError(IoStack *stack, int errorCode, const char *fmt, ...)
+inline static int
+stackSetError(void *thisVoid, int errorCode, const char *fmt, ...)
 {
 	va_list args;
 	va_start(args, fmt);
-	stackVSetError(stack, errorCode, fmt, args);
+	stackVSetError(thisVoid, errorCode, fmt, args);
 	va_end(args);
 	return -1;
 }
@@ -90,7 +101,8 @@ int stackSetError(IoStack *stack, int errorCode, const char *fmt, ...)
 /*
  * Copy the error info from one stack to another, setting errno as a side effect.
  */
-void stackCopyError(IoStack *dest, IoStack *src)
+inline static void
+stackCopyError(IoStack *dest, IoStack *src)
 {
 	dest->errNo = src->errNo;
 	strcpy(dest->errMsg, src->errMsg);
@@ -101,7 +113,8 @@ void stackCopyError(IoStack *dest, IoStack *src)
 /*
  * Check return value for -1, and if so set the error info. Expects errno to be set.
  */
-inline static ssize_t stackCheckError(void *thisVoid, ssize_t retval, const char *fmt, ...)
+inline static ssize_t
+stackCheckError(void *thisVoid, ssize_t retval, const char *fmt, ...)
 {
 	va_list args;
 	IoStack *this = thisVoid;
@@ -120,7 +133,8 @@ inline static ssize_t stackCheckError(void *thisVoid, ssize_t retval, const char
 /*
  * Copy error information from the next lower stack level to the current level.
  */
-inline static ssize_t copyError(void *this, ssize_t retval, void *that)
+inline static ssize_t
+copyError(void *this, ssize_t retval, void *that)
 {
 	stackCopyError(this, that);
 	return retval;
@@ -129,7 +143,8 @@ inline static ssize_t copyError(void *this, ssize_t retval, void *that)
 /*
  * Copy error info from the next lower stack level.
  */
-inline static ssize_t copyNextError(void *this, ssize_t retval)
+inline static ssize_t
+copyNextError(void *this, ssize_t retval)
 {
 	return copyError(this, retval, nextStack(this));
 }
@@ -143,24 +158,6 @@ inline static ssize_t copyNextError(void *this, ssize_t retval)
 #endif
 #define ROUNDDOWN(a,b) ( (a) / (b) * (b))
 #define ROUNDUP(a,b)    ROUNDDOWN(a + b - 1, b)
-
-/* Declare a "debug" macro */
-//#define FILE_DEBUG
-#ifdef FILE_DEBUG
-#define file_debug(...) \
-    do {  \
-        int save_errno = errno; \
-        setvbuf(stderr, NULL, _IOLBF, 256); \
-		fprintf(stderr, "%s(%d): ", __func__, getpid());     \
-		fprintf(stderr, __VA_ARGS__); \
-		fprintf(stderr, "\n");\
-        /* elog(DEBUG2, __VA_ARGS__);  */ \
-        errno = save_errno;  \
-    } while (0)
-
-#else
-#define file_debug(...) ((void)0)
-#endif
 
 
 #endif /*FILTER_ERROR_H */

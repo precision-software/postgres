@@ -4,9 +4,6 @@
 
 //#include "storage/iostack.h"
 
-
-#define PG_TESTSTACK 0
-
 /* Function type to create an IoStack with the given block size */
 typedef void *(*CreateStackFn)(size_t blockSize);
 

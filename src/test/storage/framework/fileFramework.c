@@ -7,23 +7,15 @@
 #include <unistd.h>
 #include <stdbool.h>
 
-#include "c.h"
-//#include "storage/iostack_internal.h"
+#include "postgres.h"
 #include "storage/fd.h"
-//#include "storage/vfd.h"
-#include "utils/wait_event.h"
+#include "storage/iostack_internal.h"
+//#include "storage/vfd.h"n
 
 #include "fileFramework.h"
 #include "unitTestInternal.h"
 
 typedef uint8_t Byte;
-
-typedef void IoStack;
-typedef IoStack *(*CreateTestStackFn)(size_t blockSize);
-void setTestStack(CreateTestStackFn fn, size_t blockSize);
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
-#define ROUNDUP(a,b) (((a) + (b) - 1) / (b) * (b))
-#define ROUNDDOWN(a,b) ((a) / (b) * (b))
 #define PATH_MAX 1024
 
 #define countof(array) (sizeof(array)/sizeof(array[0]))
@@ -31,7 +23,6 @@ void setTestStack(CreateTestStackFn fn, size_t blockSize);
 /* Matrix of file and block sizes for testing. */
 off_t fileSize[] = {0, 1024, 1, 64, 1027, 7*1024, 32*1024 + 127, 6*1024*1024+153};
 size_t blockSize[] = {1024, 4 * 1024, 3 * 1024 + 357, 1024 - 237, 64, 1};
-
 
 /* Given the position in the seek, generate one byte of data for that position. */
 static inline Byte generateByte(size_t position)
@@ -55,7 +46,7 @@ static bool verifyBuffer(size_t position, Byte *buf, size_t size)
     {
         Byte expected = generateByte(position + i);
 		if (expected != buf[i])
-			file_debug("verifyBuffer: i=%zu position=%zu  buf[i]=%c expected=%c\n", i, position, buf[i], expected);
+			file_debug("verifyBuffer: i=%zu position=%zu  buf[i]=%c expected=%c", i, position, buf[i], expected);
         PG_ASSERT_EQ(expected, buf[i]);
     }
     return true;
@@ -74,8 +65,8 @@ static void generateFile(char *path, off_t size, size_t bufferSize)
     off_t position;
     File file;
 
-    file_debug("generateFile: path=%s\n", path);
-    file = FileOpen( path, O_WRONLY|O_CREAT|O_TRUNC);
+    file_debug("generateFile: path=%s", path);
+    file = FileOpen( path, O_WRONLY|O_CREAT|O_TRUNC|PG_TESTSTACK);
 	PG_ASSERT(file != -1);
     buf = malloc(bufferSize); /* TODO: make buf be at end of struct */
 
@@ -98,7 +89,7 @@ static void verifyFile(char *path, off_t fileSize, ssize_t bufferSize)
     File file;
     Byte *buf;
 
-    file_debug("verifyFile: path=%s\n", path);
+    file_debug("verifyFile: path=%s", path);
     file = FileOpen(path, O_RDONLY|PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
 	PG_ASSERT(!FileEof(file));
@@ -136,7 +127,7 @@ static void allocateFile(char *path, off_t size, ssize_t bufferSize)
     Byte *buf;
     off_t position;
 
-    file_debug("allocateFile: path=%s\n", path);
+    file_debug("allocateFile: path=%s", path);
     /* Start out by allocating space and filling the file with "X"s. */
     file = FileOpen(path, O_WRONLY|O_CREAT|O_TRUNC|PG_TESTSTACK);
     buf = malloc(bufferSize);
@@ -161,7 +152,7 @@ static void generateRandomFile(char *path, off_t size, size_t blockSize)
     File file;
     Byte *buf;
 
-    file_debug("generateRandomFile: path=%s\n", path);
+    file_debug("generateRandomFile: path=%s", path);
     /* The nr of blocks must be relatively prime to "prime", otherwise we won't visit all the blocks. */
     nrBlocks = (size + blockSize - 1) / blockSize;
     PG_ASSERT( nrBlocks == 0 || (nrBlocks % prime) != 0);
@@ -199,7 +190,7 @@ static void appendFile(char *path, off_t fileSize, size_t bufferSize)
     off_t lastBlock;
     ssize_t remaining, actual;
 
-    file_debug("appendFile: path=%s\n", path);
+    file_debug("appendFile: path=%s", path);
     file = FileOpen(path, O_RDWR|O_APPEND|PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
     buf = malloc(bufferSize);
@@ -236,7 +227,7 @@ static void appendFile(char *path, off_t fileSize, size_t bufferSize)
 }
 
 /*
- * Verify an ioStack has the correct data through random seeks.
+ * Verify a file has the correct data through random seeks.
  * This should do a complete verification - examining every byte of the file.
  */
 static void verifyRandomFile(char *path, off_t size, size_t blockSize)
@@ -245,7 +236,7 @@ static void verifyRandomFile(char *path, off_t size, size_t blockSize)
     Byte *buf;
     size_t nrBlocks;
 
-    file_debug("verifyRandomFile: path=%s\n", path);
+    file_debug("verifyRandomFile: path=%s", path);
 	file = FileOpen(path, O_RDONLY|PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
     buf = malloc(blockSize);
@@ -330,39 +321,39 @@ static void regression(char *name, size_t blockSize)
 /*
  * Run a test on a single configuration determined by file size and buffer size
  */
-void singleSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t size, size_t bufferSize)
+void singleSeekTest(CreateStackFn createStack, char *nameFmt, off_t size, size_t bufSize)
 {
     char fileName[PATH_MAX];
-    snprintf(fileName, sizeof(fileName), nameFmt, size, bufferSize);
+    snprintf(fileName, sizeof(fileName), nameFmt, size, bufSize);
     beginTest(fileName);
 
 	/* Inject the procedure to create an I/O Stack */
-	setTestStack(testStack, bufferSize);
+	setTestStack(createStack(bufSize));
 
     /* create and read back as a stream */
-    generateFile(fileName, size, bufferSize);
-    verifyFile(fileName, size, bufferSize);
+    generateFile(fileName, size, bufSize);
+    verifyFile(fileName, size, bufSize);
 
     /* Fill in the file with garbage, then write it out as random writes */
-    allocateFile(fileName, size, bufferSize);
-    generateRandomFile(fileName, size, bufferSize);
-    verifyFile(fileName, size, bufferSize);
+    allocateFile(fileName, size, bufSize);
+    generateRandomFile(fileName, size, bufSize);
+    verifyFile(fileName, size, bufSize);
 
     /* append to the file */
-    appendFile(fileName, size, bufferSize);
-    verifyFile(fileName, size+bufferSize, ROUNDDOWN(16*1024, bufferSize));  /* larger buffer */
+    appendFile(fileName, size, bufSize);
+    verifyFile(fileName, size + bufSize, ROUNDDOWN(16 * 1024, bufSize));  /* larger buffer */
 
     /* Read back as random reads */
-    verifyRandomFile(fileName, size+bufferSize, bufferSize);
+    verifyRandomFile(fileName, size + bufSize, bufSize);
 
-	regression(fileName, bufferSize);
+	regression(fileName, bufSize);
 
     /* Clean things up */
     deleteFile(fileName);
 }
 
 /* run a matrix of tests for various file sizes and I/O sizes.  All will use a 1K block size. */
-void seekTest(CreateTestStackFn testStack, char *nameFmt)
+void seekTest(CreateStackFn testStack, char *nameFmt)
 {
     for (int fileIdx = 0; fileIdx<countof(fileSize); fileIdx++)
         for (int bufIdx = 0; bufIdx<countof(blockSize); bufIdx++)
@@ -373,15 +364,15 @@ void seekTest(CreateTestStackFn testStack, char *nameFmt)
 
 
 /* Run a test on a single configuration determined by file size and buffer size */
-void singleStreamTest(CreateTestStackFn testStack, char *nameFmt, off_t size, size_t bufferSize)
+void singleStreamTest(CreateStackFn createStack, char *nameFmt, off_t size, size_t bufferSize)
 {
     char fileName[PATH_MAX];
     snprintf(fileName, sizeof(fileName), nameFmt, size, bufferSize);
 
     beginTest(fileName);
 
-	/* Inject the procedure to create an I/O Stack */
-	setTestStack(testStack, bufferSize);
+	/* Create the prototype TEST I/O stack */
+	setTestStack(createStack(bufferSize));
 
 	generateFile(fileName, size, bufferSize);
     verifyFile(fileName, size, bufferSize);
@@ -397,7 +388,7 @@ void singleStreamTest(CreateTestStackFn testStack, char *nameFmt, off_t size, si
 
 
 /* run a matrix of tests for various file sizes and buffer sizes */
-void streamTest(CreateTestStackFn testStack, char *nameFmt)
+void streamTest(CreateStackFn testStack, char *nameFmt)
 {
     for (int fileIdx = 0; fileIdx<countof(fileSize); fileIdx++)
         for (int bufIdx = 0; bufIdx<countof(blockSize); bufIdx++)
@@ -408,7 +399,7 @@ void streamTest(CreateTestStackFn testStack, char *nameFmt)
 
 
 /* Run a test on a single configuration determined by file size and buffer size */
-void singleReadSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t fileSize, size_t bufferSize)
+void singleReadSeekTest(CreateStackFn createStack, char *nameFmt, off_t fileSize, size_t bufferSize)
 {
     char fileName[PATH_MAX];
     snprintf(fileName, sizeof(fileName), nameFmt, fileSize, bufferSize);
@@ -416,7 +407,7 @@ void singleReadSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t fileSi
     beginTest(fileName);
 
 	/* Set up the I/O stack we want to test */
-	setTestStack(testStack, bufferSize);
+	setTestStack(createStack(bufferSize));
 
 	generateFile(fileName, fileSize, bufferSize);
     verifyFile(fileName, fileSize, bufferSize);
@@ -432,42 +423,11 @@ void singleReadSeekTest(CreateTestStackFn testStack, char *nameFmt, off_t fileSi
     deleteFile(fileName);
 }
 
-/* Create a test stack with a certain blockSize */
-typedef IoStack *(*CreateTestStackFn)(size_t blockSize);
-
 /* run a matrix of tests for various file sizes and buffer sizes */
-void readSeekTest(CreateTestStackFn testStack, char *nameFmt)
+void readSeekTest(CreateStackFn testStack, char *nameFmt)
 {
     for (int fileIdx = 0; fileIdx<countof(fileSize); fileIdx++)
         for (int bufIdx = 0; bufIdx<countof(blockSize); bufIdx++)
 			if  (fileSize[fileIdx] / blockSize[bufIdx] < 4 * 1024 * 1024)  // Keep nr blocks under 4M to complete in reasonable time.
                 singleReadSeekTest(testStack, nameFmt, fileSize[fileIdx], blockSize[bufIdx]);
-}
-
-/*
- * Here is a nuisance problem for testing I/O Stacks.
- * PG_TESTSTACK requires a fully built IoStack as a prototype,
- * but the test framework wants a "createTestStack(blockSize) function which accepts a blockSize parameter.
- * In functional programing the solution would be easy - simply create a new function
- * by binding blockSize in a lambda expression.
- * Implementing in C is awkward. Our solution is to save blockSize and createTestStack(blockSize)
- * in global variables and implement "createStack()" on top of them. Not elegant, but it
- * is "good enough" for unit testing.
- */
-
-/* Create boundFunction() by binding blockSize */
-static size_t boundBlockSize;
-static CreateTestStackFn boundTestStackFn;
-
-static inline IoStack *boundFunction()
-{
-	return boundTestStackFn(boundBlockSize);
-}
-
-/*
- * Setup up test stack for PG_TESTSTACK.
- */
-void setTestStack(CreateTestStackFn fn, size_t blockSize)
-{
-	//ioStackTest = fn(blockSize);
 }

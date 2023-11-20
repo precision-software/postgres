@@ -19,4 +19,4 @@ storage_vfdtest = executable('storage_vfdtest',
   link_with: [test_lib, backend_link_with],
   link_depends: backend_link_depends,
 )
-test('storage/vfd', storage_vfdtest, suite: 'iostack')
+test('vfdtest', storage_vfdtest, suite: 'iostack')

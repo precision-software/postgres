@@ -24,6 +24,15 @@ IoStack *ioStackCompress;			/* Buffered and compressed */
 IoStack *ioStackCompressEncrypt;	/* Compressed and encrypted with session key */
 
 /*
+ * Set the stack used for PG_TESTSTACK.
+ */
+void
+setTestStack(IoStack *proto)
+{
+	ioStackTest = proto;
+}
+
+/*
  * Select the appropriate I/O Stack for this particular file.
  * This function provides flexibility in how I/O stacks are created.
  * It can look at open flags, do GLOB matching on pathnames,
@@ -33,11 +42,13 @@ IoStack *ioStackCompressEncrypt;	/* Compressed and encrypted with session key */
 IoStack *
 selectIoStack(const char *path, int oflags, mode_t mode)
 {
-	file_debug("IoStackNew: name=%s  oflags=0x%x  mode=o%o\n", path, oflags, mode);
+	file_debug("IoStackNew: name=%s  oflags=0x%x  mode=o%o", path, oflags, mode);
 
 	/* Set up the I/O prototype stacks if not already done */
 	if (!ioStacksInitialized)
 		ioStackSetup();
+
+	return ioStackRaw;
 
 	/* TODO: create prototypes at beginning. Here, we just select them */
 	/* Look at oflags to determine which stack to use */
@@ -47,7 +58,7 @@ selectIoStack(const char *path, int oflags, mode_t mode)
 		case PG_ENCRYPT:          return ioStackEncrypt;
 		case PG_ENCRYPT_PERM:     return ioStackEncryptPerm;
 		case PG_TESTSTACK:        return ioStackTest;
-		case 0:                   file_debug("Raw mode: path=%s oflags=0x%x\n", path, oflags); return ioStackRaw;
+		case 0:                   file_debug("Raw mode: path=%s oflags=0x%x", path, oflags); return ioStackRaw;
 
 		default: elog(FATAL, "Unrecognized I/O Stack oflag 0x%x", (oflags & PG_STACK_MASK));
 	}
@@ -61,9 +72,11 @@ void ioStackSetup(void)
 {
 	/* Set up the prototype stacks */
 	ioStackRaw = vfdStackNew();
+	ioStackPlain = bufferedNew(64*1024, vfdStackNew());
+
+#ifdef NOTYET
 	ioStackEncrypt = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen, vfdStackNew()));
 	ioStackEncryptPerm = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, permKey, permKeyLen, vfdStackNew()));
-	ioStackPlain = bufferedNew(64*1024, vfdStackNew());
 	ioStackCompress = bufferedNew(1, lz4CompressNew(64 * 1024, vfdStackNew(), vfdStackNew()));
 	ioStackCompressEncrypt = bufferedNew(1,
 										 lz4CompressNew(16*1024,
@@ -72,7 +85,7 @@ void ioStackSetup(void)
 																			vfdStackNew())),
 														bufferedNew(1,
 																	aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen,
-																			vfdStackNew()))));
+#endif																		vfdStackNew()))));
 	/* Note we are now initialized */
 	ioStacksInitialized = true;
 }
@@ -129,8 +142,9 @@ ssize_t stackReadAll(IoStack *this, Byte *buf, size_t size, off_t offset)
  */
 bool stackWriteInt32(IoStack *this, uint32_t data, off_t offset)
 {
-	file_debug("stackWriteInt32: data=%d  offset=%lld\n", data, offset);
 	static Byte buf[4];
+
+	file_debug("stackWriteInt32: data=%d  offset=%lld", data, offset);
 	buf[0] = (Byte)(data >> 24);
 	buf[1] = (Byte)(data >> 16);
 	buf[2] = (Byte)(data >> 8);
@@ -149,7 +163,7 @@ bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset)
 		return false;
 
 	*data = buf[0] << 24 | buf[1] << 16 | buf[2] << 8 | buf[3];
-	file_debug("stackReadInt32: data=%d  offset=%lld\n", *data, offset);
+	file_debug("stackReadInt32: data=%d  offset=%lld", *data, offset);
 	return true;
 }
 
@@ -175,11 +189,13 @@ ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offse
  */
 ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset)
 {
-	Assert(size <= MAX_BLOCK_SIZE);
+	uint32_t expected;
+	ssize_t ret;
+	ssize_t actual;
 
 	/* Read the length. Return immediately if EOF or error */
-	uint32_t expected;
-	ssize_t ret = stackReadInt32(this, &expected, offset);
+	Assert(size <= MAX_BLOCK_SIZE);
+	ret = stackReadInt32(this, &expected, offset);
 	if (ret <= 0)
 		return ret;
 
@@ -188,7 +204,7 @@ ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset)
 		return stackSetError(this, -1, "IoStack record length of %x is larger than %z", expected, size);
 
 	/* read the data, including the possiblility of a zero length record. */
-	ssize_t actual = stackReadAll(this, buf, expected, offset + 4);
+	actual = stackReadAll(this, buf, expected, offset + 4);
 	if (actual >= 0 && actual != expected)
 		return stackSetError(this, -1, "IoStack record corrupted. Expected %z bytes but read only %z byres", expected, actual);
 
@@ -198,8 +214,9 @@ ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset)
 
 bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset)
 {
-	file_debug("stackWriteInt64: data=%lld  offset=%lld\n", data, offset);
 	static Byte buf[8];
+
+	file_debug("stackWriteInt64: data=%lld  offset=%lld", data, offset);
 	buf[0] = (Byte)(data >> 56);
 	buf[1] = (Byte)(data >> 48);
 	buf[2] = (Byte)(data >> 40);
@@ -224,29 +241,6 @@ bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset)
 	*data = (uint64_t)buf[0] << 56 | (uint64_t)buf[1] << 48 | (uint64_t)buf[2] << 40 |
 		(uint64_t)buf[3] << 32 | (uint64_t)buf[4] << 24 | (uint64_t)buf[5] << 16 |
 		(uint64_t)buf[6] << 8 | (uint64_t)buf[7];
-	file_debug("stackReadInt64: data=%lld  offset=%lld\n", *data, offset);
+	file_debug("stackReadInt64: data=%lld  offset=%lld", *data, offset);
 	return true;
-}
-
-void fileClearError(void *thisVoid)
-{
-	IoStack *this = thisVoid;
-	this->errNo = 0;
-	this->eof = false;
-	strcpy(this->errMsg, "");
-}
-
-bool stackErrorInfo(void *thisVoid, int *errNo, char *errMsg)
-{
-	IoStack *this = thisVoid;
-	*errNo = errno = this->errNo;
-	strcpy(errMsg, this->errMsg);
-	return stackError(this);
-}
-
-
-int stackErrorNo(void *thisVoid)
-{
-	IoStack *this = thisVoid;
-	return this->errNo;
 }

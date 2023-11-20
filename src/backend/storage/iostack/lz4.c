@@ -83,7 +83,7 @@ off_t getCompressedOffset(Lz4Compress *this, off_t offset)
 	return (off_t)compressedOffset;
 }
 
-/*
+
  * Copy a slice of a file into another file.
  *
  *   @param src - the source I/O stack
@@ -508,7 +508,7 @@ ssize_t lz4CompressBuffer(Lz4Compress *this, Byte *toBuf, size_t toSize, const B
 	if (actual < 0)
 		actual = setLz4Error(this, actual);
 
-	file_debug("lz4CompressBuffer: actual=%zd   compressed=%s\n", actual, asHex(this->compressedBuf, actual));
+	file_debug("lz4CompressBuffer: actual=%zd   compressed=%s", actual, asHex(this->compressedBuf, actual));
 	return actual;
 }
 
@@ -527,7 +527,7 @@ ssize_t lz4DecompressBuffer(Lz4Compress *this, Byte *toBuf, size_t toSize, const
 {
 
 	/* Special case for empty buffer. (eg. EOF) */
-	file_debug("lz4DeompressBuffer: fromSize=%zd toSize=%zd  compressed=%s\n", fromSize, toSize, asHex(this->compressedBuf, fromSize));
+	file_debug("lz4DeompressBuffer: fromSize=%zd toSize=%zd  compressed=%s", fromSize, toSize, asHex(this->compressedBuf, fromSize));
 	if (fromSize == 0)
 		return 0;
 
@@ -536,7 +536,7 @@ ssize_t lz4DecompressBuffer(Lz4Compress *this, Byte *toBuf, size_t toSize, const
 	if (actual < 0)
 		actual = setLz4Error(this, actual);
 
-	file_debug("lz4DecompressBuffer: actual=%zd data=%.*s\n", actual, (int)actual, toBuf);
+	file_debug("lz4DecompressBuffer: actual=%zd data=%.*s", actual, (int)actual, toBuf);
 	return actual;
 }
 

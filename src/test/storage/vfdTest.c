@@ -7,14 +7,17 @@
 #include "./framework/fileFramework.h"
 #include "./framework/unitTest.h"
 
+#include "storage/iostack.h"
 
-#define createStack NULL
+static void *
+createStack(size_t bufsize)
+{
+	return vfdStackNew();
+}
 
 void testMain()
 {
     system("rm -rf " TEST_DIR "vfd; mkdir -p " TEST_DIR "vfd");
-
-
 
 	beginTest("Storage");
     beginTestGroup("Vfd Stack");

@@ -205,11 +205,12 @@ extern ssize_t FileGetc(File file);
 extern ssize_t FilePutc(int c, File file);
 
 /* Error handling on virtual files -- similar to feof/ferror */
-extern int FileEof(File file);           /* Reset on every read */
-extern bool FileError(File file);        /* Persists until cleared */
+extern int FileEof(File file);           /* Did the last op encounter EOF? Reset on every read */
+extern bool FileError(File file);        /* Did the last op result in an error? Not cleared by FileClose(). */
 extern bool FileClearError(File file);   /* Clears both Eof and error */
-extern const char *FileErrorMsg(File file);
-extern int FileErrorCode(File file);
+extern const char *FileErrorMsg(File file);  /* Fetch the most recent error message */
+extern int FileErrorCode(File file);     /* Fetch the most recent error code */
+extern ssize_t FileBlockSize(File file);     /* The block size used by this file. 1 means not blocked */
 
 /* Internal helpers for error handling */ // make static
 extern int setFileError(File file, int err, const char *format, ...);
@@ -220,5 +221,17 @@ extern bool badFile(File file);
 /* A preferred name. */
 extern File FileOpen(const char *name, int fileFlags);
 extern File FileOpenPerm(const char *name, int fileFlags, mode_t perm);
+
+/*
+ * Hooks into internal fd.c routines.
+ * Should only be called by internal storage routines such as vfd.c
+ */
+extern File PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode);
+extern int FileClose_Internal(File file);
+extern ssize_t FileRead_Internal(File file, void *buffer, size_t amount, off_t offset);
+extern ssize_t FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset);
+extern int FileSync_Internal(File file);
+extern off_t FileSize_Internal(File file);
+extern int	FileTruncate_Internal(File file, off_t offset);
 
 #endif							/* FD_H */

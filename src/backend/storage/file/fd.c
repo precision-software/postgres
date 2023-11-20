@@ -1577,7 +1577,7 @@ PathNameOpenFile(const char *fileName, int fileFlags)
  * it will be interpreted relative to the process' working directory
  * (which should always be $PGDATA when this code is running).
  */
-static File
+File
 PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	char	   *fnamecopy;
@@ -1972,7 +1972,7 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 /*
  * close a file when done with it
  */
-static int
+int
 FileClose_Internal(File file)
 {
 	Vfd		   *vfdP;
@@ -2145,7 +2145,7 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 	pgstat_report_wait_end();
 }
 
-static ssize_t
+ssize_t
 FileRead_Internal(File file, void *buffer, size_t amount, off_t offset)
 {
 	int			returnCode;
@@ -2197,7 +2197,7 @@ retry:
 	return returnCode;
 }
 
-static ssize_t
+ssize_t
 FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset)
 {
 	int			returnCode;
@@ -2293,7 +2293,7 @@ retry:
 }
 
 int
-FileSync_internal(File file, uint32 wait_event_info)
+FileSync_Internal(File file)
 {
 	int			returnCode;
 	file_debug("file=%d", file);
@@ -2307,9 +2307,7 @@ FileSync_internal(File file, uint32 wait_event_info)
 	if (returnCode < 0)
 		return returnCode;
 
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = pg_fsync(VfdCache[file].fd);
-	pgstat_report_wait_end();
 
 	return returnCode;
 }
@@ -2407,7 +2405,7 @@ retry:
 }
 
 off_t
-FileSize_internal(File file)
+FileSize_Internal(File file)
 {
 	int64 size;
 	Assert(FileIsValid(file));
@@ -2427,7 +2425,7 @@ FileSize_internal(File file)
 }
 
 int
-FileTruncate_internal(File file, off_t offset)
+FileTruncate_Internal(File file, off_t offset)
 {
 	int			returnCode;
 	file_debug("file=0x%x  offset=%lld", file, offset);
@@ -4086,7 +4084,7 @@ ResOwnerPrintFile(Datum res)
 /*******************************************************************************
 * The following functions add sequential and error handling to the VFD routines.
 * They are mostly wrappers around the original VFD routines,
-* which have been renamed by appending "_internal".
+* which have been renamed by appending "_Internal".
 */
 
 
@@ -4120,9 +4118,10 @@ static inline IoStack *getErrStack(File file)
 bool
 badFile(File file)
 {
-	if (FileIsValid(file))
-		return false;
-	setFileError(-1, EBADF, "EBADF");
+	bool isBad = !FileIsValid(file);
+	if (isBad)
+		setFileError(-1, EBADF, "EBADF file=%d", file);
+	return isBad;
 }
 
 
@@ -4240,13 +4239,13 @@ FileTell(File file)
 /* True if an error occurred on the file.  (EOF is not an error) */
 bool FileError(File file)
 {
-	return FileErrorCode(file) != 0;
+	return stackError(getErrStack(file));
 }
 
 /* True if the last read generated an EOF */
 int FileEof(File file)
 {
-	return getErrStack(file)->eof;
+	return stackEof(getErrStack(file));
 }
 
 /* Clears an error, and is true if an error had been encountered */
@@ -4258,7 +4257,7 @@ bool FileClearError(File file)
 /* Get a pointer to the error message */
 const char *FileErrorMsg(File file)
 {
-	return getErrStack(file)->errMsg;
+	return stackErrorMsg(getErrStack(file));
 }
 
 /*
@@ -4334,7 +4333,7 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 	bool append;
 	Vfd *vfdP;
 
-	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x\n", fileName, fileFlags, fileMode);
+	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x", fileName, fileFlags, fileMode);
 
 	/* Allocate an I/O stack for this file. */
 	proto = selectIoStack(fileName, fileFlags, fileMode);
@@ -4372,7 +4371,7 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 int FileClose(File file)
 {
 	int retval;
-	file_debug("FileClose: name=%s, file=%d  iostack=%p\n", FilePathNAME(file), file, getStack(file));
+	file_debug("FileClose: name=%s, file=%d  iostack=%p", FilePathName(file), file, getStack(file));
 
 	/* Make sure we are dealing with an open file */
 	if (badFile(file))
@@ -4384,7 +4383,7 @@ int FileClose(File file)
 	/* No matter what, release the memory on Close */
 	free(getVfd(file)->ioStack);
 	getVfd(file)->ioStack = NULL;
-	file_debug("FileClose(done): file=%d retval=%d\n", file, retval);
+	file_debug("FileClose(done): file=%d retval=%d", file, retval);
 
 	/* Restore errno in case it was reset. */
 	FileErrorCode(-1);
@@ -4394,50 +4393,50 @@ int FileClose(File file)
 
 ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
-	file_debug("FileRead: name=%s file=%d  amount=%zd offset=%lld\n", FilePathNAME(file), file, amount, offset);
-	Assert(offset >= 0);
-	Assert((ssize_t)amount > 0);
+	ssize_t actual;
+	file_debug("FileRead: name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 
 	if (badFile(file))
 		return -1;
 
-	if (offset < 0 || amount < 0)
+	if (offset < 0 || (ssize_t)amount < 0)
 		return setFileError(file, EINVAL, "");
 
 	/* Read the data as requested */
 	pgstat_report_wait_start(wait_event_info);
-	ssize_t actual = stackReadAll(getStack(file), buffer, amount, offset);
+	actual = stackReadAll(getStack(file), buffer, amount, offset);
 	pgstat_report_wait_end();
 
 	/* If successful, update the file offset */
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	file_debug("FileRead(done): file=%d  name=%s  actual=%zd\n", file, FilePathNAME(file), actual);
+	file_debug("FileRead(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;
 }
 
 
 ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
-	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld\n", FilePathNAME(file), file, amount, offset);
+	ssize_t actual;
+	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 
 	if (badFile(file))
 		return -1;
 
-	if (offset < 0 || amount < 0)
+	if (offset < 0 || (ssize_t)amount < 0)
         return setFileError(file, EINVAL, "");
 
 	/* Write the data as requested */
 	pgstat_report_wait_start(wait_event_info);
-	ssize_t actual = stackWriteAll(getStack(file), buffer, amount, offset);
+	actual = stackWriteAll(getStack(file), buffer, amount, offset);
 	pgstat_report_wait_end();
 
 	/* If successful, update the file offset */
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd\n", file, FilePathNAME(file), actual);
+	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;
 }
 
@@ -4463,7 +4462,7 @@ off_t FileSize(File file)
         return  -1;
 
 	size = stackSize(getStack(file));
-	file_debug("FileSize: name=%s file=%d  size=%lld\n", FilePathNAME(file), file, size);
+	file_debug("FileSize: name=%s file=%d  size=%lld", FilePathName(file), file, size);
 	return size;
 }
 
@@ -4476,10 +4475,12 @@ ssize_t FileBlockSize(File file)
 
 int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
 {
+	int retval;
 	if (badFile(file))
 		return -1;
 	pgstat_report_wait_start(wait_event_info);
-	int retval = (int)stackTruncate(getStack(file), offset);
+	retval = (int)stackTruncate(getStack(file), offset);
 	pgstat_report_wait_end();
+
 	return retval;
 }
