@@ -1096,6 +1096,7 @@ int
 BasicOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	int			fd;
+	file_debug("fileName=%s flags=0x%x", fileName, fileFlags);
 
 tryAgain:
 #ifdef PG_O_DIRECT_USE_F_NOCACHE
@@ -1539,6 +1540,7 @@ ReportTemporaryFileUsage(const char *path, off_t size)
 static void
 RegisterTemporaryFile(File file)
 {
+	file_debug("file=%d  path=%s", file, FilePathName(file));
 	ResourceOwnerRememberFile(CurrentResourceOwner, file);
 	VfdCache[file].resowner = CurrentResourceOwner;
 
@@ -1584,6 +1586,7 @@ PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMo
 	File		file;
 	Vfd		   *vfdP;
 
+	file_debug("fileName=%s fileFlags=0x%x  mode=0x%x", fileName, fileFlags, fileMode);
 	DO_DB(elog(LOG, "PathNameOpenFilePerm: %s %x %o",
 			   fileName, fileFlags, fileMode));
 
@@ -1978,6 +1981,7 @@ FileClose_Internal(File file)
 	Vfd		   *vfdP;
 	int 	   save_errno = 0;
 
+	file_debug("file=%d name=%s", file, FilePathName(file));
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileClose: %d (%s)",
@@ -2123,7 +2127,7 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 {
 	int			returnCode;
 
-	file_debug("file=%d offset=%lld nbytes=%zd", file, offset, nbytes);
+	file_debug("file=%d offset=%lld nbytes=%lld", file, offset, nbytes);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileWriteback: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
@@ -2367,6 +2371,7 @@ FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
 int
 FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info)
 {
+	file_debug("file=%d offset=%lld amount=%lld name=%s", file, offset, amount, FilePathName(file));
 #ifdef HAVE_POSIX_FALLOCATE
 	int			returnCode;
 
