@@ -1772,7 +1772,7 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 {
 	char		tmppath[MAXPGPATH];
 	char		path[MAXPGPATH];
-	File		file;
+	int			fd;
 	ReplicationSlotOnDisk cp;
 	bool		was_dirty;
 
@@ -1794,8 +1794,8 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	sprintf(tmppath, "%s/state.tmp", dir);
 	sprintf(path, "%s/state", dir);
 
-	file = FileOpen(tmppath, O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
-	if (file < 0)
+	fd = OpenTransientFile(tmppath, O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
+	if (fd < 0)
 	{
 		/*
 		 * If not an ERROR, then release the lock before returning.  In case
@@ -1831,28 +1831,33 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	FIN_CRC32C(cp.checksum);
 
 	errno = 0;
-	if (FileWriteSeq(file, &cp, sizeof(cp), WAIT_EVENT_REPLICATION_SLOT_WRITE) != sizeof(cp))
+	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_WRITE);
+	if ((write(fd, &cp, sizeof(cp))) != sizeof(cp))
 	{
 		int			save_errno = errno;
 
-		FileClose(file);
+		pgstat_report_wait_end();
+		CloseTransientFile(fd);
 		LWLockRelease(&slot->io_in_progress_lock);
 
 		/* if write didn't set errno, assume problem is no disk space */
-		errno = save_errno;
+		errno = save_errno ? save_errno : ENOSPC;
 		ereport(elevel,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m",
 						tmppath)));
 		return;
 	}
+	pgstat_report_wait_end();
 
 	/* fsync the temporary file */
-	if (FileSync(file, WAIT_EVENT_REPLICATION_SLOT_SYNC) != 0)
+	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_SYNC);
+	if (pg_fsync(fd) != 0)
 	{
 		int			save_errno = errno;
 
-		FileClose(file);
+		pgstat_report_wait_end();
+		CloseTransientFile(fd);
 		LWLockRelease(&slot->io_in_progress_lock);
 		errno = save_errno;
 		ereport(elevel,
@@ -1861,8 +1866,9 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 						tmppath)));
 		return;
 	}
+	pgstat_report_wait_end();
 
-	if (FileClose(file) != 0)
+	if (CloseTransientFile(fd) != 0)
 	{
 		int			save_errno = errno;
 
@@ -1923,7 +1929,7 @@ RestoreSlotFromDisk(const char *name)
 	int			i;
 	char		slotdir[MAXPGPATH + 12];
 	char		path[MAXPGPATH + 22];
-	File		file;
+	int			fd;
 	bool		restored = false;
 	int			readBytes;
 	pg_crc32c	checksum;
@@ -1943,13 +1949,13 @@ RestoreSlotFromDisk(const char *name)
 	elog(DEBUG1, "restoring replication slot from \"%s\"", path);
 
 	/* on some operating systems fsyncing a file requires O_RDWR */
-	file = FileOpen(path, O_RDWR | PG_BINARY);
+	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
 
 	/*
 	 * We do not need to handle this as we are rename()ing the directory into
 	 * place only after we fsync()ed the state file.
 	 */
-	if (file < 0)
+	if (fd < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", path)));
@@ -1958,11 +1964,13 @@ RestoreSlotFromDisk(const char *name)
 	 * Sync state file before we're reading from it. We might have crashed
 	 * while it wasn't synced yet and we shouldn't continue on that basis.
 	 */
-	if (FileSync(file, WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC) != 0)
+	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC);
+	if (pg_fsync(fd) != 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m",
 						path)));
+	pgstat_report_wait_end();
 
 	/* Also sync the parent directory */
 	START_CRIT_SECTION();
@@ -1970,7 +1978,9 @@ RestoreSlotFromDisk(const char *name)
 	END_CRIT_SECTION();
 
 	/* read part of statefile that's guaranteed to be version independent */
-	readBytes = FileReadSeq(file, &cp, ReplicationSlotOnDiskConstantSize, WAIT_EVENT_REPLICATION_SLOT_READ);
+	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_READ);
+	readBytes = read(fd, &cp, ReplicationSlotOnDiskConstantSize);
+	pgstat_report_wait_end();
 	if (readBytes != ReplicationSlotOnDiskConstantSize)
 	{
 		if (readBytes < 0)
@@ -2007,10 +2017,11 @@ RestoreSlotFromDisk(const char *name)
 						path, cp.length)));
 
 	/* Now that we know the size, read the entire file */
-	readBytes = FileReadSeq(file,
+	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_READ);
+	readBytes = read(fd,
 					 (char *) &cp + ReplicationSlotOnDiskConstantSize,
-					 cp.length,
-					 WAIT_EVENT_REPLICATION_SLOT_READ);
+					 cp.length);
+	pgstat_report_wait_end();
 	if (readBytes != cp.length)
 	{
 		if (readBytes < 0)
@@ -2024,7 +2035,7 @@ RestoreSlotFromDisk(const char *name)
 							path, readBytes, (Size) cp.length)));
 	}
 
-	if (FileClose(file) != 0)
+	if (CloseTransientFile(fd) != 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", path)));

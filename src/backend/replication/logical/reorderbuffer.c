@@ -131,13 +131,21 @@ typedef struct ReorderBufferTupleCidEnt
 	CommandId	combocid;		/* just for debugging */
 } ReorderBufferTupleCidEnt;
 
+/* Virtual file descriptor with file offset tracking */
+typedef struct TXNEntryFile
+{
+	File		vfd;			/* -1 when the file is closed */
+	off_t		curOffset;		/* offset for next write or read. Reset to 0
+								 * when vfd is opened. */
+} TXNEntryFile;
+
 /* k-way in-order change iteration support structures */
 typedef struct ReorderBufferIterTXNEntry
 {
 	XLogRecPtr	lsn;
 	ReorderBufferChange *change;
 	ReorderBufferTXN *txn;
-	File file;
+	TXNEntryFile file;
 	XLogSegNo	segno;
 } ReorderBufferIterTXNEntry;
 
@@ -241,9 +249,9 @@ static void ReorderBufferExecuteInvalidations(uint32 nmsgs, SharedInvalidationMe
 static void ReorderBufferCheckMemoryLimit(ReorderBuffer *rb);
 static void ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn);
 static void ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
-										 int file, ReorderBufferChange *change);
+										 int fd, ReorderBufferChange *change);
 static Size ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
-										File *fileP, XLogSegNo *segno);
+										TXNEntryFile *file, XLogSegNo *segno);
 static void ReorderBufferRestoreChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 									   char *data);
 static void ReorderBufferRestoreCleanup(ReorderBuffer *rb, ReorderBufferTXN *txn);
@@ -1283,7 +1291,7 @@ ReorderBufferIterTXNInit(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 	for (off = 0; off < state->nr_txns; off++)
 	{
-		state->entries[off].file = -1;
+		state->entries[off].file.vfd = -1;
 		state->entries[off].segno = 0;
 	}
 
@@ -1465,8 +1473,8 @@ ReorderBufferIterTXNFinish(ReorderBuffer *rb,
 
 	for (off = 0; off < state->nr_txns; off++)
 	{
-		if (state->entries[off].file != -1)
-			FileClose(state->entries[off].file);
+		if (state->entries[off].file.vfd != -1)
+			FileClose(state->entries[off].file.vfd);
 	}
 
 	/* free memory we might have "leaked" in the last *Next call */
@@ -3643,7 +3651,7 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 {
 	dlist_iter	subtxn_i;
 	dlist_mutable_iter change_i;
-	File		file = -1;
+	int			fd = -1;
 	XLogSegNo	curOpenSegNo = 0;
 	Size		spilled = 0;
 	Size		size = txn->size;
@@ -3671,13 +3679,13 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 		 * store in segment in which it belongs by start lsn, don't split over
 		 * multiple segments tho
 		 */
-		if (file == -1 ||
+		if (fd == -1 ||
 			!XLByteInSeg(change->lsn, curOpenSegNo, wal_segment_size))
 		{
 			char		path[MAXPGPATH];
 
-			if (file != -1)
-				FileClose(file);
+			if (fd != -1)
+				CloseTransientFile(fd);
 
 			XLByteToSeg(change->lsn, curOpenSegNo, wal_segment_size);
 
@@ -3688,18 +3696,17 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 			ReorderBufferSerializedPath(path, MyReplicationSlot, txn->xid,
 										curOpenSegNo);
 
-			/*
-			 * open segment, create it if necessary.
-			 * Note we do not have a resource owner, so we must delete it explicitly.
-			 */
-			file = FileOpen(path, O_CREAT | O_WRONLY | O_APPEND | PG_BINARY);
-			if (file < 0)
+			/* open segment, create it if necessary */
+			fd = OpenTransientFile(path,
+								   O_CREAT | O_WRONLY | O_APPEND | PG_BINARY);
+
+			if (fd < 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not open file \"%s\": %m", path)));
 		}
 
-		ReorderBufferSerializeChange(rb, txn, file, change);
+		ReorderBufferSerializeChange(rb, txn, fd, change);
 		dlist_delete(&change->node);
 		ReorderBufferReturnChange(rb, change, true);
 
@@ -3724,8 +3731,8 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 	txn->nentries_mem = 0;
 	txn->txn_flags |= RBTXN_IS_SERIALIZED;
 
-	if (file != -1)
-		FileClose(file);
+	if (fd != -1)
+		CloseTransientFile(fd);
 }
 
 /*
@@ -3733,7 +3740,7 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
  */
 static void
 ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
-							 File file, ReorderBufferChange *change)
+							 int fd, ReorderBufferChange *change)
 {
 	ReorderBufferDiskChange *ondisk;
 	Size		sz = sizeof(ReorderBufferDiskChange);
@@ -3915,11 +3922,12 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 	ondisk->size = sz;
 
 	errno = 0;
-	if (FileWriteSeq(file, rb->outbuf, ondisk->size, WAIT_EVENT_REORDER_BUFFER_WRITE) != ondisk->size)
+	pgstat_report_wait_start(WAIT_EVENT_REORDER_BUFFER_WRITE);
+	if (write(fd, rb->outbuf, ondisk->size) != ondisk->size)
 	{
 		int			save_errno = errno;
 
-		FileClose(file);
+		CloseTransientFile(fd);
 
 		/* if write didn't set errno, assume problem is no disk space */
 		errno = save_errno ? save_errno : ENOSPC;
@@ -3928,6 +3936,7 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				 errmsg("could not write to data file for XID %u: %m",
 						txn->xid)));
 	}
+	pgstat_report_wait_end();
 
 	/*
 	 * Keep the transaction's final_lsn up to date with each change we send to
@@ -4183,11 +4192,12 @@ ReorderBufferChangeSize(ReorderBufferChange *change)
  */
 static Size
 ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
-							File *fileP, XLogSegNo *segno)
+							TXNEntryFile *file, XLogSegNo *segno)
 {
 	Size		restored = 0;
 	XLogSegNo	last_segno;
 	dlist_mutable_iter cleanup_iter;
+	File	   *fd = &file->vfd;
 
 	Assert(txn->first_lsn != InvalidXLogRecPtr);
 	Assert(txn->final_lsn != InvalidXLogRecPtr);
@@ -4213,7 +4223,7 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 		CHECK_FOR_INTERRUPTS();
 
-		if (*fileP == -1)
+		if (*fd == -1)
 		{
 			char		path[MAXPGPATH];
 
@@ -4230,15 +4240,18 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 			ReorderBufferSerializedPath(path, MyReplicationSlot, txn->xid,
 										*segno);
 
-			*fileP = FileOpen(path, O_RDONLY | PG_BINARY);
+			*fd = PathNameOpenFile(path, O_RDONLY | PG_BINARY);
 
-			if (*fileP < 0 && errno == ENOENT)
+			/* No harm in resetting the offset even in case of failure */
+			file->curOffset = 0;
+
+			if (*fd < 0 && errno == ENOENT)
 			{
-				*fileP = -1;
+				*fd = -1;
 				(*segno)++;
 				continue;
 			}
-			else if (*fileP < 0)
+			else if (*fd < 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not open file \"%s\": %m",
@@ -4251,15 +4264,15 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		 * end of this file.
 		 */
 		ReorderBufferSerializeReserve(rb, sizeof(ReorderBufferDiskChange));
-		readBytes = FileReadSeq(*fileP, rb->outbuf,
-								sizeof(ReorderBufferDiskChange),
-								WAIT_EVENT_REORDER_BUFFER_READ);
+		readBytes = FileRead(file->vfd, rb->outbuf,
+							 sizeof(ReorderBufferDiskChange),
+							 file->curOffset, WAIT_EVENT_REORDER_BUFFER_READ);
 
 		/* eof */
 		if (readBytes == 0)
 		{
-			FileClose(*fileP);
-			*fileP = -1;
+			FileClose(*fd);
+			*fd = -1;
 			(*segno)++;
 			continue;
 		}
@@ -4274,15 +4287,18 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 							readBytes,
 							(uint32) sizeof(ReorderBufferDiskChange))));
 
+		file->curOffset += readBytes;
+
 		ondisk = (ReorderBufferDiskChange *) rb->outbuf;
 
 		ReorderBufferSerializeReserve(rb,
 									  sizeof(ReorderBufferDiskChange) + ondisk->size);
 		ondisk = (ReorderBufferDiskChange *) rb->outbuf;
 
-		readBytes = FileReadSeq(*fileP,
+		readBytes = FileRead(file->vfd,
 							 rb->outbuf + sizeof(ReorderBufferDiskChange),
 							 ondisk->size - sizeof(ReorderBufferDiskChange),
+							 file->curOffset,
 							 WAIT_EVENT_REORDER_BUFFER_READ);
 
 		if (readBytes < 0)
@@ -4295,6 +4311,8 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 					 errmsg("could not read from reorderbuffer spill file: read %d instead of %u bytes",
 							readBytes,
 							(uint32) (ondisk->size - sizeof(ReorderBufferDiskChange)))));
+
+		file->curOffset += readBytes;
 
 		/*
 		 * ok, read a full change from disk, now restore it into proper
@@ -5000,13 +5018,13 @@ static void
 ApplyLogicalMappingFile(HTAB *tuplecid_data, Oid relid, const char *fname)
 {
 	char		path[MAXPGPATH];
-	File		file;
+	int			fd;
 	int			readBytes;
 	LogicalRewriteMappingData map;
 
 	sprintf(path, "pg_logical/mappings/%s", fname);
-	file = FileOpen(path, O_RDONLY | PG_BINARY);
-	if (file < 0)
+	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", path)));
@@ -5022,7 +5040,9 @@ ApplyLogicalMappingFile(HTAB *tuplecid_data, Oid relid, const char *fname)
 		memset(&key, 0, sizeof(ReorderBufferTupleCidKey));
 
 		/* read all mappings till the end of the file */
-		readBytes = FileReadSeq(file, &map, sizeof(LogicalRewriteMappingData), WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ);
+		pgstat_report_wait_start(WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ);
+		readBytes = read(fd, &map, sizeof(LogicalRewriteMappingData));
+		pgstat_report_wait_end();
 
 		if (readBytes < 0)
 			ereport(ERROR,
@@ -5076,7 +5096,10 @@ ApplyLogicalMappingFile(HTAB *tuplecid_data, Oid relid, const char *fname)
 		}
 	}
 
-	FileClose(file);
+	if (CloseTransientFile(fd) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not close file \"%s\": %m", path)));
 }
 
 

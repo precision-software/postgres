@@ -1107,7 +1107,7 @@ void
 heap_xlog_logical_rewrite(XLogReaderState *r)
 {
 	char		path[MAXPGPATH];
-	File		file;
+	int			fd;
 	xl_heap_rewrite_mapping *xlrec;
 	uint32		len;
 	char	   *data;
@@ -1120,9 +1120,9 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
 			 LSN_FORMAT_ARGS(xlrec->start_lsn),
 			 xlrec->mapped_xid, XLogRecGetXid(r));
 
-	file = FileOpen(path,
+	fd = OpenTransientFile(path,
 						   O_CREAT | O_WRONLY | PG_BINARY);
-	if (file < 0)
+	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create file \"%s\": %m", path)));
@@ -1131,33 +1131,48 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
 	 * Truncate all data that's not guaranteed to have been safely fsynced (by
 	 * previous record or by the last checkpoint).
 	 */
-	if (FileTruncate(file, xlrec->offset, WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE) != 0)
+	pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE);
+	if (ftruncate(fd, xlrec->offset) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not truncate file \"%s\" to %u: %m",
 						path, (uint32) xlrec->offset)));
+	pgstat_report_wait_end();
 
 	data = XLogRecGetData(r) + sizeof(*xlrec);
 
 	len = xlrec->num_mappings * sizeof(LogicalRewriteMappingData);
 
 	/* write out tail end of mapping file (again) */
-	if (FileWrite(file, data, len, xlrec->offset, WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE) != len)
+	errno = 0;
+	pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE);
+	if (pg_pwrite(fd, data, len, xlrec->offset) != len)
+	{
+		/* if write didn't set errno, assume problem is no disk space */
+		if (errno == 0)
+			errno = ENOSPC;
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", path)));
+	}
+	pgstat_report_wait_end();
 
 	/*
 	 * Now fsync all previously written data. We could improve things and only
 	 * do this for the last write to a file, but the required bookkeeping
 	 * doesn't seem worth the trouble.
 	 */
-	if (FileSync(file, WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC) != 0)
+	pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC);
+	if (pg_fsync(fd) != 0)
 		ereport(data_sync_elevel(ERROR),
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", path)));
+	pgstat_report_wait_end();
 
-	FileClose(file);
+	if (CloseTransientFile(fd) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not close file \"%s\": %m", path)));
 }
 
 /* ---
@@ -1234,23 +1249,39 @@ CheckPointLogicalRewriteHeap(void)
 		}
 		else
 		{
+			/* on some operating systems fsyncing a file requires O_RDWR */
+			int			fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
+
 			/*
 			 * The file cannot vanish due to concurrency since this function
 			 * is the only one removing logical mappings and only one
 			 * checkpoint can be in progress at a time.
-			 * We could try to avoid syncing files that either haven't
+			 */
+			if (fd < 0)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not open file \"%s\": %m", path)));
+
+			/*
+			 * We could try to avoid fsyncing files that either haven't
 			 * changed or have only been created since the checkpoint's start,
 			 * but it's currently not deemed worth the effort.
 			 */
-			if (PathNameFileSync(path, WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC) < 0)
+			pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC);
+			if (pg_fsync(fd) != 0)
 				ereport(data_sync_elevel(ERROR),
 						(errcode_for_file_access(),
-							errmsg("could not fsync file \"%s\": %m", path)));
+						 errmsg("could not fsync file \"%s\": %m", path)));
+			pgstat_report_wait_end();
+
+			if (CloseTransientFile(fd) != 0)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not close file \"%s\": %m", path)));
 		}
 	}
-
-
-	/* Delete the directory and persist the directory changes */
 	FreeDir(mappings_dir);
+
+	/* persist directory entries to disk */
 	fsync_fname("pg_logical/mappings", true);
 }

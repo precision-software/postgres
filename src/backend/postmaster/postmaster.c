@@ -1364,12 +1364,12 @@ PostmasterMain(int argc, char *argv[])
 	 */
 	if (external_pid_file)
 	{
-		File	   fpidfile = FileOpen(external_pid_file, O_WRONLY|O_CREAT|O_TRUNC);
+		FILE	   *fpidfile = fopen(external_pid_file, "w");
 
-		if (fpidfile >= 0)
+		if (fpidfile)
 		{
-			FilePrintf(fpidfile, "%d\n", MyProcPid);
-			FileClose(fpidfile);
+			fprintf(fpidfile, "%d\n", MyProcPid);
+			fclose(fpidfile);
 
 			/* Make PID file world readable */
 			if (chmod(external_pid_file, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH) != 0)
@@ -1578,12 +1578,12 @@ static void
 checkControlFile(void)
 {
 	char		path[MAXPGPATH];
-	File	   file;
+	FILE	   *fp;
 
 	snprintf(path, sizeof(path), "%s/global/pg_control", DataDir);
 
-	file = FileOpen(path, O_RDONLY | PG_BINARY);
-	if (file < 0)
+	fp = AllocateFile(path, PG_BINARY_R);
+	if (fp == NULL)
 	{
 		write_stderr("%s: could not find the database system\n"
 					 "Expected to find it in the directory \"%s\",\n"
@@ -1591,7 +1591,7 @@ checkControlFile(void)
 					 progname, DataDir, path, strerror(errno));
 		ExitPostmaster(2);
 	}
-	FileClose(file);
+	FreeFile(fp);
 }
 
 /*
@@ -4488,7 +4488,7 @@ internal_forkexec(int argc, char *argv[], Port *port)
 	pid_t		pid;
 	char		tmpfilename[MAXPGPATH];
 	BackendParameters param;
-	File	   file;
+	FILE	   *fp;
 
 	if (!save_backend_variables(&param, port))
 		return -1;				/* log made by save_backend_variables */
@@ -4499,8 +4499,8 @@ internal_forkexec(int argc, char *argv[], Port *port)
 			 MyProcPid, ++tmpBackendFileNum);
 
 	/* Open file */
-	file  = FileOpen(tmpfilename, O_WRONLY|O_CREAT|O_TRUNC|PG_BINARY);
-	if (file < 0)
+	fp = AllocateFile(tmpfilename, PG_BINARY_W);
+	if (!fp)
 	{
 		/*
 		 * As in OpenTemporaryFileInTablespace, try to make the temp-file
@@ -4508,8 +4508,8 @@ internal_forkexec(int argc, char *argv[], Port *port)
 		 */
 		(void) MakePGDirectory(PG_TEMP_FILES_DIR);
 
-		file  = FileOpen(tmpfilename, O_WRONLY|O_CREAT|O_TRUNC|PG_BINARY);
-		if (file < 0)
+		fp = AllocateFile(tmpfilename, PG_BINARY_W);
+		if (!fp)
 		{
 			ereport(LOG,
 					(errcode_for_file_access(),
@@ -4519,17 +4519,17 @@ internal_forkexec(int argc, char *argv[], Port *port)
 		}
 	}
 
-	if (FileWriteSeq(file, &param, sizeof(param), 0) != 1)
+	if (fwrite(&param, sizeof(param), 1, fp) != 1)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", tmpfilename)));
-		FileClose(file);
+		FreeFile(fp);
 		return -1;
 	}
 
 	/* Release file */
-	if (FileClose(file))
+	if (FreeFile(fp))
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -5507,13 +5507,12 @@ MaybeStartWalReceiver(void)
 static bool
 CreateOptsFile(int argc, char *argv[], char *fullprogname)
 {
-	File	   file;
+	FILE	   *fp;
 	int			i;
 
 #define OPTS_FILE	"postmaster.opts"
 
-	file = FileOpen(OPTS_FILE, O_WRONLY | O_CREAT | O_TRUNC);
-	if (file < 0)
+	if ((fp = fopen(OPTS_FILE, "w")) == NULL)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -5521,13 +5520,18 @@ CreateOptsFile(int argc, char *argv[], char *fullprogname)
 		return false;
 	}
 
-	FilePrintf(file, "%s", fullprogname);
+	fprintf(fp, "%s", fullprogname);
 	for (i = 1; i < argc; i++)
-		FilePrintf(file, " \"%s\"", argv[i]);
-	FilePuts(file, "\n");
+		fprintf(fp, " \"%s\"", argv[i]);
+	fputs("\n", fp);
 
-	if (FileClose(file))
+	if (fclose(fp))
+	{
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg("could not write file \"%s\": %m", OPTS_FILE)));
 		return false;
+	}
 
 	return true;
 }
@@ -6196,18 +6200,18 @@ read_backend_variables(char *id, Port *port)
 
 #ifndef WIN32
 	/* Non-win32 implementation reads from file */
-	File	   file;
+	FILE	   *fp;
 
 	/* Open file */
-	file = FileOpen(id, O_RDONLY|PG_BINARY);
-	if (file < 0)
+	fp = AllocateFile(id, PG_BINARY_R);
+	if (!fp)
 	{
 		write_stderr("could not open backend variables file \"%s\": %s\n",
 					 id, strerror(errno));
 		exit(1);
 	}
 
-	if (FileReadSeq(file, &param, sizeof(param), 0 != 1)
+	if (fread(&param, sizeof(param), 1, fp) != 1)
 	{
 		write_stderr("could not read from backend variables file \"%s\": %s\n",
 					 id, strerror(errno));
@@ -6215,7 +6219,7 @@ read_backend_variables(char *id, Port *port)
 	}
 
 	/* Release file */
-	FileClose(file);
+	FreeFile(fp);
 	if (unlink(id) != 0)
 	{
 		write_stderr("could not remove file \"%s\": %s\n",
