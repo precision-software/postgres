@@ -2321,12 +2321,15 @@ FileSync_Internal(File file)
  *
  * Returns 0 on success, -1 otherwise. In the latter case errno is set to the
  * appropriate error.
+ *
+ * TODO: optimize?
  */
 int
 FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
 {
-	int			returnCode;
 	ssize_t		written;
+	ssize_t		actual;
+	char        zeros[16*1024] = {0}; // TODO: base on blockSize instead.
 	file_debug("file=%d offset=%lld amount=%lld", file, offset, amount);
 
 	Assert(FileIsValid(file));
@@ -2335,22 +2338,14 @@ FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
 			   file, VfdCache[file].fileName,
 			   (int64) offset, (int64) amount));
 
-	returnCode = FileAccess(file);
-	if (returnCode < 0)
-		return returnCode;
-
-	pgstat_report_wait_start(wait_event_info);
-	written = pg_pwrite_zeros(VfdCache[file].fd, amount, offset);
-	pgstat_report_wait_end();
-
-	if (written < 0)
+	if (FileSeek(file, offset) < 0)
 		return -1;
-	else if (written != amount)
+
+	for (written = 0; written < amount; written += actual)
 	{
-		/* if errno is unset, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
-		return -1;
+		actual = FileWriteSeq(file, zeros, MIN(sizeof(zeros), amount-written), wait_event_info);
+		if (actual < 0)
+			return -1;
 	}
 
 	return 0;
@@ -2372,40 +2367,6 @@ int
 FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info)
 {
 	file_debug("file=%d offset=%lld amount=%lld name=%s", file, offset, amount, FilePathName(file));
-#ifdef HAVE_POSIX_FALLOCATE
-	int			returnCode;
-
-	Assert(FileIsValid(file));
-
-	DO_DB(elog(LOG, "FileFallocate: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
-			   file, VfdCache[file].fileName,
-			   (int64) offset, (int64) amount));
-
-	returnCode = FileAccess(file);
-	if (returnCode < 0)
-		return -1;
-
-retry:
-	pgstat_report_wait_start(wait_event_info);
-	returnCode = posix_fallocate(VfdCache[file].fd, offset, amount);
-	pgstat_report_wait_end();
-
-	if (returnCode == 0)
-		return 0;
-	else if (returnCode == EINTR)
-		goto retry;
-
-	/* for compatibility with %m printing etc */
-	errno = returnCode;
-
-	/*
-	 * Return in cases of a "real" failure, if fallocate is not supported,
-	 * fall through to the FileZero() backed implementation.
-	 */
-	if (returnCode != EINVAL && returnCode != EOPNOTSUPP)
-		return -1;
-#endif
-
 	return FileZero(file, offset, amount, wait_event_info);
 }
 
