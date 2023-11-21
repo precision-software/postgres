@@ -54,8 +54,8 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, mode_t
 	stackCheckError(this, this->file, "Unable to open vfd file %s", path);
 
 	/* We are byte oriented and can support all block sizes TODO allow blockSize to support O_DIRECT */
-	thisStack(this)->blockSize = 1;
-	thisStack(this)->openVal = this->file;
+	this->ioStack.blockSize = 1;
+	this->ioStack.openVal = this->file;
 
 	/* Always return a new I/O stack structure. It contains error info if problems occurred. */
 	file_debug("(done): file=%d  name=%s oflags=0x%x  mode=0x%x", this->file, path, oflags, mode);
@@ -156,7 +156,7 @@ IoStackInterface vfdInterface = (IoStackInterface)
  */
 void *vfdStackNew()
 {
-	VfdBottom *this = malloc(sizeof(VfdBottom));
+	VfdBottom *this = stackAlloc(sizeof(VfdBottom));
 	*this = (VfdBottom)
 		{
 			.file = -1,

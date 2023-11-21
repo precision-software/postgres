@@ -14,8 +14,6 @@
 #include <assert.h>
 #include "storage/iostack_internal.h"
 
-#define palloc malloc
-
 /**
  * Structure containing the state of the stream, including its buffer.
  */
@@ -27,11 +25,11 @@ struct Buffered
     ssize_t suggestedSize;   /* The suggested buffer size. We may make it a bit bigger */
 
     Byte *buf;             /* Local buffer, precisely one block in size. */
-	size_t blockSize;        /* the size of the local buffer. */
+	size_t bufferSize;     /* the size of the local buffer. */
     bool dirty;            /* Does the buffer contain dirty data? */
 
     off_t currentBlock;     /* File position of the beginning of the buffer */
-    ssize_t currentSize;      /* Nr of actual bytes in the buffer */
+    ssize_t currentSize;    /* Nr of actual bytes in the buffer */
 
     off_t fileSize;        /* Highest byte position we've seen so far for the file. */
     bool sizeConfirmed;    /* fileSize is confirmed as actual file size. */
@@ -89,13 +87,13 @@ static Buffered *bufferedOpen(Buffered *proto, const char *path, int oflags, mod
 	this->sizeConfirmed = (oflags & O_TRUNC) != 0;
 
 	/* Peek ahead and choose a buffer size which is a multiple of our successor's block size */
-	this->blockSize = ROUNDUP(this->suggestedSize, nextStack(this)->blockSize);
-    this->buf = malloc(this->blockSize);
+	this->bufferSize = ROUNDUP(this->suggestedSize, this->ioStack.next->blockSize);
+    this->buf = stackAlloc(this->bufferSize);
 
 	/* Close our successor if we couldn't allocate memory */
 	if (this->buf == NULL)
 	{
-		stackCheckError(this, -1, "bufferedOpen failed to allocate %z bytes", this->blockSize);
+		stackSetError(this, -1, "bufferedOpen failed to allocate %z bytes", this->bufferSize);
 		return bufferedCleanup(this);
 	}
 
@@ -118,7 +116,7 @@ static ssize_t bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t
 		return -1;
 
     /* If buffer is empty, offset is aligned, and the data exceeds block size, write directly to next stage */
-    if (this->currentSize == 0 && offset == this->currentBlock && size >= this->blockSize)
+    if (this->currentSize == 0 && offset == this->currentBlock && size >= this->bufferSize)
         return directWrite(this, buf, size, offset);
 
     /* Fill the buffer if it is empty ... */
@@ -148,7 +146,7 @@ static ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t o
 	file_debug("directWrite: size=%zd offset=%lld", size, offset);
 
     /* Write out multiple blocks, but no partials */
-    alignedSize = ROUNDDOWN(size, this->blockSize);
+    alignedSize = ROUNDDOWN(size, this->bufferSize);
     actual = stackWrite(nextStack(this), buf, alignedSize, offset);
 	if (actual < 0)
 		return copyNextError(this, actual);
@@ -174,7 +172,7 @@ static ssize_t bufferedRead(Buffered *this, Byte *buf, size_t size, off_t offset
 		return -1;
 
 	/* If buffer is empty, offset is aligned, and the data exceeds block size, write directly to next stage */
-	if (this->currentSize == 0 && offset == this->currentBlock && size >= this->blockSize)
+	if (this->currentSize == 0 && offset == this->currentBlock && size >= this->bufferSize)
 		return directRead(this, buf, size, offset);
 
 	/* Fill the buffer if it is empty */
@@ -196,7 +194,7 @@ static ssize_t directRead(Buffered *this, Byte *buf, size_t size, off_t offset)
 	file_debug("directRead: size=%zd offset=%lld", size, offset);
 
 	/* Read multiple blocks, last one might be partial */
-	alignedSize = ROUNDDOWN(size, this->blockSize);
+	alignedSize = ROUNDDOWN(size, this->bufferSize);
 	actual = stackRead(nextStack(this), buf, alignedSize, offset);
 	if (actual < 0)
 		return copyNextError(this, -1);
@@ -215,7 +213,7 @@ static ssize_t directRead(Buffered *this, Byte *buf, size_t size, off_t offset)
 static bool positionToBuffer(Buffered *this, off_t position)
 {
     /* Do nothing if we are already position at the proper block */
-    off_t newBlock = ROUNDDOWN(position, this->blockSize);
+    off_t newBlock = ROUNDDOWN(position, this->bufferSize);
     file_debug("positionToBuffer: position=%lld  newBlock=%lld bufPosition=%lld", position, newBlock, this->currentBlock);
     if (newBlock == this->currentBlock)
 	    return true;
@@ -329,7 +327,7 @@ IoStackInterface bufferedInterface = (IoStackInterface)
  */
 void *bufferedNew(ssize_t suggestedSize, void *next)
 {
-    Buffered *this = malloc(sizeof(Buffered));
+    Buffered *this = stackAlloc(sizeof(Buffered));
     *this = (Buffered)
 		{
 		.suggestedSize = (suggestedSize == 0)? 16*1024: suggestedSize,
@@ -351,7 +349,7 @@ void *bufferedNew(ssize_t suggestedSize, void *next)
 static bool flushBuffer(Buffered *this)
 {
     file_debug("flushBuffer: bufPosition=%lld  bufActual=%zd  dirty=%d", this->currentBlock, this->currentSize, this->dirty);
-	Assert(this->currentBlock % this->blockSize == 0);
+	Assert(this->currentBlock % this->bufferSize == 0);
 
     /* Clean the buffer if dirty */
 	if (this->dirty)
@@ -374,7 +372,7 @@ static bool fillBuffer(Buffered *this)
 {
 	file_debug("fillBuffer: bufActual=%zd  bufPosition=%lld sizeConfirmed=%d  fileSize=%lld",
 		  this->currentSize, this->currentBlock, this->sizeConfirmed, this->fileSize);
-	assert(this->currentBlock % this->blockSize == 0);
+	assert(this->currentBlock % this->bufferSize == 0);
 
 	/* Don't fill in if it is already filled in */
 	if (this->currentSize > 0)
@@ -393,12 +391,12 @@ static bool fillBuffer(Buffered *this)
 		return stackSetError(this, -1, "buffereedStack: creating holes (offset=%lld, fileSize=%lld", this->currentBlock, this->fileSize);
 
 	/* Read in the current buffer */
-	this->currentSize = stackReadAll(nextStack(this), this->buf, this->blockSize, this->currentBlock);
+	this->currentSize = stackReadAll(nextStack(this), this->buf, this->bufferSize, this->currentBlock);
 	if (this->currentSize < 0)
 		return copyNextError(this, false);
 
 	/* if EOF or partial read, update the known file size */
-	this->sizeConfirmed |= (this->currentSize < this->blockSize);
+	this->sizeConfirmed |= (this->currentSize < this->bufferSize);
 	this->fileSize = MAX(this->fileSize, this->currentBlock + this->currentSize);
 
 	return true;
@@ -411,7 +409,7 @@ static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t positi
 	ssize_t actual;
 
 	file_debug("copyIn: position=%lld  size=%zd bufPosition=%lld bufActual=%zd", position, size, this->currentBlock, this->currentSize);
-	assert(this->currentBlock == ROUNDDOWN(position, this->blockSize));
+	assert(this->currentBlock == ROUNDDOWN(position, this->bufferSize));
 
 	if (this->currentSize == -1)
 		return -1;
@@ -422,7 +420,7 @@ static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t positi
 
 	/* Copy bytes into the buffer, up to end of data or end of buffer */
 	offset = position - this->currentBlock;
-    actual = MIN(this->blockSize - offset, size);
+    actual = MIN(this->bufferSize - offset, size);
     memcpy(this->buf + offset, buf, actual);
 	this->dirty = true;
 
@@ -430,7 +428,7 @@ static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t positi
     this->currentSize = MAX(this->currentSize, actual + offset);
 	file_debug("copyin(end): actual=%zd  bufActual=%zd", actual, this->currentSize);
 
-    assert(this->currentSize <= this->blockSize);
+    assert(this->currentSize <= this->bufferSize);
     return actual;
 }
 
@@ -476,12 +474,12 @@ static Buffered *bufferedCleanup(Buffered *this)
 
 	/* Free the next layer if allocated */
 	if (next!= NULL)
-		free(next);
+		stackFree(next);
 	this->ioStack.next = NULL;
 
 	/* Free the buffer if allocated */
 	if (this->buf != NULL)
-		free(this->buf);
+		stackFree(this->buf);
 	this->buf = NULL;
 
 	return this;

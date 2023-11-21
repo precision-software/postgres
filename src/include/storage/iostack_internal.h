@@ -159,5 +159,9 @@ copyNextError(void *this, ssize_t retval)
 #define ROUNDDOWN(a,b) ( (a) / (b) * (b))
 #define ROUNDUP(a,b)    ROUNDDOWN(a + b - 1, b)
 
+/* Memory management. TODO: use top level palloc, pfree */
+static inline void *stackAlloc(size_t size) {return malloc(size);}
+static inline void stackFree(void *buf) {free(buf);}
+
 
 #endif /*FILTER_ERROR_H */

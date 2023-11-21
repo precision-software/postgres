@@ -48,7 +48,6 @@ selectIoStack(const char *path, int oflags, mode_t mode)
 	if (!ioStacksInitialized)
 		ioStackSetup();
 
-	return ioStackRaw;
 
 	/* TODO: create prototypes at beginning. Here, we just select them */
 	/* Look at oflags to determine which stack to use */
@@ -73,7 +72,6 @@ void ioStackSetup(void)
 	/* Set up the prototype stacks */
 	ioStackRaw = vfdStackNew();
 	ioStackPlain = bufferedNew(16*1024, vfdStackNew());
-	ioStackTest = NULL;
 
 #ifdef NOTYET
 	ioStackEncrypt = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen, vfdStackNew()));
@@ -119,7 +117,7 @@ ssize_t stackReadAll(IoStack *this, Byte *buf, size_t size, off_t offset)
 	for (total = 0; total < size; total += current)
 	{
 		/* if we read a partial block, then we are done */
-		if (total % thisStack(this)->blockSize != 0)
+		if (total % this->blockSize != 0)
 			break;
 
 		/* Do the next read. If eof or error, then done */

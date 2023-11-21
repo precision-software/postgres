@@ -99,11 +99,11 @@ bool fileCopySlice(IoStack *src, off_t srcOffset, size_t size, IoStack *dest, of
 	file_debug("fileCopySlice: srcOffset=%lld  destOffsset=%lld size=%zd\n", srcOffset, destOffset, size);
 
 	/* Pick a compatible buffer size for the copy. */
-	Assert(src->blockSize % dest->blockSize == 0 || dest->blockSize % src->blockSize == 0);
-	size_t bufSize = MAX(src->blockSize, dest->blockSize);  /* Bigger than src or dest block sizes */
+	Assert(src->bufferSize % dest->bufferSize == 0 || dest->bufferSize % src->bufferSize == 0);
+	size_t bufSize = MAX(src->bufferSize, dest->bufferSize);  /* Bigger than src or dest block sizes */
 	bufSize = ROUNDUP(64*1024, bufSize);                    /* Big enough for efficient copies */
 	bufSize = MAX(size, bufSize);                           /* No point in being bigger than the total copy */
-	Byte *buf = malloc(bufSize);
+	Byte *buf = stackAlloc(bufSize);
 
 	stackClearError(src);
 	stackClearError(dest);
@@ -126,7 +126,7 @@ bool fileCopySlice(IoStack *src, off_t srcOffset, size_t size, IoStack *dest, of
 	}
 
 	/* Free the buffer we allocated earlier */
-	free(buf);
+	stackFree(buf);
 
 	/* Check for early EOF */
 	if (total < size && actual == 0)
@@ -217,19 +217,19 @@ Lz4Compress *lz4CompressOpen(Lz4Compress *proto, const char *path, int oflags, i
 	}
 
 	/* Tell our caller which block size we are using. */
-	this->ioStack.blockSize = this->blockSize = this->defaultBlockSize;
+	this->ioStack.bufferSize = this->blockSize = this->defaultBlockSize;
 
 	/* Verify the data and index files have compatible block sizes */
-	if (next->blockSize != 1 || sizeof(off_t) % this->indexFile->blockSize != 0)
+	if (next->bufferSize != 1 || sizeof(off_t) % this->indexFile->bufferSize != 0)
 	{
-		stackSetError(this, -1, "Compression block size conflict: next=%zd index=%zd\n", next->blockSize, this->indexFile->blockSize);
+		stackSetError(this, -1, "Compression block size conflict: next=%zd index=%zd\n", next->bufferSize, this->indexFile->bufferSize);
 		return lz4Cleanup(this);
 	}
 
 	/* Allocate buffers */
 	this->maxCompressed = maxCompressedSize(this->blockSize);
-	this->compressedBuf = malloc(this->maxCompressed);
-	this->tempBuf = malloc(this->blockSize);
+	this->compressedBuf = stackAlloc(this->maxCompressed);
+	this->tempBuf = stackAlloc(this->blockSize);
 	if (this->compressedBuf == NULL || this->tempBuf == NULL)
 	{
 		stackCheckError(this, -1, "Unable to allocate compressed buffer of size %zd", this->maxCompressed);
@@ -478,7 +478,7 @@ IoStackInterface lz4CompressInterface = (IoStackInterface) {
  */
 void *lz4CompressNew(size_t blockSize, void *indexFile, void *next)
 {
-    Lz4Compress *this = malloc(sizeof(Lz4Compress));
+    Lz4Compress *this = stackAlloc(sizeof(Lz4Compress));
     *this = (Lz4Compress){
 		.ioStack = (IoStack){.next=next, .iface = &lz4CompressInterface, .blockSize = blockSize,},
 		.defaultBlockSize = blockSize,
@@ -581,18 +581,18 @@ static Lz4Compress *lz4Cleanup(Lz4Compress *this)
 
 	/* Free the compressed and index layers if allocated */
 	if (next != NULL)
-		free(next);
+		stackFree(next);
 	this->ioStack.next = NULL;
 	if (index != NULL)
-		free(index);
+		stackFree(index);
 	this->indexFile = NULL;
 
 	/* Free the buffers if allocated */
 	if (this->compressedBuf != NULL)
-		free(this->compressedBuf);
+		stackFree(this->compressedBuf);
 	this->compressedBuf = NULL;
 	if (this->tempBuf != NULL)
-		free(this->tempBuf);
+		stackFree(this->tempBuf);
 	this->tempBuf = NULL;
 
 	/* Make note we are fully closed */
