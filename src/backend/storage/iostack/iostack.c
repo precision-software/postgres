@@ -48,8 +48,6 @@ selectIoStack(const char *path, int oflags, mode_t mode)
 	if (!ioStacksInitialized)
 		ioStackSetup();
 
-	return ioStackRaw;
-
 	/* TODO: create prototypes at beginning. Here, we just select them */
 	/* Look at oflags to determine which stack to use */
 	switch (oflags & PG_STACK_MASK)
@@ -73,7 +71,6 @@ void ioStackSetup(void)
 	/* Set up the prototype stacks */
 	ioStackRaw = vfdStackNew();
 	ioStackPlain = bufferedNew(16*1024, vfdStackNew());
-	ioStackTest = NULL;
 
 #ifdef NOTYET
 	ioStackEncrypt = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen, vfdStackNew()));
