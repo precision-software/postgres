@@ -376,6 +376,16 @@ static const ResourceOwnerDesc file_resowner_desc =
 	.DebugPrint = ResOwnerPrintFile
 };
 
+/*
+ * Is the file a temp file? (close at end of transaction)
+ */
+inline static bool
+isTemp(File file)
+{
+	Assert(FileIsValid(file));
+	return ((getVfd(file)->fileFlags & FD_CLOSE_AT_EOXACT) != 0);
+}
+
 /* Convenience wrappers over ResourceOwnerRemember/Forget */
 static inline void
 ResourceOwnerRememberFile(ResourceOwner owner, File file)
@@ -889,7 +899,7 @@ durable_unlink(const char *fname, int elevel)
 void
 InitFileAccess(void)
 {
-	//Assert(SizeVfdCache == 0);	/* TODO: call me only once */
+	Assert(SizeVfdCache == 0);
 
 	/* initialize cache header entry */
 	VfdCache = (Vfd *) malloc(sizeof(Vfd));
@@ -1096,7 +1106,6 @@ int
 BasicOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	int			fd;
-	file_debug("fileName=%s flags=0x%x", fileName, fileFlags);
 
 tryAgain:
 #ifdef PG_O_DIRECT_USE_F_NOCACHE
@@ -1121,7 +1130,7 @@ tryAgain:
 #else
 	fd = open(fileName, fileFlags, fileMode);
 #endif
-
+	file_debug("fileName=%s flags=0x%x  fd=%d  errno=%d", fileName, fileFlags, fd, errno);
 	if (fd >= 0)
 	{
 #ifdef PG_O_DIRECT_USE_F_NOCACHE
@@ -2093,6 +2102,7 @@ FileClose_Internal(File file)
 int
 FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info)
 {
+	file_debug("file=%d offset=%lld amount=%lld name=%s", file, offset, amount, FilePathName(file));
 #if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
 	int			returnCode;
 
@@ -2155,6 +2165,7 @@ FileRead_Internal(File file, void *buffer, size_t amount, off_t offset)
 	int			returnCode;
 	Vfd		   *vfdP;
 
+	file_debug("file=%d amount=%zd offset=%lld", file, amount, offset);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileRead_Internal: %d (%s) " INT64_FORMAT " %zu %p",
@@ -2207,6 +2218,7 @@ FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset)
 	int			returnCode;
 	Vfd		   *vfdP;
 
+	file_debug("file=%d amount=%zd offset=%lld", file, amount, offset);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileWrite_Internal: %d (%s) " INT64_FORMAT " %zu %p",
@@ -3180,58 +3192,49 @@ BeforeShmemExit_Files(int code, Datum arg)
 }
 
 /*
- * Close temporary files and delete their underlying files.
+ * Close sll temporary files ot EOXACT, and all files at exit.
  *
  * isCommit: if true, this is normal transaction commit, and we don't
  * expect any remaining files; warn if there are some.
  *
  * isProcExit: if true, this is being called as the backend process is
- * exiting. If that's the case, we should remove all temporary files; if
+ * exiting. If that's the case, we should close all temporary files; if
  * that's not the case, we are being called for transaction commit/abort
- * and should only remove transaction-local temp files.  In either case,
+ * and should only close transaction-local temp files.  In either case,
  * also clean up "allocated" stdio files, dirs and fds.
+ *
+ * Note that temporary files usually have the delete flag set,
+ * so they will be removed when closed.
  */
 static void
 CleanupTempFiles(bool isCommit, bool isProcExit)
 {
-	Index		i;
+	Index		file;
 	file_debug("isCommit=%d  isProcExit=%d", isCommit, isProcExit);
 
-	/*
-	 * Careful here: at proc_exit we need extra cleanup, not just
-	 * xact_temporary files.
-	 */
+	Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
+
+	/* If we might have files to close... */
 	if (isProcExit || have_xact_temporary_files)
 	{
-		Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
-		for (i = 1; i < SizeVfdCache; i++)
+		/* Do for each active file */
+		for (file = 1; file < SizeVfdCache; file++)
 		{
-			unsigned short fdstate = VfdCache[i].fdstate;
+			if (!FileIsValid(file))
+				continue;
 
-			if (((fdstate & FD_DELETE_AT_CLOSE) || (fdstate & FD_CLOSE_AT_EOXACT)) &&
-				VfdCache[i].fileName != NULL)
-			{
-				/*
-				 * If we're in the process of exiting a backend process, close
-				 * all temporary files. Otherwise, only close temporary files
-				 * local to the current transaction. They should be closed by
-				 * the ResourceOwner mechanism already, so this is just a
-				 * debugging cross-check.
-				 */
-				if (isProcExit)
-					FileClose(i);
-				else if (fdstate & FD_CLOSE_AT_EOXACT)
-				{
-					elog(WARNING,
-						 "temporary file %s not closed at end-of-transaction",
-						 VfdCache[i].fileName);
-					FileClose(i);
-				}
-			}
+			/* Give warning if temporary file was not closed at commit. */
+			if (isTemp(file) && isCommit)
+				elog(WARNING,
+					 "temporary file %s not closed at end-of-transaction",
+					 VfdCache[file].fileName);
+
+			/* If exiting, or at end of tempfile's transaction, close the file. */
+			if (isProcExit || isTemp(file))
+				FileClose(file);
 		}
-
-		have_xact_temporary_files = false;
 	}
+	have_xact_temporary_files = false;
 
 	/* Complain if any allocated files remain open at commit. */
 	if (isCommit && numAllocatedDescs > 0)
@@ -4343,7 +4346,10 @@ int FileClose(File file)
 	if (badFile(file))
 	    return -1;
 
-	/* Close the file.  The low level routine will invalidate the "file" index */
+	/*
+	 * Close the file. The low level routine will invalidate the "file" index
+	 * and delete the file if the delete_on_close flag was set.
+	 */
 	retval = stackClose(getStack(file));
 
 	/* No matter what, release the memory on Close */
