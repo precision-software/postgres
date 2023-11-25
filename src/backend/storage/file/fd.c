@@ -2333,37 +2333,40 @@ FileSync_Internal(File file)
  *
  * Returns 0 on success, -1 otherwise. In the latter case errno is set to the
  * appropriate error.
- *
- * TODO: optimize?
  */
 int
-FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
+FileZero_Internal(File file, off_t offset, off_t amount)
 {
+	int			returnCode;
 	ssize_t		written;
-	ssize_t		actual;
-	char        zeros[16*1024] = {0}; // TODO: base on blockSize instead.
 	file_debug("file=%d offset=%lld amount=%lld", file, offset, amount);
 
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileZero: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
-			   file, VfdCache[file].fileName,
-			   (int64) offset, (int64) amount));
+		file, VfdCache[file].fileName,
+		(int64) offset, (int64) amount));
 
-	if (FileSeek(file, offset) < 0)
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return returnCode;
+
+	/* Write zeros to the file */
+	written = pg_pwrite_zeros(VfdCache[file].fd, amount, offset);
+	if (written < 0)
 		return -1;
 
-	for (written = 0; written < amount; written += actual)
+	/* If we got a partial write, assume no disc space */
+	if (written != amount)
 	{
-		actual = FileWriteSeq(file, zeros, MIN(sizeof(zeros), amount-written), wait_event_info);
-		if (actual < 0)
-			return -1;
+		errno = ENOSPC;
+		return -1;
 	}
 
 	return 0;
 }
 
-/*
+/*s
  * Try to reserve file space with posix_fallocate(). If posix_fallocate() is
  * not implemented on the operating system or fails with EINVAL / EOPNOTSUPP,
  * use FileZero() instead.
@@ -2375,12 +2378,47 @@ FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
  * Returns 0 on success, -1 otherwise. In the latter case errno is set to the
  * appropriate error.
  */
+
+
 int
-FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info)
+FileFallocate_Internal(File file, off_t offset, off_t amount)
 {
-	file_debug("file=%d offset=%lld amount=%lld name=%s", file, offset, amount, FilePathName(file));
-	return FileZero(file, offset, amount, wait_event_info);
+	file_debug("file=%d  offset=%lld amount=%lld  path=%s", file, offset, amount, FilePathName(file));
+#ifdef HAVE_POSIX_FALLOCATE
+ 	int	returnCode;
+
+	Assert(FileIsValid(file));
+_
+	DO_DB(elog(LOG, "FileFallocate: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
+			   file, VfdCache[file].fileName,
+			   (int64) offset, (int64) amount));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return -1;
+
+retry:
+	returnCode = posix_fallocate(VfdCache[file].fd, offset, amount);
+
+	if (returnCode == 0)
+		return 0;
+	else if (returnCode == EINTR)
+		goto retry;
+
+	/* for compatibility with %m printing etc */
+	errno = returnCode;
+
+	/*
+	 * Return in cases of a "real" failure, if fallocate is not supported,
+	 * fall through to the FileZero() backed implementation.
+	 */
+	if (returnCode != EINVAL && returnCode != EOPNOTSUPP)
+		return -1;
+#endif
+
+return FileZero_Internal(file, offset, amount);
 }
+
 
 off_t
 FileSize_Internal(File file)
@@ -4313,14 +4351,15 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 
 	/* Open the  prototype I/O stack */
 	ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
-	file = (File)ioStack->openVal;
+	file = (File)(ioStack->openVal);
 	if (file < 0)
 	{
+		stackCopyError(getErrStack(-1), ioStack);
 		free(ioStack);
 		return -1;
 	}
 
-	/* Save the I/O stack in the vfd structure */
+	/* Save the I/O stack in the vfd dstructure */
 	vfdP = getVfd(file);
 	vfdP->ioStack = ioStack;
 
@@ -4390,7 +4429,7 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 
 ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
-	ssize_t actual;
+	ssize_t actual = -1;
 	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 
 	if (badFile(file))
@@ -4399,19 +4438,27 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 	if (offset < 0 || (ssize_t)amount < 0)
         return setFileError(file, EINVAL, "");
 
-	/* Write the data as requested */
+	/* Extend the file if needed */
+	if (offset > FileSize(file) && !FileTruncate(file, offset, wait_event_info))
+		return -1;
+
+	/* Write the data */
 	pgstat_report_wait_start(wait_event_info);
 	actual = stackWriteAll(getStack(file), buffer, amount, offset);
 	pgstat_report_wait_end();
 
 	/* If successful, update the file offset */
-	if (actual >= 0)
+	if (actual > 0)
 		getVfd(file)->offset = offset + actual;
 
 	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;
 }
 
+/*
+ * Synchronize the file to persistent storage.
+ * TODO: specify an offset and size so we replace writeback() as well.
+ */
 int FileSync(File file, uint32 wait_event_info)
 {
 	int retval;
@@ -4427,6 +4474,10 @@ int FileSync(File file, uint32 wait_event_info)
 }
 
 
+/*
+ * Get the size of the file.
+ * TODO: Cache it so it can be done quickly (part of every write)
+ */
 off_t FileSize(File file)
 {
 	off_t size;
@@ -4438,6 +4489,12 @@ off_t FileSize(File file)
 	return size;
 }
 
+/*
+ * Get the block size of the file.
+ * All I/O must be block aligned.
+ * The last block can be partial, but all others are full blocks.
+ * TODO: consider requiring all blocks to be same size.
+ */
 ssize_t FileBlockSize(File file)
 {
 	if (badFile(file))
@@ -4445,14 +4502,54 @@ ssize_t FileBlockSize(File file)
 	return getStack(file)->blockSize;
 }
 
+/*
+ * Wrapper for backwards compatibility. Use FileResize() instead.
+ */
 int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
+{
+    return FileResize(file, offset, wait_event_info);
+}
+
+/*
+ * Wrapper for backwards compatibility. Use FileResize instead.
+ */
+int
+FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info)
+{
+	return FileResize(file, offset+amount, wait_event_info);
+}
+
+/*
+ * Change the size of the file, either truncating or extending with zeros.
+ */
+int
+FileResize(File file, off_t newSize, uint32 wait_event_info)
 {
 	int retval;
 	if (badFile(file))
 		return -1;
 	pgstat_report_wait_start(wait_event_info);
-	retval = (int)stackTruncate(getStack(file), offset);
+	retval = (int)stackTruncate(getStack(file), newSize);
 	pgstat_report_wait_end();
 
 	return retval;
+}
+
+int
+FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
+{
+	int retval;
+	ssize_t writeSize, sofar;
+	char zeros[4096] = {0};
+	file_debug("file=%d offset=%lld amount=%lld", file, offset, amount);
+	pgstat_report_wait_start(wait_event_info);
+	//retval = FileZero_Internal(file, offset, amount);
+	FileSeek(file, offset);
+	for (sofar = 0, writeSize = 0; sofar < amount && writeSize >= 0; sofar += writeSize)
+		writeSize = FileWriteSeq(file, zeros, MIN(amount-sofar, sizeof(zeros)), 0);
+	pgstat_report_wait_end();
+
+	Assert(FileSize(file) == offset + amount);
+
+	return (writeSize < 0) ? -1 : 0;
 }

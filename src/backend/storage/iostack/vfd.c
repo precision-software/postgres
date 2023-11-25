@@ -35,6 +35,7 @@ typedef struct VfdStack
 {
 	IoStack ioStack;   /* Header used for all I/O stack types */
 	File file;         /* Virtual file descriptor of the underlying file. */
+	off_t fileSize;
 } VfdBottom;
 
 
@@ -50,12 +51,30 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, mode_t
 	oflags &= ~PG_STACK_MASK;
 
 	/* Open the file and get a VFD. */
-	this->file = PathNameOpenFilePerm_Internal(path, oflags, mode);
-	stackCheckError(this, this->file, "Unable to open vfd file %s", path);
+	this->ioStack.openVal = PathNameOpenFilePerm_Internal(path, oflags, mode);
+	if (this->ioStack.openVal < 0)
+	{
+		stackSetError(this, errno, "Unable to open vfd file %s", path);
+		return this;
+	}
 
 	/* We are byte oriented and can support all block sizes, unless O_DIRECT */
 	this->ioStack.blockSize = (oflags & O_DIRECT) ? 4*1024 : 1;
-	this->ioStack.openVal = this->file;
+	this->file = this->ioStack.openVal;
+
+	/* Cache the file size */
+	this->fileSize = FileSize_Internal(this->file);
+	if (this->fileSize < 0)
+	{
+		stackSetError(this, errno, "Unable to get file size. file=%$d path=%s", this->file, path);
+		FileClose_Internal(this->ioStack.openVal);
+		this->ioStack.openVal = -1;
+		return this;
+	}
+
+	/* We are byte oriented and can support all block sizes, unless O_DIRECT */
+	this->ioStack.blockSize = (oflags & O_DIRECT) ? 4*1024 : 1;
+	this->file = this->ioStack.openVal;
 
 	/* Always return a new I/O stack structure. It contains error info if problems occurred. */
 	file_debug("(done): file=%d  name=%s oflags=0x%x  mode=0x%x", this->file, path, oflags, mode);
@@ -68,13 +87,22 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, mode_t
 static ssize_t
 vfdWrite(VfdBottom *this, const Byte *buf, ssize_t bufSize, off_t offset)
 {
+	ssize_t actual;
+	Assert(offset <= this->fileSize);
+
 	if (offset % this->ioStack.blockSize != 0)
-		return stackSetError(this, EINAL,
+		return stackSetError(this, EINVAL,
 				 "Offset %lld is not aligned with block size %zd", offset, this->ioStack.blockSize);
 
-	ssize_t actual = FileWrite_Internal(this->file, buf, bufSize, offset);
+	actual = FileWrite_Internal(this->file, buf, bufSize, offset);
 	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd", this->file, FilePathName(this->file), bufSize, offset, actual);
-	return stackCheckError(this, actual, "Unable to write to file");
+	if (actual < 0)
+		return stackSetError(this, errno, "Unable to write to file");
+
+	/* Update our file size if it grew */
+	this->fileSize = MAX(this->fileSize, offset + actual);
+
+	return actual;
 }
 
 /*
@@ -85,10 +113,21 @@ vfdRead(VfdBottom *this, Byte *buf, ssize_t bufSize, off_t offset)
 {
 	ssize_t actual;
 	Assert(bufSize > 0 && offset >= 0);
+	Assert(offset <= this->fileSize);
+
+	/* Check for EOF.  TODO: add filesize to I/O stack and make part of stackWrite */
+	this->ioStack.eof = (offset >= this->fileSize);
+	if (this->ioStack.eof)
+		return 0;
 
 	actual = FileRead_Internal(this->file, buf, bufSize, offset);
-	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd", this->file, FilePathName(this->file), bufSize, offset, actual);
-	return stackCheckError(this, actual, "Unable to read from file %s", FilePathName(this->file));
+	if (actual < 0)
+		stackSetError(this, errno, "Unable to read from file %s", FilePathName(this->file));
+
+	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd",
+			   this->file, FilePathName(this->file), bufSize, offset, actual);
+
+	return actual;
 }
 
 /*
@@ -126,20 +165,33 @@ vfdSync(VfdBottom *this)
 static off_t
 vfdSize(VfdBottom *this)
 {
-	off_t offset = FileSize_Internal(this->file);
-	return stackCheckError(this, offset, "Unable to get file size");
+	return this->fileSize;
 }
 
 
+/*
+ * Resize the file.
+ */
 static bool vfdTruncate(VfdBottom *this, off_t offset)
 {
-
 	bool success;
-	success = FileTruncate_Internal(this->file, offset) >= 0;
+
+	/* If shrinking, truncate file, otherwise grow it. */
+	if (offset < this->fileSize)
+		success = FileTruncate_Internal(this->file, offset) >= 0;
+	else
+		success = FileFallocate_Internal(this->file, this->fileSize, offset-this->fileSize) >= 0;
+
 	if (!success)
-		stackSetError(this, errno, "Unable to truncate file %s(%d). errno=%d", /* TODO: Include error message */
-					  FilePathName(this->file), this->file, errno);
-	return success;
+	{
+		stackSetError(this, errno, "Unable to resize file %s(%d). from %lld to %lld errno=%d", /* TODO: Include error message */
+					  FilePathName(this->file), this->file, this->fileSize, offset, errno);
+		return false;
+	}
+
+
+	this->fileSize = offset;
+	return true;
 }
 
 

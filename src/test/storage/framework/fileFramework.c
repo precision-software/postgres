@@ -271,10 +271,12 @@ static void deleteFile(char *name)
 static void regression(char *name, size_t blockSize)
 {
     File file;
-    Byte buf[128];
     Byte *block;
+	int i;
 
+	/* Remove the file before starting */
     deleteFile(name);
+	block = malloc(blockSize);
 
 	/* Shouldn't open a non-existent file - various modes) */
 	file = FileOpen(name, O_RDWR|PG_TESTSTACK);
@@ -299,7 +301,7 @@ static void regression(char *name, size_t blockSize)
 
 	/* Should read EOF on empty file */
 	file = FileOpen(name, O_RDONLY|PG_TESTSTACK);
-	PG_ASSERT(0 == FileRead(file, buf, sizeof(buf), 0, 0));
+	PG_ASSERT(0 == FileRead(file, block, blockSize, 0, 0));
 	PG_ASSERT(FileEof(file));
 	PG_ASSERT(!FileError(file));
 	PG_ASSERT(FileClose(file) == 0);
@@ -312,8 +314,32 @@ static void regression(char *name, size_t blockSize)
 	PG_ASSERT(FileEof(file));
 	PG_ASSERT(!FileError(file));
 	PG_ASSERT(FileClose(file) == 0);
-	free(block);
 
+	/* Extend files with zeros by writing past EOF */
+	file = FileOpen(name, O_CREAT | O_WRONLY | O_TRUNC | PG_TESTSTACK);
+	PG_ASSERT_EQ(0, FileSize(file)); /* File is empty) */
+
+	/* Write out dummy data, skipping the first block */
+	for (i = 0; i < blockSize; i++)
+	    block[i] = 0xf;
+	PG_ASSERT_EQ(blockSize, FileWrite(file, block, blockSize, blockSize, 0));
+
+	/* Verify file size is two blocks */
+	PG_ASSERT_EQ(2*blockSize, FileSize(file));
+
+	/* Read first block. Should be all zeros */
+	PG_ASSERT_EQ(blockSize, FileRead(file, block, blockSize, 0, 0));
+	for (i = 0; i < blockSize; i++)
+		PG_ASSERT_EQ(0, block[i]);
+
+	/* Read second block. Should be dummy data */
+	PG_ASSERT_EQ(blockSize, FileRead(file, block, blockSize, blockSize, 0));
+	for (i = 0; i < blockSize; i++)
+		PG_ASSERT_EQ(0xf, block[i]);
+
+	PG_ASSERT_EQ(0, FileClose(file));
+
+	free(block);
 	deleteFile(name);
 }
 

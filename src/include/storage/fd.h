@@ -54,6 +54,10 @@ typedef int File;
 #define IO_DIRECT_WAL			0x02
 #define IO_DIRECT_WAL_INIT		0x04
 
+/* Postgres special oflags */
+#ifndef O_DIRECT
+#define O_DIRECT 0
+#endif
 
 /* GUC parameter */
 extern PGDLLIMPORT int max_files_per_process;
@@ -112,8 +116,9 @@ extern int	FileSync(File file, uint32 wait_event_info);
 extern int	FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info);
 extern int	FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info);
 extern int PathNameFileSync(const char *pathName, uint32 wait_event_info);
-
+extern int FileResize(File file, off_t offset, uint32 wait_event_info);
 extern off_t FileSize(File file);
+
 extern int	FileTruncate(File file, off_t offset, uint32 wait_event_info);
 extern void FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info);
 extern char *FilePathName(File file);
@@ -233,5 +238,7 @@ extern ssize_t FileWrite_Internal(File file, const void *buffer, size_t amount, 
 extern int FileSync_Internal(File file);
 extern off_t FileSize_Internal(File file);
 extern int	FileTruncate_Internal(File file, off_t offset);
+extern int FileFallocate_Internal(File file, off_t offset, off_t amount);
+extern int FileZero_Internal(File file, off_t offset, off_t amount);
 
 #endif							/* FD_H */
