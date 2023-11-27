@@ -277,7 +277,7 @@ bufferedTruncate(Buffered *this, off_t offset)
 	    return false;
 
 	/* Truncate the underlying file */
-	if (!stackTruncate(nextStack(this), offset))
+	if (!stackResize(nextStack(this), offset))
 		return copyNextError(this, false);
 
 	/* Update our buffer so it ends at that position */

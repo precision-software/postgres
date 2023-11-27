@@ -410,7 +410,7 @@ static bool aeadTruncate(Aead *this, off_t offset)
 
 	/* Truncate the downstream file at the beginning of the block */
 	cryptOff = cryptOffset(this, blockOffset);
-	retval = stackTruncate(nextStack(this), cryptOff);
+	retval = stackResize(nextStack(this), cryptOff);
 	if (!retval)
 		return copyNextError(this, retval);
 

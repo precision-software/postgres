@@ -198,7 +198,7 @@ Lz4Compress *lz4CompressOpen(Lz4Compress *proto, const char *path, int oflags, i
 			return lz4Cleanup(this);
 
 		/* Remove index data from the compressed data file */
-		if (stackTruncate(next, compressedSize) < 0)
+		if (stackResize(next, compressedSize) < 0)
 			return lz4Cleanup(this);
 
 		this->indexStarts = 0;
@@ -446,9 +446,9 @@ ssize_t lz4CompressTruncate(Lz4Compress *this, off_t offset)
 
 	/* Truncate the compressed and data files so we are at the beginning of the last block */
 	off_t indexSize = this->lastBlock / this->blockSize * 8;
-	if (stackTruncate(nextStack(this), this->compressedLastBlock) < 0)
+	if (stackResize(nextStack(this), this->compressedLastBlock) < 0)
 		return copyNextError(this, -1);
-	if (stackTruncate(this->indexFile, indexSize) < 0)
+	if (stackResize(this->indexFile, indexSize) < 0)
 		return copyError(this, -1, this->indexFile);
 
 	/* Write out what remains of the last block */
@@ -565,7 +565,7 @@ static Lz4Compress *lz4Cleanup(Lz4Compress *this)
 	if (index != NULL && index->openVal >= 0)
 	{
 		if (this->writable)
-		    stackTruncate(index, 0); /* Don't flush to disc when closing */
+		    stackResize(index, 0); /* Don't flush to disc when closing */
 
 		stackClose(this->indexFile);
 

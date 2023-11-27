@@ -92,7 +92,7 @@ struct IoStackInterface {
 #define stackRead(this, buf, size, offset)   					invoke(Read,  this, buf, size, offset)
 #define stackSync(this)                      					invokeNoParms(Sync, this)
 #define stackSize(this)                           				invokeNoParms(Size, this)
-#define stackTruncate(this, offset)       						invoke(Truncate, this, offset)
+#define stackResize(this, offset)       						invoke(Truncate, this, offset)
 #define stackClose(this)      									invokeNoParms(Close, this)
 
 typedef IoStack *(*IoStackCreateFunction)(void);

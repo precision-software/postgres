@@ -699,6 +699,7 @@ static int
 pg_ftruncate(int fd, off_t length)
 {
 	int			ret;
+	file_debug("ERROR - not converted.  path=%s  length=%lld", path, length);
 
 retry:
 	ret = ftruncate(fd, length);
@@ -719,6 +720,7 @@ pg_truncate(const char *path, off_t length)
 #ifdef WIN32
 	int			save_errno;
 	int			fd;
+	file_debug("ERROR - not converted.  path=%s  length=%lld", path, length);
 
 	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
 	if (fd >= 0)
@@ -4445,13 +4447,13 @@ ssize_t FileBlockSize(File file)
 	return getStack(file)->blockSize;
 }
 
-int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
+int	FileResize(File file, off_t offset, uint32 wait_event_info)
 {
 	int retval;
 	if (badFile(file))
 		return -1;
 	pgstat_report_wait_start(wait_event_info);
-	retval = (int)stackTruncate(getStack(file), offset);
+	retval = (int)stackResize(getStack(file), offset);
 	pgstat_report_wait_end();
 
 	return retval;

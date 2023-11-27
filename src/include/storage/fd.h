@@ -114,7 +114,7 @@ extern int	FileFallocate(File file, off_t offset, off_t amount, uint32 wait_even
 extern int PathNameFileSync(const char *pathName, uint32 wait_event_info);
 
 extern off_t FileSize(File file);
-extern int	FileTruncate(File file, off_t offset, uint32 wait_event_info);
+extern int	FileResize(File file, off_t offset, uint32 wait_event_info);
 extern void FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info);
 extern char *FilePathName(File file);
 extern int	FileGetRawDesc(File file);
