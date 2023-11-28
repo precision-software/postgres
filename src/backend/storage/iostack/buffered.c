@@ -94,7 +94,7 @@ static Buffered *bufferedOpen(Buffered *proto, const char *path, int oflags, mod
 	/* Close our successor if we couldn't allocate memory */
 	if (this->buf == NULL)
 	{
-		stackCheckError(this, -1, "bufferedOpen failed to allocate %z bytes", this->blockSize);
+		stackSetError(this, errno, "bufferedOpen failed to allocate %z bytes", this->blockSize);
 		return bufferedCleanup(this);
 	}
 

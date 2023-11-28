@@ -2326,7 +2326,7 @@ FileSync_Internal(File file)
  * appropriate error.
  */
 int
-FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
+FileZero_Internal(File file, off_t offset, off_t amount)
 {
 	int			returnCode;
 	ssize_t		written;
@@ -2342,9 +2342,7 @@ FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
 	if (returnCode < 0)
 		return returnCode;
 
-	pgstat_report_wait_start(wait_event_info);
 	written = pg_pwrite_zeros(VfdCache[file].fd, amount, offset);
-	pgstat_report_wait_end();
 
 	if (written < 0)
 		return -1;
@@ -2372,7 +2370,7 @@ FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
  * appropriate error.
  */
 int
-FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info)
+FileFallocate_Internal(File file, off_t offset, off_t amount)
 {
 	file_debug("file=%d offset=%lld amount=%lld name=%s", file, offset, amount, FilePathName(file));
 #ifdef HAVE_POSIX_FALLOCATE
@@ -2389,9 +2387,7 @@ FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info)
 		return -1;
 
 retry:
-	pgstat_report_wait_start(wait_event_info);
 	returnCode = posix_fallocate(VfdCache[file].fd, offset, amount);
-	pgstat_report_wait_end();
 
 	if (returnCode == 0)
 		return 0;
@@ -2409,7 +2405,7 @@ retry:
 		return -1;
 #endif
 
-	return FileZero(file, offset, amount, wait_event_info);
+	return FileZero_Internal(file, offset, amount);
 }
 
 off_t

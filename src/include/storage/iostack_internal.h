@@ -121,12 +121,9 @@ stackCheckError(void *thisVoid, ssize_t retval, const char *fmt, ...)
 	IoStack *this = thisVoid;
 
 	/* If a system error occured ... */
-	if (retval < 0)
-	{
-		va_start(args, fmt);
-		stackVSetError(this, errno, fmt, args);
-		va_end(args);
-	}
+	va_start(args, fmt);
+	stackVSetError(this, errno, fmt, args);
+	va_end(args);
 
 	return retval;
 }
