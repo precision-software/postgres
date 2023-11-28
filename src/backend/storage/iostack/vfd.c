@@ -139,7 +139,7 @@ static bool vfdResize(VfdBottom *this, off_t newSize)
 
 	/* CASE: file is shrinking. Truncate it.*/
 	if (newSize < fileSize)
-	    success = FileTruncate_Internal(this->file, offset) >= 0;
+	    success = FileTruncate_Internal(this->file, newSize) >= 0;
 
 	/* CASE: file is growing a small amount (64K). Write out zeros. */
 	else if (newSize < fileSize + 64*1024)
@@ -147,7 +147,7 @@ static bool vfdResize(VfdBottom *this, off_t newSize)
 
 	/* OTHERWISE: larger allocation. Use fallocate */
 	else
-		success = FileFallocate(file, fileSize, newSize - fileSize, 0) >= 0;
+		success = FileFallocate(this->file, fileSize, newSize - fileSize, 0) >= 0;
 
 	if (!success)
 		stackSetError(this, errno, "Unable to truncate file %s(%d). errno=%d", /* TODO: Include error message */

@@ -84,9 +84,8 @@ static Buffered *bufferedOpen(Buffered *proto, const char *path, int oflags, mod
     this->dirty = false;
     this->currentSize = 0;
 
-    /* We don't know the size of the file yet. */
-    this->fileSize = 0;
-	this->sizeConfirmed = (oflags & O_TRUNC) != 0;
+    /* Get the size of the file */
+    this->fileSize = stackSize(nextStack(this));
 
 	/* Peek ahead and choose a buffer size which is a multiple of our successor's block size */
 	this->blockSize = ROUNDUP(this->suggestedSize, nextStack(this)->blockSize);

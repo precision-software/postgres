@@ -121,6 +121,11 @@ extern int	FileGetRawDesc(File file);
 extern int	FileGetRawFlags(File file);
 extern mode_t FileGetRawMode(File file);
 
+inline static int FileTruncate(File file, off_t offset, uint32 wait_event_info)
+{
+	return FileResize(file, offset, wait_event_info);
+}
+
 /* Operations used for sharing named temporary files */
 extern File PathNameCreateTemporaryFile(const char *path, bool error_on_failure);
 extern File PathNameOpenTemporaryFile(const char *path, int mode);

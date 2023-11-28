@@ -2259,7 +2259,8 @@ retry:
 		/*
 		 * Maintain fileSize, and temporary_files_size if it's a temp file.
 		 */
-
+		if (vfdP->fdstate & FD_TEMP_FILE_LIMIT)
+		{
 			off_t		past_write = offset + amount;
 
 			if (past_write > vfdP->fileSize)
