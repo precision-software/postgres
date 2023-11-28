@@ -70,6 +70,7 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, mode_t
 	{
 		int save_errno = errno;
 		vfdClose(this);
+		this->ioStack.openVal = -1;
 		stackSetError(this, save_errno, "vfdOpen: Unable to get size of file %s", path);
 		return this;
 	}
@@ -85,7 +86,10 @@ static VfdBottom *vfdOpen(VfdBottom *proto, const char *path, int oflags, mode_t
 static ssize_t
 vfdWrite(VfdBottom *this, const Byte *buf, ssize_t bufSize, off_t offset)
 {
-	ssize_t actual = FileWrite_Internal(this->file, buf, bufSize, offset);
+	ssize_t actual;
+	Assert(offset <= this->fileSize);
+
+	actual = FileWrite_Internal(this->file, buf, bufSize, offset);
 	if (actual < 0)
 		return stackCheckError(this, -1, "Unable to write to file %s", FilePathName(this->file));
 

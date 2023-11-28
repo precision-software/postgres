@@ -4423,6 +4423,7 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
 	ssize_t actual;
+	off_t fileSize;
 	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 
 	if (badFile(file))
@@ -4430,6 +4431,15 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 
 	if (offset < 0 || (ssize_t)amount < 0)
         return setFileError(file, EINVAL, "");
+
+	/* Get the current file size  TODO: optimize? */
+	fileSize = FileSize(file);
+	if (fileSize < 0)
+		return -1;
+
+	/* Extend the file if there are "holes" */
+	if (offset > fileSize && FileResize(file, offset, wait_event_info) < 0)
+	    return -1;
 
 	/* Write the data as requested */
 	pgstat_report_wait_start(wait_event_info);
