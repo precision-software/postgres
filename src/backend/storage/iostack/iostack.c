@@ -48,7 +48,6 @@ selectIoStack(const char *path, int oflags, mode_t mode)
 	if (!ioStacksInitialized)
 		ioStackSetup();
 
-	/* TODO: create prototypes at beginning. Here, we just select them */
 	/* Look at oflags to determine which stack to use */
 	switch (oflags & PG_STACK_MASK)
 	{

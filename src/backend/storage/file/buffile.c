@@ -985,7 +985,7 @@ BufFileTruncateFileSet(BufFile *file, int fileno, off_t offset)
 		}
 		else
 		{
-			if (FileTruncate(file->files[i], offset,
+			if (FileResize(file->files[i], offset,
 							 WAIT_EVENT_BUFFILE_TRUNCATE) < 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),

@@ -177,10 +177,10 @@ ssize_t FileBlockSize(File file)
 	return getStack(file)->blockSize;
 }
 
-int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
+int	FileResize(File file, off_t offset, uint32 wait_event_info)
 {
 	pgstat_report_wait_start(wait_event_info);
-	ssize_t retval = stackTruncate(getStack(file), offset);
+	ssize_t retval = stackResize(getStack(file), offset);
 	pgstat_report_wait_end();
 	return (int)retval;
 }

@@ -277,7 +277,7 @@ bufferedTruncate(Buffered *this, off_t offset)
 	    return false;
 
 	/* Truncate the underlying file */
-	if (!stackTruncate(nextStack(this), offset))
+	if (!stackResize(nextStack(this), offset))
 		return copyNextError(this, false);
 
 	/* Update our buffer so it ends at that position */
@@ -318,7 +318,7 @@ IoStackInterface bufferedInterface = (IoStackInterface)
 		.fnClose = (IoStackClose) bufferedClose,
 		.fnRead = (IoStackRead) bufferedRead,
 		.fnSync = (IoStackSync) bufferedSync,
-		.fnTruncate = (IoStackTruncate) bufferedTruncate,
+		.fnResize = (IoStackResize) bufferedTruncate,
 		.fnSize = (IoStackSize) bufferedSize,
 	};
 

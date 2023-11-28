@@ -1131,7 +1131,7 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
 	 * Truncate all data that's not guaranteed to have been safely fsynced (by
 	 * previous record or by the last checkpoint).
 	 */
-	if (FileTruncate(file, xlrec->offset, WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE) != 0)
+	if (FileResize(file, xlrec->offset, WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not truncate file \"%s\" to %u: %m",

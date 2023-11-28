@@ -80,6 +80,7 @@ stackVSetError(IoStack *stack, int errorCode, const char *fmt, va_list args)
 	stack->errNo = errorCode;
 	vsnprintf(stack->errMsg, sizeof(stack->errMsg), fmt, args);
 	errno = errorCode;
+	file_debug("Error! code=%d msg=%s", errorCode, stack->errMsg);
 	return -1;
 }
 

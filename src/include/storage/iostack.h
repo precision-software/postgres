@@ -71,7 +71,7 @@ typedef ssize_t (*IoStackWrite)(void *this, const Byte *buf, ssize_t size, off_t
 typedef ssize_t (*IoStackSync)(void *this);
 typedef ssize_t (*IoStackClose)(void *this);
 typedef off_t (*IoStackSize)(void *this);
-typedef bool (*IoStackTruncate) (void *this, off_t offset);
+typedef bool (*IoStackResize) (void *this, off_t offset);
 
 struct IoStackInterface {
 	IoStackOpen fnOpen;
@@ -80,7 +80,7 @@ struct IoStackInterface {
 	IoStackRead fnRead;
 	IoStackSync fnSync;
 	IoStackSize fnSize;
-	IoStackTruncate fnTruncate;
+	IoStackResize fnResize;
 };
 
 /*
@@ -92,7 +92,7 @@ struct IoStackInterface {
 #define stackRead(this, buf, size, offset)   					invoke(Read,  this, buf, size, offset)
 #define stackSync(this)                      					invokeNoParms(Sync, this)
 #define stackSize(this)                           				invokeNoParms(Size, this)
-#define stackTruncate(this, offset)       						invoke(Truncate, this, offset)
+#define stackResize(this, offset)       						invoke(Resize, this, offset)
 #define stackClose(this)      									invokeNoParms(Close, this)
 
 typedef IoStack *(*IoStackCreateFunction)(void);

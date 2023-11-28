@@ -34,7 +34,8 @@
 typedef struct VfdStack
 {
 	IoStack ioStack;   /* Header used for all I/O stack types */
-	File file;         /* Virtual file descriptor of the underlying file. */
+	File file;
+	off_t fileSize;
 } VfdBottom;
 
 
@@ -127,11 +128,27 @@ vfdSize(VfdBottom *this)
 }
 
 
-static bool vfdTruncate(VfdBottom *this, off_t offset)
+static bool vfdResize(VfdBottom *this, off_t newSize)
 {
 
+	off_t fileSize;
 	bool success;
-	success = FileTruncate_Internal(this->file, offset) >= 0;
+	fileSize = vfdSize(this);
+	if (fileSize < 0)
+		return false;
+
+	/* CASE: file is shrinking. Truncate it.*/
+	if (newSize < fileSize)
+	    success = FileTruncate_Internal(this->file, offset) >= 0;
+
+	/* CASE: file is growing a small amount (64K). Write out zeros. */
+	else if (newSize < fileSize + 64*1024)
+		success = FileZero(this->file, fileSize, newSize - fileSize, 0) >= 0; /* todo: wait event info - drop it */
+
+	/* OTHERWISE: larger allocation. Use fallocate */
+	else
+		success = FileFallocate(file, fileSize, newSize - fileSize, 0) >= 0;
+
 	if (!success)
 		stackSetError(this, errno, "Unable to truncate file %s(%d). errno=%d", /* TODO: Include error message */
 					  FilePathName(this->file), this->file, errno);
@@ -146,7 +163,7 @@ IoStackInterface vfdInterface = (IoStackInterface)
 		.fnRead = (IoStackRead)vfdRead,
 		.fnClose = (IoStackClose)vfdClose,
 		.fnSync = (IoStackSync)vfdSync,
-		.fnTruncate = (IoStackTruncate)vfdTruncate,
+		.fnResize = (IoStackResize) vfdResize,
 		.fnSize = (IoStackSize)vfdSize,
 	};
 

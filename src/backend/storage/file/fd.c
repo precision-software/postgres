@@ -2227,6 +2227,7 @@ FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset)
 	 * and return -1.  However, there's no way to report a suitable error
 	 * message if we do that.  All current callers would just throw error
 	 * immediately anyway, so this is safe at present.
+	 * TODO: No longer acceptable. Need to pass error back to I/O stack, which can throw the error
 	 */
 	if (temp_file_limit >= 0 && (vfdP->fdstate & FD_TEMP_FILE_LIMIT))
 	{
@@ -2256,10 +2257,9 @@ retry:
 	if (returnCode >= 0)
 	{
 		/*
-		 * Maintain fileSize and temporary_files_size if it's a temp file.
+		 * Maintain fileSize, and temporary_files_size if it's a temp file.
 		 */
-		if (vfdP->fdstate & FD_TEMP_FILE_LIMIT)
-		{
+
 			off_t		past_write = offset + amount;
 
 			if (past_write > vfdP->fileSize)
@@ -2316,6 +2316,8 @@ FileSync_Internal(File file)
 	return returnCode;
 }
 
+
+
 /*
  * Zero a region of the file.
  *
@@ -2327,7 +2329,7 @@ FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
 {
 	int			returnCode;
 	ssize_t		written;
-	file_debug("file=%d offset=%lld amount=%lld", file, offset, amount);
+	file_debug("file=%d offset=%lld amount=%lld path=%s", file, offset, amount, FilePathName(file));
 
 	Assert(FileIsValid(file));
 
@@ -4478,13 +4480,13 @@ ssize_t FileBlockSize(File file)
 	return getStack(file)->blockSize;
 }
 
-int	FileTruncate(File file, off_t offset, uint32 wait_event_info)
+int	FileResize(File file, off_t offset, uint32 wait_event_info)
 {
 	int retval;
 	if (badFile(file))
 		return -1;
 	pgstat_report_wait_start(wait_event_info);
-	retval = (int)stackTruncate(getStack(file), offset);
+	retval = (int)stackResize(getStack(file), offset);
 	pgstat_report_wait_end();
 
 	return retval;
