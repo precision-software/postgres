@@ -58,18 +58,20 @@ struct IoStack
 	ssize_t blockSize;				/* The block size this layer is expecting. Can be queried by the layer above */
 	ssize_t openVal; 				/* The value returned by the bottom layer's open call */
 	bool eof;						/* True if End of file.  Reset by next read */
-	int errNo;                      /* System error number - cleared by ??? */
+	int errNo;                      /* System error number - cleared by each call (except close) */
 	char errMsg[121];               /* Error message */
 };
 
 /*
  * A set of functions each IoStack must provide.
+ *   IoStackOpen On error, returns a closed node with error info,
+ *               or NULL if unable to allocate memory.
  */
 typedef IoStack *(*IoStackOpen)(void *this, const char *path, int mode, mode_t perm);
 typedef ssize_t (*IoStackRead)(void *this, Byte *buf, ssize_t size, off_t offset);
 typedef ssize_t (*IoStackWrite)(void *this, const Byte *buf, ssize_t size, off_t offset);
-typedef ssize_t (*IoStackSync)(void *this);
-typedef ssize_t (*IoStackClose)(void *this);
+typedef bool (*IoStackSync)(void *this);
+typedef bool (*IoStackClose)(void *this);
 typedef off_t (*IoStackSize)(void *this);
 typedef bool (*IoStackResize) (void *this, off_t offset);
 

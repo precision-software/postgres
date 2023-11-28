@@ -194,7 +194,7 @@ int			io_direct_flags;
 #define FD_CLOSE_AT_EOXACT	(1 << 1)	/* T = close at eoXact */
 #define FD_TEMP_FILE_LIMIT	(1 << 2)	/* T = respect temp_file_limit */
 
-typedef struct vfd
+typedef struct Vfd
 {
 	int			fd;				/* current FD, or VFD_CLOSED if none */
 	unsigned short fdstate;		/* bitflags for VFD's state */
@@ -4343,7 +4343,7 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 
 	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x", fileName, fileFlags, fileMode);
 
-	/* Allocate an I/O stack for this file. */
+	/* Select the I/O stack prototype for this file. */
 	proto = selectIoStack(fileName, fileFlags, fileMode);
 
 	/* I/O stacks don't implement O_APPEND, so position to FileSize instead */
@@ -4352,19 +4352,24 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 
 	/* Open the  prototype I/O stack */
 	ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
+	if (ioStack == NULL)
+	    return setFileError(-1, errno, "Unable to allocate I/O stack for %s", fileName);
+
+	/* Save error info if open failed */
 	file = (File)ioStack->openVal;
 	if (file < 0)
 	{
+		copyError(getErrStack(-1), -1, ioStack);
 		free(ioStack);
 		return -1;
 	}
 
-	/* Save the I/O stack in the vfd structure */
+	/* Success. Save the io stack in the vfd */
 	vfdP = getVfd(file);
 	vfdP->ioStack = ioStack;
 
 	/* Position at end of file if appending. This only impacts WriteSeq and ReadSeq. */
-	vfdP->offset = append ? FileSize(file): 0;
+	vfdP->offset = append ? stackSize(ioStack): 0;
 	if (vfdP->offset == -1) {
 		FileClose(file);
 		return -1;
@@ -4375,27 +4380,42 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 
 /*
  * Close a file.
+ * Note we do not set errno if the file already has a pending error.
+ * This is a convenience for error handling. We want to close
+ * the file without obscuring the original error.
  */
 int FileClose(File file)
 {
-	int retval;
+	bool success;
+	bool previousError;
 	file_debug("FileClose: name=%s, file=%d  iostack=%p", FilePathName(file), file, getStack(file));
 
 	/* Make sure we are dealing with an open file */
 	if (badFile(file))
 	    return -1;
+	Assert(getStack(file) != NULL);
+
+	/* If there was a previous error, save it in dummy slot */
+	previousError = FileError(file);
+	if (previousError)
+		stackCopyError(getErrStack(-1), getStack(file));
 
 	/* Close the file.  The low level routine will invalidate the "file" index */
-	retval = stackClose(getStack(file));
+	success = stackClose(getStack(file));
 
-	/* No matter what, release the memory on Close */
-	free(getVfd(file)->ioStack);
-	getVfd(file)->ioStack = NULL;
-	file_debug("FileClose(done): file=%d retval=%d", file, retval);
+	/* If a new error occurred, copy it to dummy slot */
+	if (!success && !previousError)
+	    stackCopyError(getErrStack(-1), getStack(file));
+
+	/* No matter what, release the I/O stack on Close */
+	free(getStack(file));
+	getVfd(file)->ioStack = NULL; /* Be safe */
+
+	file_debug("FileClose(done): file=%d success=%d", file, success);
 
 	/* Restore errno in case it was reset. */
 	FileErrorCode(-1);
-	return retval;
+	return success ? 0 : -1;
 }
 
 
@@ -4427,7 +4447,7 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
 	ssize_t actual;
-	file_debug("FileWrite: name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
+	file_debug("name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 
 	if (badFile(file))
 		return -1;
@@ -4444,22 +4464,22 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	file_debug("FileWrite(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
+	file_debug("(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;
 }
 
 int FileSync(File file, uint32 wait_event_info)
 {
-	int retval;
+	bool success;
 
 	if (badFile(file))
 		return -1;
 
 	pgstat_report_wait_start(wait_event_info);
-	retval = stackSync(getStack(file));
+	success = stackSync(getStack(file));
 	pgstat_report_wait_end();
 
-	return retval;
+	return success ? 0 : -1;
 }
 
 
@@ -4470,7 +4490,7 @@ off_t FileSize(File file)
         return  -1;
 
 	size = stackSize(getStack(file));
-	file_debug("FileSize: name=%s file=%d  size=%lld", FilePathName(file), file, size);
+	file_debug("name=%s file=%d  size=%lld", FilePathName(file), file, size);
 	return size;
 }
 
@@ -4483,12 +4503,12 @@ ssize_t FileBlockSize(File file)
 
 int	FileResize(File file, off_t offset, uint32 wait_event_info)
 {
-	int retval;
+	bool success;
 	if (badFile(file))
 		return -1;
 	pgstat_report_wait_start(wait_event_info);
-	retval = (int)stackResize(getStack(file), offset);
+	success = (int)stackResize(getStack(file), offset);
 	pgstat_report_wait_end();
 
-	return retval;
+	return success ? 0 : -1;
 }

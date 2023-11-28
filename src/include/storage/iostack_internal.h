@@ -110,9 +110,15 @@ stackCopyError(IoStack *dest, IoStack *src)
 	errno = src->errNo;
 }
 
+/*
+ * Set the error information and return retval for convenience.
+ * Implemented as a macro so the return value can have any type.
+ */
+#define stackErrorSet(this, retval, code, args...) \
+    (stackSetError(this, code, args), retval)
 
 /*
- * Check return value for -1, and if so set the error info. Expects errno to be set.
+ * Expects errno to be set.  TODO: DEFUNCT
  */
 inline static ssize_t
 stackCheckError(void *thisVoid, ssize_t retval, const char *fmt, ...)
