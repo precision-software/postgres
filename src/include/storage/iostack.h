@@ -89,7 +89,7 @@ struct IoStackInterface {
  * Abstract functions required for each filter in an I/O Stack. TODO: declare as inline functions.
  * TODO: Rename, file-->stack, and Write-->WritePartial and WriteAll-->Write
  */
-#define stackOpen(this, path, oflags, mode)       				(IoStack *)(stackClearError(this), invoke(Open, this, path, oflags, mode))
+#define stackOpen(this, path, oflags, mode)       				(IoStack *)(invoke(Open, this, path, oflags, mode))
 #define stackWrite(this, buf, size, offset)  					invoke(Write, this, buf, size, offset)
 #define stackRead(this, buf, size, offset)   					invoke(Read,  this, buf, size, offset)
 #define stackSync(this)                      					invokeNoParms(Sync, this)
@@ -100,8 +100,8 @@ struct IoStackInterface {
 typedef IoStack *(*IoStackCreateFunction)(void);
 
 /* Helper macros used above */
-#define invoke(call, stack, args...)   (((IoStack *)(stack))->iface->fn##call((void*)(stack), args))
-#define invokeNoParms(call, stack)     (((IoStack *)(stack))->iface->fn##call((void*)(stack)))
+#define invoke(call, stack, args...)   (stackClearError(stack),((IoStack *)(stack))->iface->fn##call((void*)(stack), args))
+#define invokeNoParms(call, stack)     (stackClearError(stack),((IoStack *)(stack))->iface->fn##call((void*)(stack)))
 
 /*
  * Error handling functions for I/O stacks.
@@ -182,7 +182,7 @@ stackErrorNo(void *thisVoid)
 #define PG_STACK_MASK     (7 << 28)
 
 /* Declare a "debug" macro */
-#define FILE_DEBUG
+//#define FILE_DEBUG
 #ifdef FILE_DEBUG
 #define file_debug(...) \
     do {  \
