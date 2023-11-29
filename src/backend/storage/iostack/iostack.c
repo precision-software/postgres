@@ -55,7 +55,7 @@ selectIoStack(const char *path, int oflags, mode_t mode)
 		case PG_ENCRYPT:          return ioStackEncrypt;
 		case PG_ENCRYPT_PERM:     return ioStackEncryptPerm;
 		case PG_TESTSTACK:        return ioStackTest;
-		case 0:                   file_debug("Raw mode: path=%s oflags=0x%x", path, oflags); return ioStackRaw;
+		case 0:                   file_debug("Raw mode: path=%s oflags=0x%x", path, oflags); return ioStackPlain;
 
 		default: elog(FATAL, "Unrecognized I/O Stack oflag 0x%x", (oflags & PG_STACK_MASK));
 	}
@@ -69,7 +69,7 @@ void ioStackSetup(void)
 {
 	/* Set up the prototype stacks */
 	ioStackRaw = vfdStackNew();
-	ioStackPlain = bufferedNew(16*1024, vfdStackNew());
+	ioStackPlain = bufferedNew(8*1024, vfdStackNew());
 
 #ifdef NOTYET
 	ioStackEncrypt = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen, vfdStackNew()));

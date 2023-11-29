@@ -4356,10 +4356,10 @@ File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
 	    return setFileError(-1, errno, "Unable to allocate I/O stack for %s", fileName);
 
 	/* Save error info if open failed */
-	file = (File)ioStack->openVal;
+	file = (File)(ioStack->openVal);
 	if (file < 0)
 	{
-		copyError(getErrStack(-1), -1, ioStack);
+		stackCopyError(getErrStack(-1), ioStack);
 		free(ioStack);
 		return -1;
 	}
@@ -4407,8 +4407,9 @@ int FileClose(File file)
 	if (!success && !previousError)
 	    stackCopyError(getErrStack(-1), getStack(file));
 
-	/* No matter what, release the I/O stack on Close */
-	free(getStack(file));
+	/* No matter what, release the I/O element on Close */
+	if (getStack(file) != NULL)
+	    free(getStack(file));
 	getVfd(file)->ioStack = NULL; /* Be safe */
 
 	file_debug("FileClose(done): file=%d success=%d", file, success);
@@ -4504,6 +4505,7 @@ ssize_t FileBlockSize(File file)
 int	FileResize(File file, off_t offset, uint32 wait_event_info)
 {
 	bool success;
+	file_debug("file=%d(%s)  offset=%lld", file, FilePathName(file), offset);
 	if (badFile(file))
 		return -1;
 	pgstat_report_wait_start(wait_event_info);
