@@ -233,9 +233,10 @@ static bool positionToBuffer(Buffered *this, off_t position)
 /**
  * Close the buffered file.
  */
-static ssize_t bufferedClose(Buffered *this)
+static bool bufferedClose(Buffered *this)
 {
 	file_debug("bufferedClose: file=%zd", this->ioStack.openVal);
+
     /* Flush our buffers. */
     flushBuffer(this);
 
@@ -243,14 +244,14 @@ static ssize_t bufferedClose(Buffered *this)
     bufferedCleanup(this);
 
 	file_debug("bufferedClose(done): msg=%s", this->ioStack.errMsg);
-	return stackError(this)? -1: 0;
+	return !stackError(this);
 }
 
 
 /*
  * Synchronize any written data to persistent storage.
  */
-static ssize_t bufferedSync(Buffered *this)
+static bool bufferedSync(Buffered *this)
 {
     /* Flush our buffers. */
     bool success = flushBuffer(this);
