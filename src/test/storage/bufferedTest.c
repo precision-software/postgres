@@ -12,7 +12,7 @@
 static void *
 createStack(size_t bufsize)
 {
-	return bufferedNew(16*1024, vfdStackNew());
+	return bufferedNew(8*1024, vfdStackNew());
 }
 
 void testMain()

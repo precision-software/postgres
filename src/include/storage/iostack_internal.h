@@ -20,16 +20,9 @@ This is a "header only" file.
 
 #include "storage/iostack.h"
 
-/* Initialize I/O stacks.*/
+/* forward references */
 extern void ioStackSetup(void);
-
-/* To assist testing */
 extern void setTestStack(IoStack *proto);
-
-/*
- * The following stack eleements.
- */
-extern void *vfdStackNew(void);
 
 /*
  * Quick and dirty debug function to display a buffer in hex.
@@ -121,7 +114,7 @@ stackCopyError(IoStack *dest, IoStack *src)
  * Expects errno to be set.  TODO: DEFUNCT
  */
 inline static ssize_t
-stackCheckError(void *thisVoid, ssize_t retval, const char *fmt, ...)
+stackCheckErrorOld(void *thisVoid, ssize_t retval, const char *fmt, ...)
 {
 	va_list args;
 	IoStack *this = thisVoid;
@@ -138,23 +131,19 @@ stackCheckError(void *thisVoid, ssize_t retval, const char *fmt, ...)
 }
 
 /*
- * Copy error information from the next lower stack level to the current level.
+ * Copy error information from one stack to another,
+ *   providing retval for convenience.
+ * Implemented as a macro so retval type is correct.
  */
-inline static ssize_t
-copyError(void *this, ssize_t retval, void *that)
-{
-	stackCopyError(this, that);
-	return retval;
-}
+#define copyError(this, retval, that) \
+     (stackCopyError((IoStack *)this, (IoStack *)that), retval)
+
 
 /*
  * Copy error info from the next lower stack level.
+ * Implemented as a macro so retval has correct type.
  */
-inline static ssize_t
-copyNextError(void *this, ssize_t retval)
-{
-	return copyError(this, retval, nextStack(this));
-}
+#define copyNextError(this, retval) copyError(this, retval, nextStack(this))
 
 /* Some convenient macros */
 #ifndef MAX

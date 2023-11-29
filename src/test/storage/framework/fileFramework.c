@@ -22,7 +22,7 @@ typedef uint8_t Byte;
 
 /* Matrix of file and block sizes for testing. */
 off_t fileSize[] = {0, 1024, 1, 64, 1027, 7*1024, 32*1024 + 127, 6*1024*1024+153};
-size_t blockSize[] = {1024, 4 * 1024, 3 * 1024 + 357, 1024 - 237, 64, 1};
+size_t blockSize[] = {1024, 8 * 1024, 3 * 1024 + 357, 1024 - 237, 64, 1};
 
 /* Given the position in the seek, generate one byte of data for that position. */
 static inline Byte generateByte(size_t position)

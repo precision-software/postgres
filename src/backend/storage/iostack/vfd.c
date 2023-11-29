@@ -72,7 +72,7 @@ vfdOpen(VfdBottom *proto, const char *path, int oflags, mode_t mode)
 	}
 
 	/* Always return a new I/O stack structure. It contains error info if problems occurred. */
-	file_debug("(done): file=%d  name=%s oflags=0x%x  mode=0x%x", this->file, path, oflags, mode);
+	file_debug("(done): file=%d  name=%s oflags=0x%x  mode=0x%x  fileSize=%lld", this->file, path, oflags, mode, this->fileSize);
 	return this;
 }
 
@@ -83,7 +83,7 @@ static ssize_t
 vfdWrite(VfdBottom *this, const Byte *buf, ssize_t bufSize, off_t offset)
 {
 	ssize_t actual = FileWrite_Internal(this->file, buf, bufSize, offset);
-	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd", this->file, FilePathName(this->file), bufSize, offset, actual);
+	file_debug("file=%d(%s) fileSize=%lld bufSize=%zd  offset=%lld  actual=%zd", this->file, FilePathName(this->file), this->fileSize, bufSize, offset, actual);
 	if (actual < 0)
 		return stackErrorSet(this, -1, errno, "Unable to write to file %d(%s", this->file, FilePathName(this->file));
 
@@ -154,39 +154,38 @@ vfdSync(VfdBottom *this)
 static off_t
 vfdSize(VfdBottom *this)
 {
-	off_t offset = FileSize_Internal(this->file);
-	if (offset < 0)
-		return stackErrorSet(this, -1, errno, "Unable to get size of file %d(%s)", this->file, FilePathName(this->file));
-
-	return offset;
+	file_debug("file=%zd(%s)  fileSize=%lld", thisStack(this)->openVal, FilePathName(thisStack(this)->openVal), this->fileSize);
+	return this->fileSize;
 }
 
-
+/*
+ * Change the size of a Posix file. Either truncate, or extend with zeros.
+ * TODO: drop the wait event info from internal routines.
+ */
 static bool vfdResize(VfdBottom *this, off_t newSize)
 {
-
-	off_t fileSize;
 	bool success;
 
-	fileSize = vfdSize(this);
-	if (fileSize < 0)
-		return false;
+	file_debug("file=%d(%s)  fileSize=%lld  newSize=%lld", this->file, FilePathName(this->file), this->fileSize, newSize);
 
 	/* CASE: file is shrinking. Truncate it.*/
-	if (newSize < fileSize)
+	if (newSize < this->fileSize)
 	    success = FileTruncate_Internal(this->file, newSize) >= 0;
 
 	/* CASE: file is growing a small amount (64K). Write out zeros. */
-	else if (newSize < fileSize + 64*1024)
-		success = FileZero(this->file, fileSize, newSize - fileSize, 0) >= 0; /* todo: wait event info - drop it */
+	else if (newSize < this->fileSize + 64*1024)
+		success = FileZero(this->file, this->fileSize, newSize - this->fileSize, 0) >= 0; /* todo: wait event info - drop it */
 
 	/* OTHERWISE: larger allocation. Use fallocate */
 	else
-		success = FileFallocate(this->file, fileSize, newSize - fileSize, 0) >= 0;
+		success = FileFallocate(this->file, this->fileSize, newSize - this->fileSize, 0) >= 0;
 
 	if (!success)
-		return stackErrorSet(this, false, errno, "Unable to truncate file %d(%s)", /* TODO: Include error message */
-					  this->file, FilePathName(this->file), this->file);
+		return stackErrorSet(this, false, errno, "Unable to resize file %d(%s) from %lld to %lld",
+					  this->file, FilePathName(this->file), this->file, this->fileSize, newSize);
+
+	/* Adopt the new size */
+	this->fileSize = newSize;
 
 	return true;
 }

@@ -69,7 +69,7 @@ void ioStackSetup(void)
 {
 	/* Set up the prototype stacks */
 	ioStackRaw = vfdStackNew();
-	ioStackPlain = bufferedNew(16*1024, vfdStackNew());
+	ioStackPlain = bufferedNew(8*1024, vfdStackNew());
 
 #ifdef NOTYET
 	ioStackEncrypt = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen, vfdStackNew()));
