@@ -271,8 +271,10 @@ static void deleteFile(char *name)
 static void regression(char *name, size_t blockSize)
 {
     File file;
-    Byte buf[128];
-    Byte *block;
+	int idx;
+    Byte *buf = calloc(blockSize, 0xff);
+    Byte *ones = calloc(blockSize, 1);
+	Byte *zeros= calloc(blockSize, 0);
 
     deleteFile(name);
 
@@ -299,20 +301,33 @@ static void regression(char *name, size_t blockSize)
 
 	/* Should read EOF on empty file */
 	file = FileOpen(name, O_RDONLY|PG_TESTSTACK);
-	PG_ASSERT(0 == FileRead(file, buf, sizeof(buf), 0, 0));
+	PG_ASSERT(0 == FileRead(file, buf, blockSize, 0, 0));
 	PG_ASSERT(FileEof(file));
 	PG_ASSERT(!FileError(file));
 	PG_ASSERT(FileClose(file) == 0);
 
 	/* Should write a block and then read EOF */
-	block = calloc(blockSize, 1);
-	file = FileOpen(name, O_RDWR|PG_TESTSTACK);
-	PG_ASSERT_EQ(blockSize, FileWriteSeq(file, block, blockSize, 0));
-	PG_ASSERT_EQ(0, FileReadSeq(file, block, blockSize,  0));
+	file = FileOpen(name, O_RDWR|O_TRUNC|PG_TESTSTACK);
+	PG_ASSERT_EQ(blockSize, FileWriteSeq(file, ones, blockSize, 0));
+	PG_ASSERT_EQ(blockSize, FileSize(file));
+	PG_ASSERT_EQ(0, FileReadSeq(file, buf, blockSize,  0));
 	PG_ASSERT(FileEof(file));
 	PG_ASSERT(!FileError(file));
 	PG_ASSERT(FileClose(file) == 0);
-	free(block);
+	free(ones);
+
+	/* Writing beyond EOF should extend file */
+	file = FileOpen(name, O_RDWR|O_TRUNC|PG_TESTSTACK);
+	PG_ASSERT_EQ(blockSize, FileWrite(file, ones, blockSize, blockSize, 0));
+	PG_ASSERT_EQ(2*blockSize, FileSize(file));
+	PG_ASSERT_EQ(blockSize, FileRead(file, buf, blockSize, 0, 0));
+	for (idx = 0; idx<blockSize; idx++)
+		PG_ASSERT_EQ(zeros[idx], buf[idx]);
+	PG_ASSERT_EQ(blockSize, FileRead(file, buf, blockSize, blockSize, 0));
+	for (idx = 0; idx < blockSize; idx++)
+		PG_ASSERT_EQ(ones[idx], buf[idx]);
+	PG_ASSERT_EQ(0, FileClose(file));
+
 
 	deleteFile(name);
 }
@@ -330,6 +345,9 @@ void singleSeekTest(CreateStackFn createStack, char *nameFmt, off_t size, size_t
 	/* Inject the procedure to create an I/O Stack */
 	setTestStack(createStack(bufSize));
 
+	/* Quick regression test */
+	regression(fileName, bufSize);
+
     /* create and read back as a stream */
     generateFile(fileName, size, bufSize);
     verifyFile(fileName, size, bufSize);
@@ -345,8 +363,6 @@ void singleSeekTest(CreateStackFn createStack, char *nameFmt, off_t size, size_t
 
     /* Read back as random reads */
     verifyRandomFile(fileName, size + bufSize, bufSize);
-
-	regression(fileName, bufSize);
 
     /* Clean things up */
     deleteFile(fileName);
@@ -374,13 +390,15 @@ void singleStreamTest(CreateStackFn createStack, char *nameFmt, off_t size, size
 	/* Create the prototype TEST I/O stack */
 	setTestStack(createStack(bufferSize));
 
+	/* Quick regression test */
+	regression(fileName, bufferSize);
+
 	generateFile(fileName, size, bufferSize);
     verifyFile(fileName, size, bufferSize);
 
     appendFile(fileName, size, bufferSize);
     verifyFile(fileName, size + bufferSize, 16 * 1024);
 
-	regression(fileName, bufferSize);
 
     /* Clean things up */
     deleteFile(fileName);

@@ -182,7 +182,7 @@ stackErrorNo(void *thisVoid)
 #define PG_STACK_MASK     (7 << 28)
 
 /* Declare a "debug" macro */
-//#define FILE_DEBUG
+#define FILE_DEBUG
 #ifdef FILE_DEBUG
 #define file_debug(...) \
     do {  \

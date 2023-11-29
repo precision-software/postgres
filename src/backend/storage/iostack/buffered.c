@@ -11,7 +11,6 @@
  */
 #include <stdlib.h>
 #include <sys/fcntl.h>
-#include <assert.h>
 #include "storage/iostack_internal.h"
 #include "storage/fd.h"
 
@@ -129,7 +128,7 @@ bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t offset)
 {
 	ssize_t actual;
     file_debug("bufferedWrite: size=%zd  offset=%lld ", size, offset);
-    assert(size >= 0);
+    Assert(size >= 0);
 
 	/* Skip empty writes */
 	if (size == 0)
@@ -154,9 +153,8 @@ bufferedWrite(Buffered *this, const Byte *buf, size_t size, off_t offset)
 	if (actual > 0)
 	    this->fileSize = MAX(this->fileSize, offset + actual);
 
-	bufferedSync(this);
+	Assert(this->currentSize == this->bufferSize || this->currentSize == 0 || this->currentBlock + this->currentSize == this->fileSize);
 
-    assert(actual > 0);
     return actual;
 }
 
@@ -178,8 +176,8 @@ static ssize_t directWrite(Buffered *this, const Byte *buf, size_t size, off_t o
 		return copyNextError(this, actual);
 
 	this->fileSize = MAX(this->fileSize, offset + actual);
-	bufferedSync(this);
 
+	Assert(this->currentSize == this->bufferSize || this->currentSize == 0 || this->currentBlock + this->currentSize == this->fileSize);
     return actual;
 }
 
@@ -192,7 +190,7 @@ static ssize_t bufferedRead(Buffered *this, Byte *buf, size_t size, off_t offset
 	ssize_t actual;
 
 	file_debug("bufferedRead: size=%zd  offset=%lld ", size, offset);
-	assert(size > 0);
+	Assert(size > 0);
 
 	/* Position to the new block if it changed. */
 	if (!positionToBuffer(this, offset))
@@ -396,27 +394,18 @@ static bool fillBuffer(Buffered *this)
 {
 	file_debug("fillBuffer: bufActual=%zd  bufPosition=%lld  fileSize=%lld",
 		  this->currentSize, this->currentBlock, this->fileSize);
-	assert(this->currentBlock % this->bufferSize == 0);
+	Assert(this->currentBlock % this->bufferSize == 0);
 
 	/* Don't fill in if it is already filled in */
 	if (this->currentSize > 0)
 		return true;
 
-	/* Quick check for EOF (without system calls) */
-	if (this->currentBlock == this->fileSize)
-	{
-		this->currentSize = 0;
-		this->ioStack.eof = true;
-		return true;
-	}
-
-	/* Check for holes. Shouldn't happen because FileWrite does explicit resizing. */
-	Assert(this->currentBlock <= this->fileSize);
-
 	/* Read in the current buffer */
 	this->currentSize = stackReadAll(nextStack(this), this->buf, this->bufferSize, this->currentBlock);
 	if (this->currentSize < 0)
 		return copyNextError(this, false);
+
+	Assert(this->currentSize == this->bufferSize || this->currentBlock + this->currentSize == this->fileSize);
 
 	return true;
 }
@@ -428,10 +417,12 @@ static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t positi
 	ssize_t actual;
 
 	file_debug("copyIn: position=%lld  size=%zd bufPosition=%lld bufActual=%zd", position, size, this->currentBlock, this->currentSize);
-	assert(this->currentBlock == ROUNDDOWN(position, this->bufferSize));
+	Assert(this->currentBlock == ROUNDDOWN(position, this->bufferSize));
 
 	if (this->currentSize == -1)
 		return -1;
+
+	Assert(this->currentSize == this->bufferSize || this->currentBlock + this->currentSize == this->fileSize);
 
     /* Check to see if we are creating holes. */
 	if (position > this->currentBlock + this->currentSize)
@@ -447,7 +438,7 @@ static ssize_t copyIn(Buffered *this, const Byte *buf, size_t size, off_t positi
     this->currentSize = MAX(this->currentSize, actual + offset);
 	file_debug("copyin(end): actual=%zd  bufActual=%zd", actual, this->currentSize);
 
-    assert(this->currentSize <= this->bufferSize);
+    Assert(this->currentSize <= this->bufferSize);
     return actual;
 }
 

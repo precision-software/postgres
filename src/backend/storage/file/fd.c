@@ -4447,6 +4447,7 @@ ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wa
 ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info)
 {
 	ssize_t actual;
+	off_t fileSize;
 	file_debug("name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 
 	if (badFile(file))
@@ -4454,6 +4455,13 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 
 	if (offset < 0 || (ssize_t)amount < 0)
         return setFileError(file, EINVAL, "");
+
+	/* Eztend the file explicitly if new block starts past EOF */
+	/* TODO: track fileSize in vfd rather than calling FileSize(). */
+	fileSize = FileSize(file);
+	Assert(fileSize >= 0);
+	if (offset > fileSize && FileResize(file, offset, wait_event_info) < 0)
+		return -1;
 
 	/* Write the data as requested */
 	pgstat_report_wait_start(wait_event_info);
@@ -4464,10 +4472,20 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
+	/* DEBUG only */
+	int save_errno = errno;
+	if (FileSync(file, wait_event_info) < 0)
+		Assert(false);
+	errno = save_errno;
+
 	file_debug("(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;
 }
 
+/*
+ * Flush a file's data to persistent storage.
+ * TODO: add offset and amount as parameters.
+ */
 int FileSync(File file, uint32 wait_event_info)
 {
 	bool success;
@@ -4482,7 +4500,9 @@ int FileSync(File file, uint32 wait_event_info)
 	return success ? 0 : -1;
 }
 
-
+/*
+ * Get the size of the file.
+ */
 off_t FileSize(File file)
 {
 	off_t size;
@@ -4494,6 +4514,12 @@ off_t FileSize(File file)
 	return size;
 }
 
+/*
+ * Get the block size of the file.
+ * All seeks must be to block boundaries,
+ * and all I/O must be complete blocks except
+ * for the final block which may be partial.
+ */
 ssize_t FileBlockSize(File file)
 {
 	if (badFile(file))
@@ -4501,6 +4527,10 @@ ssize_t FileBlockSize(File file)
 	return getStack(file)->blockSize;
 }
 
+
+/*
+ * Change the size of a file, either by truncating or filling with zeros.
+ */
 int	FileResize(File file, off_t offset, uint32 wait_event_info)
 {
 	bool success;
