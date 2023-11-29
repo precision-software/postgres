@@ -184,10 +184,15 @@ int			io_direct_flags;
 
 #define VFD_CLOSED (-1)
 
+/* Is file a valid, open file? */
 #define FileIsValid(file) \
 	((file) > 0 && (file) < (int) SizeVfdCache && VfdCache[file].fileName != NULL)
 
+/* Is file temporarily closed while its file descriptor is used elsewhere? */
 #define FileIsNotOpen(file) (VfdCache[file].fd == VFD_CLOSED)
+
+/* Is file a temp file to be closed at end of transaction? */
+#define FileIsTemp(file) ((VfdCache[file].fdstate & FD_CLOSE_AT_EOXACT) != 0)
 
 /* these are the assigned bits in fdstate below: */
 #define FD_DELETE_AT_CLOSE	(1 << 0)	/* T = delete when closed */
@@ -3221,6 +3226,19 @@ BeforeShmemExit_Files(int code, Datum arg)
 #endif
 }
 
+
+/* Issue a sync on all open files. */
+static void
+SyncTempFiles(void)
+{
+	File file;
+	file_debug("");
+	for (file = 1; file < SizeVfdCache; file++)
+		if (FileIsValid(file))
+			FileSync(file, 0);
+}
+
+
 /*
  * Close temporary files and delete their underlying files.
  *
@@ -3236,42 +3254,35 @@ BeforeShmemExit_Files(int code, Datum arg)
 static void
 CleanupTempFiles(bool isCommit, bool isProcExit)
 {
-	Index		i;
+	File   file;
 	file_debug("isCommit=%d  isProcExit=%d", isCommit, isProcExit);
 
-	/*
-	 * Careful here: at proc_exit we need extra cleanup, not just
-	 * xact_temporary files.
-	 */
+	/* If we might have files to clean up ...*/
 	if (isProcExit || have_xact_temporary_files)
 	{
 		Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
-		for (i = 1; i < SizeVfdCache; i++)
-		{
-			unsigned short fdstate = VfdCache[i].fdstate;
 
-			if (((fdstate & FD_DELETE_AT_CLOSE) || (fdstate & FD_CLOSE_AT_EOXACT)) &&
-				VfdCache[i].fileName != NULL)
-			{
-				/*
-				 * If we're in the process of exiting a backend process, close
-				 * all temporary files. Otherwise, only close temporary files
-				 * local to the current transaction. They should be closed by
-				 * the ResourceOwner mechanism already, so this is just a
-				 * debugging cross-check.
-				 */
-				if (isProcExit)
-					FileClose(i);
-				else if (fdstate & FD_CLOSE_AT_EOXACT)
-				{
-					elog(WARNING,
-						 "temporary file %s not closed at end-of-transaction",
-						 VfdCache[i].fileName);
-					FileClose(i);
-				}
-			}
+		/* Do for each valid file */
+		for (file = 1; file < SizeVfdCache; file++)
+		{
+			if (!FileIsValid(file))
+				continue;
+
+			/*
+			 * If temporary file is open at EOXACT, show a warning.
+			 * They should have been closed by the ResourceOwner machanism already.
+			 * */
+			if (FileIsTemp(file) && isCommit)
+				elog(WARNING,
+					 "temporary file %s not closed at end-of-transaction",
+					 VfdCache[file].fileName);
+
+			/* Close all files if we are exiting, and temp files if end of transaction */
+			if (isProcExit || FileIsTemp(file))
+				FileClose(file);
 		}
 
+		/* Note we no longer have temp files open */
 		have_xact_temporary_files = false;
 	}
 
@@ -4472,11 +4483,13 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
-	/* DEBUG only */
-	int save_errno = errno;
-	if (FileSync(file, wait_event_info) < 0)
-		Assert(false);
-	errno = save_errno;
+	/* DEBUG only. Synchronize all writes to ensure the file is fully written. */
+	{
+		int save_errno = errno;
+		if (FileSync(file, wait_event_info) < 0)
+			Assert(false);
+		errno = save_errno;
+	}
 
 	file_debug("(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;
