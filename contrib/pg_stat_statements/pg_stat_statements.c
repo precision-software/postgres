@@ -2219,7 +2219,7 @@ error:
 					PGSS_TEXT_FILE)));
 
 	if (fd >= 0)
-		CloseTransientFile(fd);
+		FileClose(fd);
 
 	/* Mark our write complete */
 	{
