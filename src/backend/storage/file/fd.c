@@ -3256,12 +3256,11 @@ CleanupTempFiles(bool isCommit, bool isProcExit)
 {
 	File   file;
 	file_debug("isCommit=%d  isProcExit=%d", isCommit, isProcExit);
+	Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
 
 	/* If we might have files to clean up ...*/
 	if (isProcExit || have_xact_temporary_files)
 	{
-		Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
-
 		/* Do for each valid file */
 		for (file = 1; file < SizeVfdCache; file++)
 		{
@@ -3597,6 +3596,9 @@ SyncDataDirectory(void)
 	/* We can skip this whole thing if fsync is disabled. */
 	if (!enableFsync)
 		return;
+
+	/* Sync all open files. Some may have buffers which need flushing */
+	SyncTempFiles();
 
 	/*
 	 * If pg_wal is a symlink, we'll need to recurse into it separately,
@@ -4483,6 +4485,7 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 	if (actual >= 0)
 		getVfd(file)->offset = offset + actual;
 
+#ifdef NOTNOW
 	/* DEBUG only. Synchronize all writes to ensure the file is fully written. */
 	{
 		int save_errno = errno;
@@ -4490,6 +4493,7 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 			Assert(false);
 		errno = save_errno;
 	}
+#endif
 
 	file_debug("(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;

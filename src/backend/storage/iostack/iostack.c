@@ -55,7 +55,8 @@ selectIoStack(const char *path, int oflags, mode_t mode)
 		case PG_ENCRYPT:          return ioStackEncrypt;
 		case PG_ENCRYPT_PERM:     return ioStackEncryptPerm;
 		case PG_TESTSTACK:        return ioStackTest;
-		case 0:                   file_debug("Raw mode: path=%s oflags=0x%x", path, oflags); return ioStackRaw;
+		case PG_RAW:              return ioStackRaw;
+		case 0:                   file_debug("Default I/O stack: path=%s oflags=0x%x", path, oflags); return ioStackRaw;
 
 		default: elog(FATAL, "Unrecognized I/O Stack oflag 0x%x", (oflags & PG_STACK_MASK));
 	}

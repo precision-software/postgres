@@ -170,14 +170,13 @@ stackErrorNo(void *thisVoid)
 	return this->errNo;
 }
 
-
 /* Additional open flags to support encryption/compresion */
-#define PG_RAW            (0 << 28)
 #define PG_ENCRYPT        (1 << 28)
 #define PG_ECOMPRESS      (2 << 28)
 #define PG_ENCRYPT_PERM   (3 << 28)
 #define PG_TESTSTACK      (4 << 28)
 #define PG_PLAIN          (5 << 20)
+#define PG_RAW            (6 << 20)
 
 #define PG_STACK_MASK     (7 << 28)
 
