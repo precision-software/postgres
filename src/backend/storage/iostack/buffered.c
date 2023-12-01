@@ -4,11 +4,8 @@
  * and Writes to the output file.
  *
  * Buffered replicates the functionality of fread/fwrite/fseek.
- * Seeks and O_APPEND are not compatible with subsequent streaming filters which create
- * variable size blocks. (eg. compression).
- *
- *  One goal is to ensure purely sequential reads/writes do not require Seek operations.
  */
+
 #include <stdlib.h>
 #include <sys/fcntl.h>
 #include "storage/iostack_internal.h"
@@ -54,9 +51,11 @@ static bool bufferedSync(Buffered *this);
 
 /**
  * Open a buffered file, reading, writing or both.
+ * Note a buffered file should only be shared in "read only" mode.
+ * The internal buffers are not shared, so multiple writers cause corruption.
  */
 static Buffered *
-bufferedOpen(Buffered *proto, const char *path, int oflags, mode_t perm)
+bufferedOpen(Buffered *proto, const char *path, uint64 oflags, mode_t perm)
 {
 	IoStack *next;
 	Buffered *this;

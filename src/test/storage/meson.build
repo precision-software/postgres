@@ -29,3 +29,12 @@ storage_bufferedtest = executable('storage_bufferedtest',
   link_depends: backend_link_depends,
 )
 test('bufferedtest', storage_bufferedtest, suite: 'iostack')
+
+storage_aeadtest = executable('storage_aeadtest',
+                                  files('aeadTest.c',  'framework/fileFramework.c', ),
+                                  include_directories: [include_directories('.'), postgres_inc],
+                                  link_args: backend_link_args,
+                                  link_with: [test_lib, backend_link_with],
+                                  link_depends: backend_link_depends,
+)
+test('aeadtest', storage_aeadtest, suite: 'iostack')

@@ -18,8 +18,8 @@ typedef struct IoStack IoStack;
  * Universal helper functions - across all I/O stacks.
  * TODO: Should "this" be void* or IoStack* ?  Leaning towards IoStack ...
  */
-extern ssize_t stackWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset);
-extern ssize_t stackReadAll(IoStack *this, Byte *buf, size_t size, off_t offset);
+extern ssize_t stackWriteAll(void *this, const Byte *buf, size_t size, off_t offset);
+extern ssize_t stackReadAll(void *this, Byte *buf, size_t size, off_t offset);
 extern ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset);
 extern ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset);
 extern bool stackWriteInt32(IoStack *this, uint32_t data, off_t offset);
@@ -27,7 +27,7 @@ extern bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset);
 extern bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset);
 extern bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset);
 
-extern IoStack *selectIoStack(const char *path, int oflags, mode_t mode);
+extern IoStack *selectIoStack(const char *path, uint64 oflags, mode_t mode);
 
 
 /*
@@ -35,7 +35,7 @@ extern IoStack *selectIoStack(const char *path, int oflags, mode_t mode);
  */
 void *bufferedNew(ssize_t suggestedSize, void *next);
 void *lz4CompressNew(size_t blockSize, void *indexFile, void *next);
-void *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keyLen, void *next);
+void *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keyLen, uint64 getSeqNr(), void *next);
 void *vfdStackNew(void);
 
 /* Filter for talking to Posix files. Not used by Postgres, but handy for unit tests. */
@@ -67,7 +67,7 @@ struct IoStack
  *   IoStackOpen On error, returns a closed node with error info,
  *               or NULL if unable to allocate memory.
  */
-typedef IoStack *(*IoStackOpen)(void *this, const char *path, int mode, mode_t perm);
+typedef IoStack *(*IoStackOpen)(void *this, const char *path, uint64 oflags, mode_t perm);
 typedef ssize_t (*IoStackRead)(void *this, Byte *buf, ssize_t size, off_t offset);
 typedef ssize_t (*IoStackWrite)(void *this, const Byte *buf, ssize_t size, off_t offset);
 typedef bool (*IoStackSync)(void *this);
@@ -170,7 +170,7 @@ stackErrorNo(void *thisVoid)
 	return this->errNo;
 }
 
-/* Additional open flags to support encryption/compresion */
+/* Additional open flags to support encryption/compression */
 #define PG_ENCRYPT        (1 << 28)
 #define PG_ECOMPRESS      (2 << 28)
 #define PG_ENCRYPT_PERM   (3 << 28)
@@ -181,7 +181,7 @@ stackErrorNo(void *thisVoid)
 #define PG_STACK_MASK     (7 << 28)
 
 /* Declare a "debug" macro */
-//#define FILE_DEBUG
+#define FILE_DEBUG
 #ifdef FILE_DEBUG
 #define file_debug(...) \
     do {  \

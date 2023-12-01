@@ -45,7 +45,7 @@ static bool vfdClose(VfdBottom *this);
  * Open a file using a virtual file descriptor.
  */
 static void *
-vfdOpen(VfdBottom *proto, const char *path, int oflags, mode_t mode)
+vfdOpen(VfdBottom *proto, const char *path, uint64 oflags, mode_t mode)
 {
 	/* Clone the bottom prototype. */
 	VfdBottom *this = vfdStackNew(); /* No parameters to copy */

@@ -224,8 +224,8 @@ extern int copyFileError(File dst, File src);
 extern bool badFile(File file);
 
 /* A preferred name. */
-extern File FileOpen(const char *name, int fileFlags);
-extern File FileOpenPerm(const char *name, int fileFlags, mode_t perm);
+extern File FileOpen(const char *fileName, uint64 fileFlags);
+extern File FileOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode);
 
 /*
  * Hooks into internal fd.c routines.

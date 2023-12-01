@@ -40,7 +40,7 @@ setTestStack(IoStack *proto)
  * The current version looks for special "PG_*" open flags.
  */
 IoStack *
-selectIoStack(const char *path, int oflags, mode_t mode)
+selectIoStack(const char *path, uint64 oflags, mode_t mode)
 {
 	file_debug("IoStackNew: name=%s  oflags=0x%x  mode=o%o", path, oflags, mode);
 
@@ -90,8 +90,10 @@ void ioStackSetup(void)
 }
 
 
-ssize_t stackWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset)
+ssize_t stackWriteAll(void *thisVoid, const Byte *buf, size_t size, off_t offset)
 {
+	IoStack *this = thisVoid;
+
 	/* Repeat until the entire buffer is written (or error) */
 	ssize_t total, current;
 	for (total = 0; total < size; total += current)
@@ -110,8 +112,10 @@ ssize_t stackWriteAll(IoStack *this, const Byte *buf, size_t size, off_t offset)
 }
 
 
-ssize_t stackReadAll(IoStack *this, Byte *buf, size_t size, off_t offset)
+ssize_t stackReadAll(void *thisVoid, Byte *buf, size_t size, off_t offset)
 {
+	IoStack *this = thisVoid;
+
 	/* Repeat until the entire buffer is read (or EOF or error) */
 	ssize_t total, current;
 	for (total = 0; total < size; total += current)

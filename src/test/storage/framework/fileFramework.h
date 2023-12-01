@@ -2,10 +2,11 @@
 #ifndef FILTER_FILEFRAMEWORK_H
 #define FILTER_FILEFRAMEWORK_H
 
-//#include "storage/iostack.h"
+#include "storage/iostack.h"
+
 
 /* Function type to create an IoStack with the given block size */
-typedef void *(*CreateStackFn)(size_t blockSize);
+typedef IoStack *(*CreateStackFn)(size_t blockSize);
 
 void seekTest(CreateStackFn createStack, char *nameFmt);
 void singleSeekTest(CreateStackFn createStack, char *nameFmt, off_t fileSize, size_t bufSize);

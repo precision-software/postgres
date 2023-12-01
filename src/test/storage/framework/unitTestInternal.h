@@ -8,7 +8,7 @@
 #include <stdlib.h>
 extern void MemoryContextInit(void);
 
-#define TEST_DIR "testrun/storage/"
+#define TEST_DIR "/tmp/pgtest/"
 
 #define BEGIN do {
 #define END   } while (0)

@@ -4102,7 +4102,7 @@ ResOwnerPrintFile(Datum res)
 }
 
 
-/*******************************************************************************
+/*
 * The following functions add sequential and error handling to the VFD routines.
 * They are mostly wrappers around the original VFD routines,
 * which have been renamed by appending "_Internal".
@@ -4335,18 +4335,21 @@ int updateFileError(File file, int errorCode, const char *fmt, ...)
  */
 File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
-	return FileOpenPerm(fileName, fileFlags, fileMode);
+	return FileOpenPerm(fileName, fileFlags | PG_RAW, fileMode);
 }
 
 /*
  * Preferred procedure for opening a file
  */
-File FileOpen(const char *fileName, int fileFlags)
+File FileOpen(const char *fileName, uint64 fileFlags)
 {
 	return FileOpenPerm(fileName, fileFlags, pg_file_create_mode);
 }
 
-File FileOpenPerm(const char *fileName, int fileFlags, mode_t fileMode)
+/*
+ * Open a file, specifying permissions.
+ */
+File FileOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 {
 	File file;
 	IoStack *proto;
@@ -4469,8 +4472,11 @@ ssize_t FileWrite(File file, const void *buffer, size_t amount, off_t offset, ui
 	if (offset < 0 || (ssize_t)amount < 0)
         return setFileError(file, EINVAL, "");
 
-	/* Eztend the file explicitly if new block starts past EOF */
-	/* TODO: track fileSize in vfd rather than calling FileSize(). */
+	/* Extend the file explicitly if new block starts past EOF.
+	 * Normally these "holes" are zeroed out by the Posix filesystem,
+	 * but encryption or compression may require special handling.
+	 * TODO: Do temp files do this? Move to lower level and possibly Assert()
+	 */
 	fileSize = FileSize(file);
 	Assert(fileSize >= 0);
 	if (offset > fileSize && FileResize(file, offset, wait_event_info) < 0)

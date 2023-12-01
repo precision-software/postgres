@@ -1,4 +1,4 @@
-/***********************************************************************************************************************************
+/*
 Header file for developers of I/O Stacks
 
 As a quick prototype, we are NOT doing alloc/free of memory. Consequently,
@@ -6,7 +6,7 @@ As a quick prototype, we are NOT doing alloc/free of memory. Consequently,
   - Nested errors are not supported yet. (but easily done with dynamic memory allocations)
 
 This is a "header only" file.
-***********************************************************************************************************************/
+*/
 #ifndef FILTER_ERROR_H
 #define FILTER_ERROR_H
 
@@ -118,6 +118,11 @@ stackCopyError(IoStack *dest, IoStack *src)
     (stackSetError(this, code, args), retval)
 
 /*
+ * Set an I/O stack error (EIOSTACK).
+ */
+#define setIoStackError(this, retval, args...)  stackErrorSet(this, retval, EIOSTACK, args)
+
+/*
  * Expects errno to be set.  TODO: DEFUNCT
  */
 inline static ssize_t
@@ -164,7 +169,63 @@ copyNextError(void *this, ssize_t retval)
 #define MIN(a,b) ( ((a)<(b))?(a):(b) )
 #endif
 #define ROUNDDOWN(a,b) ( (a) / (b) * (b))
-#define ROUNDUP(a,b)    ROUNDDOWN(a + b - 1, b)
+#define ROUNDUP(a,b)    ROUNDDOWN((a) + (b) - 1, b)
+#define ROUNDOFF(a,b) ROUNDDOWN((a) + (b)/2, b)
+
+/*
+ * A collection of routines for packing/unpacking ints
+ * into network byte order.
+ */
+inline static void
+packInt8(Byte *dest, Byte value)
+{
+	*dest = value;
+}
+
+inline static void
+packInt16(Byte *dest, uint16 value)
+{
+	packInt8(dest, value>>8);
+	packInt8(dest+1, value);
+}
+
+inline static void
+packInt32(Byte *dest, uint32 value)
+{
+	packInt16(dest, value>>16);
+	packInt16(dest+2, value);
+}
+
+inline static void
+packInt64(Byte *dest, uint64 value)
+{
+	packInt32(dest, value>>32);
+	packInt32(dest+4, value);
+}
+
+inline static Byte
+unpackInt8(Byte *src)
+{
+	return  *src;
+}
+
+inline static uint16
+unpackInt16(Byte *src)
+{
+	return (uint16)unpackInt8(src)<<8 | unpackInt8(src+1);
+}
+
+inline static uint32
+unpackInt32(Byte *src)
+{
+	return (uint32)unpackInt16(src)<<16 | unpackInt16(src+2);
+}
+
+inline static uint64
+unpackInt64(Byte *src)
+{
+	return (uint64)unpackInt32(src)<<32 | unpackInt32(src+4);
+}
 
 
 #endif /*FILTER_ERROR_H */
