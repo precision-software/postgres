@@ -16,7 +16,7 @@ uint64 getSequenceNr()
 
 static void *createStack(size_t blockSize)
 {
-	return aeadNew("AES-256-GCM", blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32, getSequenceNr, vfdStackNew());
+	return bufferedNew(blockSize, aeadNew("AES-256-GCM", blockSize, (Byte *) "0123456789ABCDEF0123456789ABCDEF", 32, getSequenceNr, vfdStackNew()));
 }
 
 void testMain()
