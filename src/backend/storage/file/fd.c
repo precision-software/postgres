@@ -100,7 +100,7 @@
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
-#include "utils/resowner_private.h"
+#include "utils/resowner.h"
 #include "utils/varlena.h"
 
 /* Define PG_FLUSH_DATA_WORKS if we have an implementation for pg_flush_data */
@@ -207,7 +207,7 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
-	FState     fState;        /* Additional fields for FReadSeq/FWriteSeq/Encryption */
+	FState      fState;         /* State to support FRead/FWrite/encyption */
 } Vfd;
 
 /*
@@ -355,6 +355,31 @@ static void unlink_if_exists_fname(const char *fname, bool isdir, int elevel);
 
 static int	fsync_parent_path(const char *fname, int elevel);
 
+
+/* ResourceOwner callbacks to hold virtual file descriptors */
+static void ResOwnerReleaseFile(Datum res);
+static char *ResOwnerPrintFile(Datum res);
+
+static const ResourceOwnerDesc file_resowner_desc =
+{
+	.name = "File",
+	.release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
+	.release_priority = RELEASE_PRIO_FILES,
+	.ReleaseResource = ResOwnerReleaseFile,
+	.DebugPrint = ResOwnerPrintFile
+};
+
+/* Convenience wrappers over ResourceOwnerRemember/Forget */
+static inline void
+ResourceOwnerRememberFile(ResourceOwner owner, File file)
+{
+	ResourceOwnerRemember(owner, Int32GetDatum(file), &file_resowner_desc);
+}
+static inline void
+ResourceOwnerForgetFile(ResourceOwner owner, File file)
+{
+	ResourceOwnerForget(owner, Int32GetDatum(file), &file_resowner_desc);
+}
 
 /*
  * pg_fsync --- do fsync with or without writethrough
@@ -1494,7 +1519,7 @@ ReportTemporaryFileUsage(const char *path, off_t size)
 
 /*
  * Called to register a temporary file for automatic close.
- * ResourceOwnerEnlargeFiles(CurrentResourceOwner) must have been called
+ * ResourceOwnerEnlarge(CurrentResourceOwner) must have been called
  * before the file was opened.
  */
 static void
@@ -1686,7 +1711,7 @@ OpenTemporaryFile(bool interXact)
 	 * open it, if we'll be registering it below.
 	 */
 	if (!interXact)
-		ResourceOwnerEnlargeFiles(CurrentResourceOwner);
+		ResourceOwnerEnlarge(CurrentResourceOwner);
 
 	/*
 	 * If some temp tablespace(s) have been given to us, try to use the next
@@ -1818,7 +1843,7 @@ PathNameCreateTemporaryFile(const char *path, bool error_on_failure)
 
 	Assert(temporary_files_allowed);	/* check temp file access is up */
 
-	ResourceOwnerEnlargeFiles(CurrentResourceOwner);
+	ResourceOwnerEnlarge(CurrentResourceOwner);
 
 	/*
 	 * Open the file.  Note: we don't use O_EXCL, in case there is an orphaned
@@ -1858,7 +1883,7 @@ PathNameOpenTemporaryFile(const char *path, int mode)
 
 	Assert(temporary_files_allowed);	/* check temp file access is up */
 
-	ResourceOwnerEnlargeFiles(CurrentResourceOwner);
+	ResourceOwnerEnlarge(CurrentResourceOwner);
 
 	file = PathNameOpenFile(path, mode | PG_BINARY);
 
@@ -1926,13 +1951,13 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 }
 
 /*
- * close a file when done with it
+ * close a file when done with it. True if successful.
  */
 int
 FileClose(File file)
 {
 	Vfd		   *vfdP;
-	int 	   save_errno = 0;
+	bool       save_errno = 0;
 
 	Assert(FileIsValid(file));
 
@@ -1947,7 +1972,6 @@ FileClose(File file)
 		if (close(vfdP->fd) != 0)
 		{
 			save_errno = errno;
-
 			/*
 			 * We may need to panic on failure to close non-temporary files;
 			 * see LruDelete.
@@ -1993,9 +2017,12 @@ FileClose(File file)
 
 		/* in any case do the unlink */
 		if (unlink(vfdP->fileName))
+		{
+			save_errno = errno;
 			ereport(LOG,
 					(errcode_for_file_access(),
-					 errmsg("could not delete file \"%s\": %m", vfdP->fileName)));
+						errmsg("could not delete file \"%s\": %m", vfdP->fileName)));
+		}
 
 		/* and last report the stat results */
 		if (save_errno == 0)
@@ -2018,9 +2045,9 @@ FileClose(File file)
 	 */
 	FreeVfd(file);
 
-	/* Return -1 if unsuccessful, and set errno */
+	/* Return -1 and set errno if error occurred */
 	errno = save_errno;
-	return (save_errno == 0) ? 0: -1;
+	return (save_errno == 0) ? 0 : -1;
 }
 
 /*
@@ -3490,8 +3517,6 @@ do_syncfs(const char *path)
  * rewriting all changes again during recovery.
  *
  * Note we assume we're chdir'd into PGDATA to begin with.
- *
- * TODO: Sync all open files as well.
  */
 void
 SyncDataDirectory(void)
@@ -3981,13 +4006,38 @@ assign_debug_io_direct(const char *newval, void *extra)
 	io_direct_flags = *flags;
 }
 
-/*
- * Set the "Delete on Close" flag.
- */
-void setDeleteOnClose(File file)
+/* ResourceOwner callbacks */
+
+static void
+ResOwnerReleaseFile(Datum res)
 {
+	File		file = (File) DatumGetInt32(res);
+	Vfd		   *vfdP;
+
 	Assert(FileIsValid(file));
-	VfdCache[file].fdstate |= FD_DELETE_AT_CLOSE;
+
+	vfdP = &VfdCache[file];
+	vfdP->resowner = NULL;
+
+	FileClose(file);
+}
+
+static char *
+ResOwnerPrintFile(Datum res)
+{
+	return psprintf("File %d", DatumGetInt32(res));
+}
+
+
+/*
+ * Provide access to the state used for FRead/FWrite/Encryption.
+ * Called frequently, so it is a candidate for inlining.
+ */
+FState *getFState(File file)
+{
+	if (!FileIsValid(file))
+		return NULL;
+	return &VfdCache[file].fState;
 }
 
 void setTempFileLimit(File file)
@@ -3996,12 +4046,8 @@ void setTempFileLimit(File file)
 	VfdCache[file].fdstate |= FD_TEMP_FILE_LIMIT;
 }
 
-
-FState *
-getFState(File file)
+void setDeleteOnClose(File file)
 {
-	if (!FileIsValid(file))
-		return NULL;
-
-	return &VfdCache[file].fState;
+	Assert(FileIsValid(file));
+	VfdCache[file].fdstate |= FD_DELETE_AT_CLOSE;
 }
