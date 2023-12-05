@@ -58,7 +58,7 @@ selectIoStack(const char *path, uint64 oflags, mode_t mode)
 		case PG_RAW:              return ioStackRaw;
 		case 0:                   file_debug("Default I/O stack: path=%s oflags=0x%x", path, oflags); return ioStackRaw;
 
-		default: Assert(false); elog(FATAL, "Unrecognized I/O Stack oflag 0x%lx", (oflags & PG_STACK_MASK));
+		default: Assert(false); elog(FATAL, "Unrecognized I/O Stack oflag 0x%llx", (oflags & PG_STACK_MASK));
 	}
 }
 
@@ -90,7 +90,7 @@ void ioStackSetup(void)
 }
 
 
-ssize_t stackWriteAll(void *thisVoid, const Byte *buf, size_t size, off_t offset)
+ssize_t stackWriteAll(void *thisVoid, const Byte *buf, size_t size, off_t offset, uint32 wait)
 {
 	IoStack *this = thisVoid;
 
@@ -99,7 +99,7 @@ ssize_t stackWriteAll(void *thisVoid, const Byte *buf, size_t size, off_t offset
 	for (total = 0; total < size; total += current)
 	{
 		/* Do a partial write */
-		current = stackWrite(this, buf + total, size - total, offset + total);
+		current = stackWrite(this, buf + total, size - total, offset + total, wait);
 		if (current <= 0)
 			break;
 	}
@@ -112,7 +112,7 @@ ssize_t stackWriteAll(void *thisVoid, const Byte *buf, size_t size, off_t offset
 }
 
 
-ssize_t stackReadAll(void *thisVoid, Byte *buf, size_t size, off_t offset)
+ssize_t stackReadAll(void *thisVoid, Byte *buf, size_t size, off_t offset, uint32 wait)
 {
 	IoStack *this = thisVoid;
 
@@ -125,7 +125,7 @@ ssize_t stackReadAll(void *thisVoid, Byte *buf, size_t size, off_t offset)
 			break;
 
 		/* Do the next read. If eof or error, then done */
-		current = stackRead(this, buf + total, size - total, offset + total);
+		current = stackRead(this, buf + total, size - total, offset + total, wait);
 		if (current <= 0)
 			break;
 	}
@@ -141,9 +141,9 @@ ssize_t stackReadAll(void *thisVoid, Byte *buf, size_t size, off_t offset)
 
 
 /*
- * Write a 4 byte int in network byte order (big endian)
+ * Write a 4 byte int in network byte order (big endian).
  */
-bool stackWriteInt32(IoStack *this, uint32_t data, off_t offset)
+bool stackWriteInt32(IoStack *this, uint32_t data, off_t offset, uint32 wait)
 {
 	static Byte buf[4];
 
@@ -153,16 +153,16 @@ bool stackWriteInt32(IoStack *this, uint32_t data, off_t offset)
 	buf[2] = (Byte)(data >> 8);
 	buf[3] = (Byte)data;
 
-	return (stackWriteAll(this, buf, 4, offset) == 4);
+	return (stackWriteAll(this, buf, 4, offset, wait) == 4);
 }
 
 /*
  * Read a 4 byte int in network byte order (big endian)
  */
-bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset)
+bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset, uint32 wait)
 {
 	Byte buf[4];
-	if (stackReadAll(this, buf, 4, offset) != 4)
+	if (stackReadAll(this, buf, 4, offset, wait) != 4)
 		return false;
 
 	*data = buf[0] << 24 | buf[1] << 16 | buf[2] << 8 | buf[3];
@@ -171,16 +171,16 @@ bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset)
 }
 
 
-ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset)
+ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset, uint32 wait)
 {
 	Assert(size <= MAX_BLOCK_SIZE);
 
 	/* Output the length field first */
-	if (!stackWriteInt32(this, size, offset))
+	if (!stackWriteInt32(this, size, offset, wait))
 		return -1;
 
 	/* Write out the data */
-	return stackWriteAll(this, buf, size, offset + 4);
+	return stackWriteAll(this, buf, size, offset + 4, wait);
 }
 
 
@@ -190,7 +190,7 @@ ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offse
  * so it may be necessary to invoke stackEof() or FileEof()
  * to fully detect an EOF condition.
  */
-ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset)
+ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset, uint32 wait)
 {
 	uint32_t expected;
 	ssize_t ret;
@@ -198,7 +198,7 @@ ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset)
 
 	/* Read the length. Return immediately if EOF or error */
 	Assert(size <= MAX_BLOCK_SIZE);
-	ret = stackReadInt32(this, &expected, offset);
+	ret = stackReadInt32(this, &expected, offset, wait);
 	if (ret <= 0)
 		return ret;
 
@@ -207,7 +207,7 @@ ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset)
 		return stackSetError(this, -1, "IoStack record length of %x is larger than %z", expected, size);
 
 	/* read the data, including the possiblility of a zero length record. */
-	actual = stackReadAll(this, buf, expected, offset + 4);
+	actual = stackReadAll(this, buf, expected, offset + 4, wait);
 	if (actual >= 0 && actual != expected)
 		return stackSetError(this, -1, "IoStack record corrupted. Expected %z bytes but read only %z byres", expected, actual);
 
@@ -215,11 +215,12 @@ ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset)
 }
 
 
-bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset)
+bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset, uint32 wait)
 {
 	static Byte buf[8];
 
 	file_debug("stackWriteInt64: data=%lld  offset=%lld", data, offset);
+	/* TODO: unpack into the buffer */
 	buf[0] = (Byte)(data >> 56);
 	buf[1] = (Byte)(data >> 48);
 	buf[2] = (Byte)(data >> 40);
@@ -229,16 +230,16 @@ bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset)
 	buf[6] = (Byte)(data >> 8);
 	buf[7] = (Byte)data;
 
-	return (stackWriteAll(this, buf, 8, offset) == 8);
+	return (stackWriteAll(this, buf, 8, offset, wait) == 8);
 }
 
 /*
  * Read an 8 byte int in network byte order (big endian)
  */
-bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset)
+bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset, uint32 wait)
 {
 	Byte buf[8];
-	if (stackReadAll(this, buf, 8, offset) != 8)
+	if (stackReadAll(this, buf, 8, offset, wait) != 8)
 		return false;
 
 	*data = (uint64_t)buf[0] << 56 | (uint64_t)buf[1] << 48 | (uint64_t)buf[2] << 40 |

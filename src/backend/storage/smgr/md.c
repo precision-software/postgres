@@ -553,7 +553,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 	while (remblocks > 0)
 	{
 		BlockNumber segstartblock = curblocknum % ((BlockNumber) RELSEG_SIZE);
-		off_t		segNewSize;
+		off_t		seekpos = (off_t) BLCKSZ * segstartblock;
 		int			numblocks;
 
 		if (segstartblock + remblocks > RELSEG_SIZE)
@@ -566,13 +566,54 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 		Assert(segstartblock < RELSEG_SIZE);
 		Assert(segstartblock + numblocks <= RELSEG_SIZE);
 
-		segNewSize = (segstartblock + numblocks) * (off_t)BLCKSZ;
-		if (numblocks > 0 && FileResize(v->mdfd_vfd, segNewSize, WAIT_EVENT_DATA_FILE_EXTEND) < 0)
-			ereport(ERROR,
-					errcode_for_file_access(),
-					errmsg("could not extend file \"%s\" with FileResize(): %m",
-						   FilePathName(v->mdfd_vfd)),
-					errhint("Check free disk space."));
+		/*
+		 * If available and useful, use posix_fallocate() (via
+		 * FileFallocate()) to extend the relation. That's often more
+		 * efficient than using write(), as it commonly won't cause the kernel
+		 * to allocate page cache space for the extended pages.
+		 *
+		 * However, we don't use FileFallocate() for small extensions, as it
+		 * defeats delayed allocation on some filesystems. Not clear where
+		 * that decision should be made though? For now just use a cutoff of
+		 * 8, anything between 4 and 8 worked OK in some local testing.
+		 */
+		if (numblocks > 8)
+		{
+			int			ret;
+
+			ret = FileFallocate(v->mdfd_vfd,
+								seekpos, (off_t) BLCKSZ * numblocks,
+								WAIT_EVENT_DATA_FILE_EXTEND);
+			if (ret != 0)
+			{
+				ereport(ERROR,
+						errcode_for_file_access(),
+						errmsg("could not extend file \"%s\" with FileFallocate(): %m",
+							   FilePathName(v->mdfd_vfd)),
+						errhint("Check free disk space."));
+			}
+		}
+		else
+		{
+			int			ret;
+
+			/*
+			 * Even if we don't want to use fallocate, we can still extend a
+			 * bit more efficiently than writing each 8kB block individually.
+			 * pg_pwrite_zeros() (via FileZero()) uses pg_pwritev_with_retry()
+			 * to avoid multiple writes or needing a zeroed buffer for the
+			 * whole length of the extension.
+			 */
+			ret = FileZero(v->mdfd_vfd,
+						   seekpos, (off_t) BLCKSZ * numblocks,
+						   WAIT_EVENT_DATA_FILE_EXTEND);
+			if (ret < 0)
+				ereport(ERROR,
+						errcode_for_file_access(),
+						errmsg("could not extend file \"%s\": %m",
+							   FilePathName(v->mdfd_vfd)),
+						errhint("Check free disk space."));
+		}
 
 		if (!skipFsync && !SmgrIsTemp(reln))
 			register_dirty_segment(reln, forknum, v);

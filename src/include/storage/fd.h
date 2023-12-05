@@ -45,9 +45,10 @@
 
 #include <dirent.h>
 #include <fcntl.h>
-#include <storage/iostack.h>
 
 typedef int File;
+
+#include "storage/fileaccess.h"
 
 
 #define IO_DIRECT_DATA			0x01
@@ -106,25 +107,19 @@ extern File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fil
 extern File OpenTemporaryFile(bool interXact);
 extern int  FileClose(File file);
 extern int	FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info);
-extern ssize_t	FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
-extern ssize_t	FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
+extern int	FileRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
+extern int	FileWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait_event_info);
 extern int	FileSync(File file, uint32 wait_event_info);
 extern int	FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info);
 extern int	FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info);
-extern int PathNameFileSync(const char *pathName, uint32 wait_event_info);
 
 extern off_t FileSize(File file);
-extern int	FileResize(File file, off_t offset, uint32 wait_event_info);
+extern int	FileTruncate(File file, off_t offset, uint32 wait_event_info);
 extern void FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info);
 extern char *FilePathName(File file);
 extern int	FileGetRawDesc(File file);
 extern int	FileGetRawFlags(File file);
 extern mode_t FileGetRawMode(File file);
-
-inline static int FileTruncate(File file, off_t offset, uint32 wait_event_info)
-{
-	return FileResize(file, offset, wait_event_info);
-}
 
 /* Operations used for sharing named temporary files */
 extern File PathNameCreateTemporaryFile(const char *path, bool error_on_failure);
@@ -196,47 +191,9 @@ extern int	durable_unlink(const char *fname, int elevel);
 extern void SyncDataDirectory(void);
 extern int	data_sync_elevel(int elevel);
 
-/* Operations on virtual files -- Sequential I/O */
-extern ssize_t FileWriteSeq(File file, const void *buffer, size_t amount, uint32 wait_event_info);
-extern ssize_t FileReadSeq(File file, void *buffer, size_t amount, uint32 wait_event_info);
-extern off_t FileTell(File file);
-extern off_t FileSeek(File file, off_t offset);
-
-/* Operations on virtual files --- similar to fread/fwrite */
-extern ssize_t FilePrintf(File file, const char *format, ...) pg_attribute_printf(2,3);
-extern ssize_t FileScanf(File file, const char *format, ...) pg_attribute_printf(2,3);
-extern ssize_t FilePuts(File, const char *string);
-extern ssize_t FileGetc(File file);
-extern ssize_t FilePutc(int c, File file);
-
-/* Error handling on virtual files -- similar to feof/ferror */
-extern int FileEof(File file);           /* Did the last op encounter EOF? Reset on every read */
-extern bool FileError(File file);        /* Did the last op result in an error? Not cleared by FileClose(). */
-extern bool FileClearError(File file);   /* Clears both Eof and error */
-extern const char *FileErrorMsg(File file);  /* Fetch the most recent error message */
-extern int FileErrorCode(File file);     /* Fetch the most recent error code */
-extern ssize_t FileBlockSize(File file);     /* The block size used by this file. 1 means not blocked */
-
-/* Internal helpers for error handling */ // make static
-extern int setFileError(File file, int err, const char *format, ...);
-extern int updateFileError(File file, int err, const char *format, ...);
-extern int copyFileError(File dst, File src);
-extern bool badFile(File file);
-
-/* A preferred name. */
-extern File FileOpen(const char *fileName, uint64 fileFlags);
-extern File FileOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode);
-
-/*
- * Hooks into internal fd.c routines.
- * Should only be called by internal storage routines such as vfd.c
- */
-extern File PathNameOpenFilePerm_Internal(const char *fileName, int fileFlags, mode_t fileMode);
-extern int FileClose_Internal(File file);
-extern ssize_t FileRead_Internal(File file, void *buffer, size_t amount, off_t offset);
-extern ssize_t FileWrite_Internal(File file, const void *buffer, size_t amount, off_t offset);
-extern int FileSync_Internal(File file);
-extern off_t FileSize_Internal(File file);
-extern int	FileTruncate_Internal(File file, off_t offset);
+/* new routines to support I/O stacks and encryption. */
+extern FState *getFState(File file);
+extern void setTempFileLimit(File file);
+extern void setDeleteOnClose(File file);
 
 #endif							/* FD_H */

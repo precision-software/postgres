@@ -18,14 +18,14 @@ typedef struct IoStack IoStack;
  * Universal helper functions - across all I/O stacks.
  * TODO: Should "this" be void* or IoStack* ?  Leaning towards IoStack ...
  */
-extern ssize_t stackWriteAll(void *this, const Byte *buf, size_t size, off_t offset);
-extern ssize_t stackReadAll(void *this, Byte *buf, size_t size, off_t offset);
-extern ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset);
-extern ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset);
-extern bool stackWriteInt32(IoStack *this, uint32_t data, off_t offset);
-extern bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset);
-extern bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset);
-extern bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset);
+extern ssize_t stackWriteAll(void *this, const Byte *buf, size_t size, off_t offset, uint32 wait);
+extern ssize_t stackReadAll(void *this, Byte *buf, size_t size, off_t offset, uint32 wait);
+extern ssize_t stackReadSized(IoStack *this, Byte *buf, size_t size, off_t offset, uint32 wait);
+extern ssize_t stackWriteSized(IoStack *this, const Byte *buf, size_t size, off_t offset, uint32 wait);
+extern bool stackWriteInt32(IoStack *this, uint32_t data, off_t offset, uint32 wait);
+extern bool stackReadInt32(IoStack *this, uint32_t *data, off_t offset, uint32 wait);
+extern bool stackWriteInt64(IoStack *this, uint64_t data, off_t offset, uint32 wait);
+extern bool stackReadInt64(IoStack *this, uint64_t *data, off_t offset, uint32 wait);
 
 extern IoStack *selectIoStack(const char *path, uint64 oflags, mode_t mode);
 
@@ -68,12 +68,12 @@ struct IoStack
  *               or NULL if unable to allocate memory.
  */
 typedef IoStack *(*IoStackOpen)(void *this, const char *path, uint64 oflags, mode_t perm);
-typedef ssize_t (*IoStackRead)(void *this, Byte *buf, ssize_t size, off_t offset);
-typedef ssize_t (*IoStackWrite)(void *this, const Byte *buf, ssize_t size, off_t offset);
-typedef bool (*IoStackSync)(void *this);
+typedef ssize_t (*IoStackRead)(void *this, Byte *buf, ssize_t size, off_t offset, uint32 wait);
+typedef ssize_t (*IoStackWrite)(void *this, const Byte *buf, ssize_t size, off_t offset, uint32 wait);
+typedef bool (*IoStackSync)(void *this, uint32 wait);
 typedef bool (*IoStackClose)(void *this);
 typedef off_t (*IoStackSize)(void *this);
-typedef bool (*IoStackResize) (void *this, off_t offset);
+typedef bool (*IoStackResize) (void *this, off_t offset, uint32 wait);
 
 struct IoStackInterface {
 	IoStackOpen fnOpen;
@@ -86,16 +86,16 @@ struct IoStackInterface {
 };
 
 /*
- * Abstract functions required for each filter in an I/O Stack. TODO: declare as inline functions.
- * TODO: Rename, file-->stack, and Write-->WritePartial and WriteAll-->Write
+ * Abstract functions required for each filter in an I/O Stack.
+ * TODO: reimplement as inline functions
  */
-#define stackOpen(this, path, oflags, mode)       				(IoStack *)(invoke(Open, this, path, oflags, mode))
-#define stackWrite(this, buf, size, offset)  					invoke(Write, this, buf, size, offset)
-#define stackRead(this, buf, size, offset)   					invoke(Read,  this, buf, size, offset)
-#define stackSync(this)                      					invokeNoParms(Sync, this)
-#define stackSize(this)                           				invokeNoParms(Size, this)
-#define stackResize(this, offset)       						invoke(Resize, this, offset)
-#define stackClose(this)      									invokeNoParms(Close, this)
+#define stackOpen(this, path, oflags, mode)       		(IoStack *)(invoke(Open, this, path, oflags, mode))
+#define stackWrite(this, buf, size, offset, wait)  		invoke(Write, this, buf, size, offset, wait)
+#define stackRead(this, buf, size, offset, wait)   		invoke(Read,  this, buf, size, offset, wait)
+#define stackSync(this, wait)                      		invoke(Sync, this, wait)
+#define stackSize(this)                           		invokeNoParms(Size, this)
+#define stackResize(this, offset, wait)       			invoke(Resize, this, offset, wait)
+#define stackClose(this)      							invokeNoParms(Close, this)
 
 typedef IoStack *(*IoStackCreateFunction)(void);
 

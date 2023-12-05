@@ -56,14 +56,14 @@ vfdOpen(VfdBottom *proto, const char *path, uint64 oflags, mode_t mode)
 	oflags &= ~PG_STACK_MASK;
 
 	/* Open the file and get a VFD. */
-	thisStack(this)->openVal = PathNameOpenFilePerm_Internal(path, oflags, mode);
+	thisStack(this)->openVal = PathNameOpenFilePerm(path, oflags, mode);
 	if (thisStack(this)->openVal < 0)
 	    return stackErrorSet(this, this, errno, "Unable to open file %s", path);
 
 	/* We are byte oriented and can support all block sizes TODO allow blockSize to support O_DIRECT */
 	thisStack(this)->blockSize = 1;
 	this->file = thisStack(this)->openVal;
-	this->fileSize = FileSize_Internal(this->file);
+	this->fileSize = FileSize(this->file);
 	if (this->fileSize < 0)
 	{
 		int save_errno = errno;
@@ -80,9 +80,10 @@ vfdOpen(VfdBottom *proto, const char *path, uint64 oflags, mode_t mode)
  * Write a random block of data to a virtual file descriptor.
  */
 static ssize_t
-vfdWrite(VfdBottom *this, const Byte *buf, ssize_t bufSize, off_t offset)
+vfdWrite(VfdBottom *this, const Byte *buf, ssize_t bufSize, off_t offset, uint32 wait)
 {
-	ssize_t actual = FileWrite_Internal(this->file, buf, bufSize, offset);
+
+	ssize_t actual = FileWrite(this->file, buf, bufSize, offset, wait);
 	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd", this->file, FilePathName(this->file), bufSize, offset, actual);
 	if (actual < 0)
 		return stackErrorSet(this, -1, errno, "Unable to write to file %d(%s", this->file, FilePathName(this->file));
@@ -97,12 +98,12 @@ vfdWrite(VfdBottom *this, const Byte *buf, ssize_t bufSize, off_t offset)
  * Read a random block of data from a virtual file descriptor.
  */
 static ssize_t
-vfdRead(VfdBottom *this, Byte *buf, ssize_t bufSize, off_t offset)
+vfdRead(VfdBottom *this, Byte *buf, ssize_t bufSize, off_t offset, uint32 wait)
 {
 	ssize_t actual;
 	Assert(bufSize > 0 && offset >= 0);
 
-	actual = FileRead_Internal(this->file, buf, bufSize, offset);
+	actual = FileRead(this->file, buf, bufSize, offset, wait);
 	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd", this->file, FilePathName(this->file), bufSize, offset, actual);
 	if (actual < 0)
 		return stackErrorSet(this, -1, errno, "Unable to read from file %d(%s)", this->file, FilePathName(this->file));
@@ -119,12 +120,8 @@ vfdClose(VfdBottom *this)
 	bool success;
 	file_debug("file=%d name=%s", this->file, FilePathName(this->file));
 
-	/* Check if the file is already closed */
-	if (badFile(this->file))
-	    return false;
-
 	/* Close the file for real. */
-	success = FileClose_Internal(this->file) >= 0;
+	success = (FileClose(this->file) >= 0);
 
 	/* Note: We allocated ioStack in FileOpen, so we will free it in FileClose */
 	file_debug("(done): file=%d  success=%d", this->file, success);
@@ -137,10 +134,13 @@ vfdClose(VfdBottom *this)
 }
 
 
+/*
+ * Synchronize the file contents to persistent storage.
+ */
 static bool
-vfdSync(VfdBottom *this)
+vfdSync(VfdBottom *this, uint32 wait)
 {
-	int retval = FileSync_Internal(this->file);
+	int retval = FileSync(this->file, 0);
 	if (retval < 0)
 	    return stackErrorSet(this, false, errno, "Unable to sync file %d(%s)", this->file, FilePathName(this->file));
 
@@ -157,15 +157,17 @@ vfdSync(VfdBottom *this)
 static off_t
 vfdSize(VfdBottom *this)
 {
-	off_t offset = FileSize_Internal(this->file);
+	off_t offset = FileSize(this->file);
 	if (offset < 0)
 		return stackErrorSet(this, -1, errno, "Unable to get size of file %d(%s)", this->file, FilePathName(this->file));
 
 	return offset;
 }
 
-
-static bool vfdResize(VfdBottom *this, off_t newSize)
+/*
+ * Change the size of a file, either truncating or padding with zeros.
+ */
+static bool vfdResize(VfdBottom *this, off_t newSize, uint32 wait)
 {
 
 	off_t fileSize;
@@ -177,21 +179,23 @@ static bool vfdResize(VfdBottom *this, off_t newSize)
 
 	/* CASE: file is shrinking. Truncate it.*/
 	if (newSize < fileSize)
-	    success = FileTruncate_Internal(this->file, newSize) >= 0;
+	    success = FileTruncate(this->file, newSize, wait) >= 0;
 
 	/* CASE: file is growing a small amount (64K). Write out zeros. */
 	else if (newSize < fileSize + 64*1024)
-		success = FileZero(this->file, fileSize, newSize - fileSize, 0) >= 0; /* todo: wait event info - drop it */
+		success = FileZero(this->file, fileSize, newSize - fileSize, wait) >= 0; /* todo: wait event info - drop it */
 
 	/* OTHERWISE: larger allocation. Use fallocate */
 	else
-		success = FileFallocate(this->file, fileSize, newSize - fileSize, 0) >= 0;
+		success = FileFallocate(this->file, fileSize, newSize - fileSize, wait) >= 0;
 
-	if (!success)
-		return stackErrorSet(this, false, errno, "Unable to truncate file %d(%s)", /* TODO: Include error message */
+	if (success)
+		this->fileSize = newSize;
+	else
+		stackSetError(this, errno, "Unable to resize file %d(%s)", /* TODO: Include error message */
 					  this->file, FilePathName(this->file), this->file);
 
-	return true;
+	return success;
 }
 
 
