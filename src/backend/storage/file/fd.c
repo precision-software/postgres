@@ -4331,11 +4331,13 @@ int updateFileError(File file, int errorCode, const char *fmt, ...)
 
 
 /*
- * Wrapper for backwards compatibility
+ * Wrapper for backwards compatibility.
+ * Pass on lower 32 bits as original flags, forcing PG_RAW.
+ * TODO: Rework this later on so existing calls are unmodified.
  */
 File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
-	return FileOpenPerm(fileName, fileFlags | PG_RAW, fileMode);
+	return FileOpenPerm(fileName, (uint32)fileFlags | PG_RAW, fileMode);
 }
 
 /*
@@ -4362,7 +4364,7 @@ File FileOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 	/* Select the I/O stack prototype for this file. */
 	proto = selectIoStack(fileName, fileFlags, fileMode);
 
-	/* I/O stacks don't implement O_APPEND, so position to FileSize instead */
+	/* I/O stacks don't implement O_APPEND, so position to FileSize explicitly */
 	append = (fileFlags & O_APPEND) != 0;
 	fileFlags &= ~O_APPEND;
 

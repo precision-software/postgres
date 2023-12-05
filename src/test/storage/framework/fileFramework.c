@@ -272,9 +272,8 @@ static void regression(char *name, size_t blockSize)
 {
     File file;
 	int idx;
-    Byte *buf = calloc(blockSize, 0xff);
-    Byte *ones = calloc(blockSize, 1);
-	Byte *zeros= calloc(blockSize, 0);
+    Byte *buf = malloc(blockSize);
+
 
     deleteFile(name);
 
@@ -308,7 +307,7 @@ static void regression(char *name, size_t blockSize)
 
 	/* Should write a block and then read EOF */
 	file = FileOpen(name, O_RDWR|O_TRUNC|PG_TESTSTACK);
-	PG_ASSERT_EQ(blockSize, FileWriteSeq(file, ones, blockSize, 0));
+	PG_ASSERT_EQ(blockSize, FileWriteSeq(file, buf, blockSize, 0));
 	PG_ASSERT_EQ(blockSize, FileSize(file));
 	PG_ASSERT_EQ(0, FileReadSeq(file, buf, blockSize,  0));
 	PG_ASSERT(FileEof(file));
@@ -317,14 +316,16 @@ static void regression(char *name, size_t blockSize)
 
 	/* Writing beyond EOF should extend file */
 	file = FileOpen(name, O_RDWR|O_TRUNC|PG_TESTSTACK);
-	PG_ASSERT_EQ(blockSize, FileWrite(file, ones, blockSize, blockSize, 0));
+	PG_ASSERT_EQ(0, FileSize(file));
+	generateBuffer(blockSize, buf, blockSize);
+	PG_ASSERT_EQ(blockSize, FileWrite(file, buf, blockSize, blockSize, 0));
 	PG_ASSERT_EQ(2*blockSize, FileSize(file));
+	//memset(buf, blockSize, 0xff);
 	PG_ASSERT_EQ(blockSize, FileRead(file, buf, blockSize, 0, 0));
 	for (idx = 0; idx<blockSize; idx++)
-		PG_ASSERT_EQ(zeros[idx], buf[idx]);
+		PG_ASSERT_EQ(0, buf[idx]);
 	PG_ASSERT_EQ(blockSize, FileRead(file, buf, blockSize, blockSize, 0));
-	for (idx = 0; idx < blockSize; idx++)
-		PG_ASSERT_EQ(ones[idx], buf[idx]);
+	verifyBuffer(blockSize, buf, blockSize);
 	PG_ASSERT_EQ(0, FileClose(file));
 
 

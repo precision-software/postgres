@@ -72,7 +72,7 @@ vfdOpen(VfdBottom *proto, const char *path, uint64 oflags, mode_t mode)
 	}
 
 	/* Always return a new I/O stack structure. It contains error info if problems occurred. */
-	file_debug("(done): file=%d  name=%s oflags=0x%x  mode=0x%x", this->file, path, oflags, mode);
+	file_debug("(done): file=%d  name=%s oflags=0x%lx  mode=0x%x", this->file, path, oflags, mode);
 	return this;
 }
 
@@ -149,7 +149,10 @@ vfdSync(VfdBottom *this)
 
 
 /*
- * Get the size of the file.  TODO: return this->fileSize instead.
+ * Get the size of the file.
+ * We query the file size for now. We currently handle non-temp files
+ * which can change size in another thread.  Later, these files
+ * will have a different execution path and we can return this->fileSize instead.
  */
 static off_t
 vfdSize(VfdBottom *this)

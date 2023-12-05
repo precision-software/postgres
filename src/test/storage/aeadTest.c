@@ -26,6 +26,6 @@ void testMain()
 	beginTestGroup("AEAD Encrypted Files");
 	beginTest("AEAD Encrypted Files");
 
-	singleSeekTest(createStack, TEST_DIR "encryption/testfile_%u_%u.dat", 1024, 4096);
+	singleSeekTest(createStack, TEST_DIR "encryption/testfile_%u_%u.dat", 0, 64);
 	seekTest(createStack, TEST_DIR "encryption/testfile_%u_%u.dat");
 }

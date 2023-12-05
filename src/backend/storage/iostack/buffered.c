@@ -13,7 +13,7 @@
 
 #define palloc malloc
 
-/**
+/*
  * Structure containing the state of the stream, including its buffer.
  */
  typedef struct Buffered Buffered;
@@ -49,7 +49,7 @@ static bool positionToBuffer(Buffered *this, off_t position);
 static Buffered *bufferedCleanup(Buffered *this);
 static bool bufferedSync(Buffered *this);
 
-/**
+/*
  * Open a buffered file, reading, writing or both.
  * Note a buffered file should only be shared in "read only" mode.
  * The internal buffers are not shared, so multiple writers cause corruption.

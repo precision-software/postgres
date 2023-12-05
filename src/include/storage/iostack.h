@@ -141,12 +141,11 @@ inline static
 bool stackClearError(void *thisVoid)
 {
 	IoStack *this = thisVoid;
-	bool hadError = stackError(this);
 	errno = this->errNo;
 	this->errNo = 0;
 	this->errMsg[0] = 0;
 	this->eof = false;
-	return hadError;
+	return errno != 0;
 }
 
 /*
@@ -171,22 +170,22 @@ stackErrorNo(void *thisVoid)
 }
 
 /* Additional open flags to support encryption/compression */
-#define PG_ENCRYPT        (1 << 28)
-#define PG_ECOMPRESS      (2 << 28)
-#define PG_ENCRYPT_PERM   (3 << 28)
-#define PG_TESTSTACK      (4 << 28)
-#define PG_PLAIN          (5 << 20)
-#define PG_RAW            (6 << 20)
+#define PG_ENCRYPT        (1ll << 32)
+#define PG_ECOMPRESS      (2ll << 32)
+#define PG_ENCRYPT_PERM   (3ll << 32)
+#define PG_TESTSTACK      (4ll << 32)
+#define PG_PLAIN          (5ll << 32)
+#define PG_RAW            (6ll << 32)
 
-#define PG_STACK_MASK     (7 << 28)
+#define PG_STACK_MASK     (7ll << 32)
 
 /* Declare a "debug" macro */
-#define FILE_DEBUG
+//#define FILE_DEBUG
 #ifdef FILE_DEBUG
 #define file_debug(...) \
     do {  \
         int save_errno = errno; \
-        setvbuf(stderr, NULL, _IOLBF, 256); \
+		setvbuf(stderr, NULL, _IOLBF, 256); \
 		fprintf(stderr, "%s(%d): ", __func__, getpid());     \
 		fprintf(stderr, __VA_ARGS__); \
 		fprintf(stderr, "\n");\
@@ -197,6 +196,5 @@ stackErrorNo(void *thisVoid)
 #else
 #define file_debug(...) ((void)0)
 #endif
-
 
 #endif /*FILTER_IoStack_H */
