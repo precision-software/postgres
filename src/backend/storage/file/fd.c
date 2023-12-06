@@ -96,6 +96,7 @@
 #include "portability/mem.h"
 #include "postmaster/startup.h"
 #include "storage/fd.h"
+#include "storage/fileaccess.h"
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
@@ -206,6 +207,7 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
+	FState      fState;         /* State to support FRead/FWrite/encyption */
 } Vfd;
 
 /*
@@ -1520,7 +1522,7 @@ ReportTemporaryFileUsage(const char *path, off_t size)
  * ResourceOwnerEnlarge(CurrentResourceOwner) must have been called
  * before the file was opened.
  */
-static void
+void
 RegisterTemporaryFile(File file)
 {
 	ResourceOwnerRememberFile(CurrentResourceOwner, file);
@@ -1949,12 +1951,13 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 }
 
 /*
- * close a file when done with it
+ * close a file when done with it. True if successful.
  */
-void
+int
 FileClose(File file)
 {
 	Vfd		   *vfdP;
+	bool       save_errno = 0;
 
 	Assert(FileIsValid(file));
 
@@ -1968,6 +1971,7 @@ FileClose(File file)
 		/* close the file */
 		if (close(vfdP->fd) != 0)
 		{
+			save_errno = errno;
 			/*
 			 * We may need to panic on failure to close non-temporary files;
 			 * see LruDelete.
@@ -1996,7 +2000,6 @@ FileClose(File file)
 	if (vfdP->fdstate & FD_DELETE_AT_CLOSE)
 	{
 		struct stat filestats;
-		int			stat_errno;
 
 		/*
 		 * If we get an error, as could happen within the ereport/elog calls,
@@ -2010,22 +2013,23 @@ FileClose(File file)
 
 		/* first try the stat() */
 		if (stat(vfdP->fileName, &filestats))
-			stat_errno = errno;
-		else
-			stat_errno = 0;
+			save_errno = errno;
 
 		/* in any case do the unlink */
 		if (unlink(vfdP->fileName))
+		{
+			save_errno = errno;
 			ereport(LOG,
 					(errcode_for_file_access(),
-					 errmsg("could not delete file \"%s\": %m", vfdP->fileName)));
+						errmsg("could not delete file \"%s\": %m", vfdP->fileName)));
+		}
 
 		/* and last report the stat results */
-		if (stat_errno == 0)
+		if (save_errno == 0)
 			ReportTemporaryFileUsage(vfdP->fileName, filestats.st_size);
 		else
 		{
-			errno = stat_errno;
+			errno = save_errno;
 			ereport(LOG,
 					(errcode_for_file_access(),
 					 errmsg("could not stat file \"%s\": %m", vfdP->fileName)));
@@ -2040,6 +2044,10 @@ FileClose(File file)
 	 * Return the Vfd slot to the free list
 	 */
 	FreeVfd(file);
+
+	/* Return -1 and set errno if error occurred */
+	errno = save_errno;
+	return (save_errno == 0) ? 0 : -1;
 }
 
 /*
@@ -4018,4 +4026,28 @@ static char *
 ResOwnerPrintFile(Datum res)
 {
 	return psprintf("File %d", DatumGetInt32(res));
+}
+
+
+/*
+ * Provide access to the state used for FRead/FWrite/Encryption.
+ * Called frequently, so it is a candidate for inlining.
+ */
+FState *getFState(File file)
+{
+	if (!FileIsValid(file))
+		return NULL;
+	return &VfdCache[file].fState;
+}
+
+void setTempFileLimit(File file)
+{
+	Assert(FileIsValid(file));
+	VfdCache[file].fdstate |= FD_TEMP_FILE_LIMIT;
+}
+
+void setDeleteOnClose(File file)
+{
+	Assert(FileIsValid(file));
+	VfdCache[file].fdstate |= FD_DELETE_AT_CLOSE;
 }
