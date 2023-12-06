@@ -96,6 +96,7 @@
 #include "portability/mem.h"
 #include "postmaster/startup.h"
 #include "storage/fd.h"
+#include "storage/fileaccess.h"
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
@@ -206,6 +207,7 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
+	FState      fState;         /* State to support FRead/FWrite/encyption */
 } Vfd;
 
 /*
@@ -289,6 +291,11 @@ static Oid *tempTableSpaces = NULL;
 static int	numTempTableSpaces = -1;
 static int	nextTempTableSpace = 0;
 
+/*
+ * Forward references
+ */
+static bool FlushTempFiles(void);
+static bool FileIsXact(File file);
 
 /*--------------------
  *
@@ -1520,7 +1527,7 @@ ReportTemporaryFileUsage(const char *path, off_t size)
  * ResourceOwnerEnlarge(CurrentResourceOwner) must have been called
  * before the file was opened.
  */
-static void
+void
 RegisterTemporaryFile(File file)
 {
 	ResourceOwnerRememberFile(CurrentResourceOwner, file);
@@ -1949,12 +1956,13 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 }
 
 /*
- * close a file when done with it
+ * close a file when done with it. True if successful.
  */
-void
+int
 FileClose(File file)
 {
 	Vfd		   *vfdP;
+	bool       save_errno = 0;
 
 	Assert(FileIsValid(file));
 
@@ -1968,6 +1976,7 @@ FileClose(File file)
 		/* close the file */
 		if (close(vfdP->fd) != 0)
 		{
+			save_errno = errno;
 			/*
 			 * We may need to panic on failure to close non-temporary files;
 			 * see LruDelete.
@@ -1996,7 +2005,6 @@ FileClose(File file)
 	if (vfdP->fdstate & FD_DELETE_AT_CLOSE)
 	{
 		struct stat filestats;
-		int			stat_errno;
 
 		/*
 		 * If we get an error, as could happen within the ereport/elog calls,
@@ -2010,22 +2018,23 @@ FileClose(File file)
 
 		/* first try the stat() */
 		if (stat(vfdP->fileName, &filestats))
-			stat_errno = errno;
-		else
-			stat_errno = 0;
+			save_errno = errno;
 
 		/* in any case do the unlink */
 		if (unlink(vfdP->fileName))
+		{
+			save_errno = errno;
 			ereport(LOG,
 					(errcode_for_file_access(),
-					 errmsg("could not delete file \"%s\": %m", vfdP->fileName)));
+						errmsg("could not delete file \"%s\": %m", vfdP->fileName)));
+		}
 
 		/* and last report the stat results */
-		if (stat_errno == 0)
+		if (save_errno == 0)
 			ReportTemporaryFileUsage(vfdP->fileName, filestats.st_size);
 		else
 		{
-			errno = stat_errno;
+			errno = save_errno;
 			ereport(LOG,
 					(errcode_for_file_access(),
 					 errmsg("could not stat file \"%s\": %m", vfdP->fileName)));
@@ -2040,6 +2049,10 @@ FileClose(File file)
 	 * Return the Vfd slot to the free list
 	 */
 	FreeVfd(file);
+
+	/* Return -1 and set errno if error occurred */
+	errno = save_errno;
+	return (save_errno == 0) ? 0 : -1;
 }
 
 /*
@@ -3167,45 +3180,53 @@ BeforeShmemExit_Files(int code, Datum arg)
  * that's not the case, we are being called for transaction commit/abort
  * and should only remove transaction-local temp files.  In either case,
  * also clean up "allocated" stdio files, dirs and fds.
+ *
+ * NOTE: Revised behavior on ProcExit. Please Review!
+ * isProcExit: if true, this is being called as the backend process is
+ * exiting. If that's the case, we close all open files.
+ * Files with the PG_DELETE flag set will be removed.
+ * Question: At a minimum, surviving files with buffers need to be
+ * flushed to disk. Regular files are about to be closed anyway.
+ * Is this too early to close them, or will there be additional file I/O
+ * after this is called?
+ *
+ * Note we call FClose to close the file. FClose will invoke FileClose
+ * for files which do not use I/O stacks.
  */
 static void
 CleanupTempFiles(bool isCommit, bool isProcExit)
 {
-	Index		i;
+	File   file;
+	file_debug("isCommit=%d  isProcExit=%d", isCommit, isProcExit);
+	Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
 
-	/*
-	 * Careful here: at proc_exit we need extra cleanup, not just
-	 * xact_temporary files.
-	 */
+	/* If we might have files to clean up ...*/
 	if (isProcExit || have_xact_temporary_files)
 	{
-		Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
-		for (i = 1; i < SizeVfdCache; i++)
+		/* Do for each valid file */
+		for (file = 1; file < SizeVfdCache; file++)
 		{
-			unsigned short fdstate = VfdCache[i].fdstate;
+			if (!FileIsValid(file))
+				continue;
 
-			if (((fdstate & FD_DELETE_AT_CLOSE) || (fdstate & FD_CLOSE_AT_EOXACT)) &&
-				VfdCache[i].fileName != NULL)
-			{
-				/*
-				 * If we're in the process of exiting a backend process, close
-				 * all temporary files. Otherwise, only close temporary files
-				 * local to the current transaction. They should be closed by
-				 * the ResourceOwner mechanism already, so this is just a
-				 * debugging cross-check.
-				 */
-				if (isProcExit)
-					FileClose(i);
-				else if (fdstate & FD_CLOSE_AT_EOXACT)
-				{
-					elog(WARNING,
-						 "temporary file %s not closed at end-of-transaction",
-						 VfdCache[i].fileName);
-					FileClose(i);
-				}
-			}
+			/*
+			 * If EOXACT files are still open at commit time, show a warning.
+			 * They should have been closed by the ResourceOwner machanism already.
+			 */
+			if (isCommit && FileIsXact(file))
+				elog(WARNING,
+					 "temporary file %s not closed at end-of-transaction",
+					 VfdCache[file].fileName);
+
+			/*
+			 * Close all files if we are exiting, and close temp files if
+			 * we are at the end of the transaction.
+			 */
+			if (isProcExit || FileIsXact(file))
+				FClose(file);
 		}
 
+		/* Note we no longer have temp files open */
 		have_xact_temporary_files = false;
 	}
 
@@ -3518,6 +3539,9 @@ SyncDataDirectory(void)
 	/* We can skip this whole thing if fsync is disabled. */
 	if (!enableFsync)
 		return;
+
+	/* Flush all open temp files to ensure their buffers are flushed to kernel */
+	FlushTempFiles(); /* TODO: is this necessary? */
 
 	/*
 	 * If pg_wal is a symlink, we'll need to recurse into it separately,
@@ -4018,4 +4042,67 @@ static char *
 ResOwnerPrintFile(Datum res)
 {
 	return psprintf("File %d", DatumGetInt32(res));
+}
+
+
+/*
+ * Provide access to the state used for FRead/FWrite/Encryption.
+ * Called frequently, so it is a candidate for inlining.
+ */
+FState *getFState(File file)
+{
+	if (!FileIsValid(file))
+		return NULL;
+	return &VfdCache[file].fState;
+}
+
+
+/*
+ * Is this a temporary file to be closed at end of transaction?
+ */
+static bool FileIsXact(File file)
+{
+	return (FileIsValid(file) && (VfdCache[file].fdstate & FD_CLOSE_AT_EOXACT) != 0);
+}
+
+
+/*
+ * Set a flag so this file is subject to limitations on temp file space
+ */
+void setTempFileLimit(File file)
+{
+	Assert(FileIsValid(file));
+	VfdCache[file].fdstate |= FD_TEMP_FILE_LIMIT;
+}
+
+/*
+ * Set a flag so this file is deleted on close.
+ */
+void setDeleteOnClose(File file)
+{
+	Assert(FileIsValid(file));
+	VfdCache[file].fdstate |= FD_DELETE_AT_CLOSE;
+}
+
+/*
+ * Flush all of the I/O stack files. Some of them have buffers which
+ * must be flushed to disk.
+ * Note the legacy files are not buffered and do not need to be flushed.
+ * TODO: move to fileaccess.c?
+ */
+static bool
+FlushTempFiles()
+{
+	File file;
+	bool success;
+
+	/* Synchronize each file which has an I/O stack */
+	success = true;
+	for (file = 1; file < SizeVfdCache; file++)
+		if (!FileIsLegacy(file))
+			success &= FSync(file, 0);
+
+	/* TODO: Warning or Error message if can't sync? */
+
+	return success;
 }
