@@ -206,7 +206,7 @@ aeadOpen(Aead *proto, const char *path, uint64 oflags, mode_t mode)
 }
 
 
-/**
+/*
  * Read a block of encrypted data into our internal buffer, placing plaintext into the caller's buffer.
  */
 static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset, uint32 wait)
@@ -530,7 +530,7 @@ void *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keySize,
 }
 
 /*
- * Create an Initialization Vector (IV)
+ * Create an Initialization Vector (IV).
  */
 void generateIV(Aead *this, Byte *iv, uint64 blockNr, uint64 sequenceNr)
 {
@@ -553,7 +553,7 @@ size_t cryptSize(Aead *this, size_t plainSize)
 
 /*
  * Calculate the file offset of an encrypted block, given the file offset of a plaintext block.
- * Note this only works for block boundaries.
+ * Note this only works for block boundaries. TODO: What about header?
  */
 off_t cryptOffset(Aead *this, off_t plainOffset)
 {
@@ -602,7 +602,7 @@ static Aead *aeadCleanup(Aead *this)
 	return this;
 }
 
-/**
+/*
  * Helper function to get the cipher details.
  */
 bool cipherSetup(CipherContext *this, char *cipherName, Byte *key, ssize_t keySize)
