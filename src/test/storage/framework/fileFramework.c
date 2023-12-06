@@ -66,7 +66,7 @@ static void generateFile(char *path, off_t size, size_t bufferSize)
     File file;
 
     file_debug("generateFile: path=%s", path);
-    file = FileOpen( path, O_WRONLY|O_CREAT|O_TRUNC|PG_TESTSTACK);
+    file = FOpen( path, O_WRONLY|O_CREAT|O_TRUNC|PG_TESTSTACK);
 	PG_ASSERT(file != -1);
     buf = malloc(bufferSize); /* TODO: make buf be at end of struct */
 
@@ -75,12 +75,12 @@ static void generateFile(char *path, off_t size, size_t bufferSize)
         ssize_t actual;
         off_t expected = MIN(bufferSize, size-position);
         generateBuffer(position, buf, expected);
-        actual = FileWriteSeq(file, buf, expected, 0);
+        actual = FWriteSeq(file, buf, expected, 0);
         PG_ASSERT_EQ(expected, actual);
     }
 
     free(buf);
-    PG_ASSERT(FileClose(file) == 0);
+    PG_ASSERT(FClose(file));
 }
 
 /* Verify a iostack has the correct data */
@@ -90,28 +90,28 @@ static void verifyFile(char *path, off_t fileSize, ssize_t bufferSize)
     Byte *buf;
 
     file_debug("verifyFile: path=%s", path);
-    file = FileOpen(path, O_RDONLY|PG_TESTSTACK);
+    file = FOpen(path, O_RDONLY|PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
-	PG_ASSERT(!FileEof(file));
-	PG_ASSERT(!FileError(file));
+	PG_ASSERT(!FEof(file));
+	PG_ASSERT(!FError(file));
     buf = malloc(bufferSize);
 
     for (off_t actual, position = 0; position < fileSize; position += actual)
     {
         size_t expected = MIN(bufferSize, fileSize - position);
-        actual = FileReadSeq(file, buf, bufferSize, 0);
+        actual = FReadSeq(file, buf, bufferSize, 0);
         PG_ASSERT_EQ(expected, actual);
         PG_ASSERT(verifyBuffer(position, buf, actual));
-		PG_ASSERT(!FileEof(file));
-		PG_ASSERT(!FileError(file));
+		PG_ASSERT(!FEof(file));
+		PG_ASSERT(!FError(file));
     }
 
     // Read a final EOF.
-	PG_ASSERT(!FileEof(file));
-    FileReadSeq(file, buf, 1, 0);
-    PG_ASSERT(FileEof(file));
+	PG_ASSERT(!FEof(file));
+    FReadSeq(file, buf, 1, 0);
+    PG_ASSERT(FEof(file));
 
-    PG_ASSERT(FileClose(file) == 0);
+    PG_ASSERT(FClose(file));
 }
 
 /*
@@ -129,18 +129,18 @@ static void allocateFile(char *path, off_t size, ssize_t bufferSize)
 
     file_debug("allocateFile: path=%s", path);
     /* Start out by allocating space and filling the file with "X"s. */
-    file = FileOpen(path, O_WRONLY|O_CREAT|O_TRUNC|PG_TESTSTACK);
+    file = FOpen(path, O_WRONLY|O_CREAT|O_TRUNC|PG_TESTSTACK);
     buf = malloc(bufferSize);
     memset(buf, 'X', bufferSize);
 
     for (position = 0; position < size; position += bufferSize)
     {
         size_t expected = (size_t)MIN(bufferSize, size-position);
-        size_t actual = FileWrite(file, buf, expected, position, 0);
+        size_t actual = FWrite(file, buf, expected, position, 0);
         PG_ASSERT_EQ(actual, expected);
     }
 
-    PG_ASSERT(FileClose(file) == 0);
+    PG_ASSERT(FClose(file));
     free(buf);
 }
 
@@ -157,7 +157,7 @@ static void generateRandomFile(char *path, off_t size, size_t blockSize)
     nrBlocks = (size + blockSize - 1) / blockSize;
     PG_ASSERT( nrBlocks == 0 || (nrBlocks % prime) != 0);
 
-    file = FileOpen(path, O_RDWR|PG_TESTSTACK);
+    file = FOpen(path, O_RDWR|PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
     buf = malloc(blockSize);
 
@@ -167,18 +167,18 @@ static void generateRandomFile(char *path, off_t size, size_t blockSize)
         ssize_t actual, expected;
         /* Pick a pseudo-random block and seek to it */
         off_t position = ((idx * prime) % nrBlocks) * blockSize;
-        //printf("fileSeek - idx = %u  blockNr=%u nrBlocks=%u\n", idx, (idx*prime)%nrBlocks, nrBlocks);
+        //printf("fSeek - idx = %u  blockNr=%u nrBlocks=%u\n", idx, (idx*prime)%nrBlocks, nrBlocks);
 
         /* Generate data appropriate for that block. */
         expected = (size_t)MIN(blockSize, size - position);
         generateBuffer(position, buf, expected);
 
         /* Write the block */
-        actual = FileWrite(file, buf, expected, position, 0);
+        actual = FWrite(file, buf, expected, position, 0);
         PG_ASSERT_EQ(expected,actual);
     }
 
-    PG_ASSERT(FileClose(file) == 0);
+    PG_ASSERT(FClose(file));
 }
 
 static void appendFile(char *path, off_t fileSize, size_t bufferSize)
@@ -191,12 +191,12 @@ static void appendFile(char *path, off_t fileSize, size_t bufferSize)
     ssize_t remaining, actual;
 
     file_debug("appendFile: path=%s", path);
-    file = FileOpen(path, O_RDWR|O_APPEND|PG_TESTSTACK);
+    file = FOpen(path, O_RDWR|O_APPEND|PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
     buf = malloc(bufferSize);
 
     /* Since we are appending, we are at the end of file - should match file size */
-	PG_ASSERT_EQ(fileSize, FileTell(file));
+	PG_ASSERT_EQ(fileSize, FTell(file));
 
 	/* The requested buffer size should be a multiple of the underlying block size. (Property of unit test) */
 	blockSize = 1; //FileBlockSize(file);
@@ -209,7 +209,7 @@ static void appendFile(char *path, off_t fileSize, size_t bufferSize)
 	{
 		/* Rewrite the last block, which is now full */
 		generateBuffer(lastBlock, buf, blockSize);
-		PG_ASSERT_EQ(blockSize, FileWrite(file, buf, blockSize, lastBlock, 0));
+		PG_ASSERT_EQ(blockSize, FWrite(file, buf, blockSize, lastBlock, 0));
 
 		/* Adjust the write parameters to write whatever is left. It is now block aligned. */
 		lastBlock += blockSize;
@@ -218,11 +218,11 @@ static void appendFile(char *path, off_t fileSize, size_t bufferSize)
     /* Write whatever remains to the end of file */
 	remaining = (fileSize + bufferSize) - lastBlock;
     generateBuffer(lastBlock, buf, remaining);
-    actual = FileWriteSeq(file, buf, remaining, 0);
+    actual = FWriteSeq(file, buf, remaining, 0);
     PG_ASSERT_EQ(remaining, actual);
 
     /* Close the file and verify it is correct. */
-    PG_ASSERT_EQ(0, FileClose(file));
+    PG_ASSERT(FClose(file));
     verifyFile(path, fileSize+bufferSize, bufferSize);
 }
 
@@ -237,7 +237,7 @@ static void verifyRandomFile(char *path, off_t size, size_t blockSize)
     size_t nrBlocks;
 
     file_debug("verifyRandomFile: path=%s", path);
-	file = FileOpen(path, O_RDONLY|PG_TESTSTACK);
+	file = FOpen(path, O_RDONLY|PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
     buf = malloc(blockSize);
 
@@ -250,7 +250,7 @@ static void verifyRandomFile(char *path, off_t size, size_t blockSize)
         /* Pick a pseudo-random block and read it */
         off_t position = ((idx * prime) % nrBlocks) * blockSize;
 
-        actual = FileRead(file, buf, blockSize, position, 0);
+        actual = FRead(file, buf, blockSize, position, 0);
 
         /* Verify we read the correct data */
         expected = MIN(blockSize, size-position);
@@ -258,7 +258,7 @@ static void verifyRandomFile(char *path, off_t size, size_t blockSize)
         PG_ASSERT(verifyBuffer(position, buf, actual));
     }
 
-    PG_ASSERT_EQ(0, FileClose(file));
+    PG_ASSERT(FClose(file));
 }
 
 
@@ -278,55 +278,55 @@ static void regression(char *name, size_t blockSize)
     deleteFile(name);
 
 	/* Shouldn't open a non-existent file - various modes) */
-	file = FileOpen(name, O_RDWR|PG_TESTSTACK);
+	file = FOpen(name, O_RDWR|PG_TESTSTACK);
 	PG_ASSERT_EQ(-1, file);
 	PG_ASSERT_EQ(ENOENT, errno);
 
-	file = FileOpen(name, O_RDONLY|PG_TESTSTACK);
-	PG_ASSERT(file == -1);
+	file = FOpen(name, O_RDONLY|PG_TESTSTACK);
+	PG_ASSERT_EQ(-1, file);
 	PG_ASSERT_EQ(errno, ENOENT);
 
 	/* OK to create a file and reopen readonly */
-	file = FileOpen(name, O_CREAT | O_WRONLY | O_TRUNC|PG_TESTSTACK);
+	file = FOpen(name, O_CREAT | O_WRONLY | O_TRUNC|PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
-	PG_ASSERT_EQ(FileClose(file), 0);
+	PG_ASSERT(FClose(file));
 
-	file = FileOpen(name, O_CREAT | O_WRONLY | O_TRUNC | PG_TESTSTACK);
+	file = FOpen(name, O_CREAT | O_WRONLY | O_TRUNC | PG_TESTSTACK);
 	PG_ASSERT(file >= 0);
-	PG_ASSERT_EQ(FileClose(file), 0);
+	PG_ASSERT(FClose(file));
 
 	/* EBADF if closing an already closed file */
-	PG_ASSERT(FileClose(file) != 0 && errno == EBADF);
+	PG_ASSERT(!FClose(file));
+	PG_ASSERT_EQ(EBADF, errno);
 
 	/* Should read EOF on empty file */
-	file = FileOpen(name, O_RDONLY|PG_TESTSTACK);
-	PG_ASSERT(0 == FileRead(file, buf, blockSize, 0, 0));
-	PG_ASSERT(FileEof(file));
-	PG_ASSERT(!FileError(file));
-	PG_ASSERT(FileClose(file) == 0);
+	file = FOpen(name, O_RDONLY|PG_TESTSTACK);
+	PG_ASSERT(0 == FRead(file, buf, blockSize, 0, 0));
+	PG_ASSERT(FEof(file));
+	PG_ASSERT(!FError(file));
+	PG_ASSERT(FClose(file));
 
 	/* Should write a block and then read EOF */
-	file = FileOpen(name, O_RDWR|O_TRUNC|PG_TESTSTACK);
-	PG_ASSERT_EQ(blockSize, FileWriteSeq(file, buf, blockSize, 0));
-	PG_ASSERT_EQ(blockSize, FileSize(file));
-	PG_ASSERT_EQ(0, FileReadSeq(file, buf, blockSize,  0));
-	PG_ASSERT(FileEof(file));
-	PG_ASSERT(!FileError(file));
-	PG_ASSERT(FileClose(file) == 0);
+	file = FOpen(name, O_RDWR|O_TRUNC|PG_TESTSTACK);
+	PG_ASSERT_EQ(blockSize, FWriteSeq(file, buf, blockSize, 0));
+	PG_ASSERT_EQ(blockSize, FSize(file));
+	PG_ASSERT_EQ(0, FReadSeq(file, buf, blockSize,  0));
+	PG_ASSERT(FEof(file));
+	PG_ASSERT(!FError(file));
+	PG_ASSERT(FClose(file));
 
 	/* Writing beyond EOF should extend file */
-	file = FileOpen(name, O_RDWR|O_TRUNC|PG_TESTSTACK);
-	PG_ASSERT_EQ(0, FileSize(file));
+	file = FOpen(name, O_RDWR|O_TRUNC|PG_TESTSTACK);
+	PG_ASSERT_EQ(0, FSize(file));
 	generateBuffer(blockSize, buf, blockSize);
-	PG_ASSERT_EQ(blockSize, FileWrite(file, buf, blockSize, blockSize, 0));
-	PG_ASSERT_EQ(2*blockSize, FileSize(file));
-	//memset(buf, blockSize, 0xff);
-	PG_ASSERT_EQ(blockSize, FileRead(file, buf, blockSize, 0, 0));
+	PG_ASSERT_EQ(blockSize, FWrite(file, buf, blockSize, blockSize, 0));
+	PG_ASSERT_EQ(2*blockSize, FSize(file));
+	PG_ASSERT_EQ(blockSize, FRead(file, buf, blockSize, 0, 0));
 	for (idx = 0; idx<blockSize; idx++)
 		PG_ASSERT_EQ(0, buf[idx]);
-	PG_ASSERT_EQ(blockSize, FileRead(file, buf, blockSize, blockSize, 0));
+	PG_ASSERT_EQ(blockSize, FRead(file, buf, blockSize, blockSize, 0));
 	verifyBuffer(blockSize, buf, blockSize);
-	PG_ASSERT_EQ(0, FileClose(file));
+	PG_ASSERT(FClose(file));
 
 
 	deleteFile(name);

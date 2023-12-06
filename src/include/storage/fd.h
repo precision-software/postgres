@@ -195,5 +195,6 @@ extern int	data_sync_elevel(int elevel);
 extern FState *getFState(File file);
 extern void setTempFileLimit(File file);
 extern void setDeleteOnClose(File file);
+extern void RegisterTemporaryFile(File file);
 
 #endif							/* FD_H */

@@ -1,14 +1,29 @@
 /**/
 #include <stdlib.h>
 #include "storage/iostack_internal.h"
+#include "storage/fd.h"
+#include "storage/fileaccess.h"
 #include "packed.h"
+#include "access/xlog.h"
 
 /* TODO: the following may belong in a different file ... */
-/* These need to be set properly */
+/* These need to be set properly at startup */
 static Byte *tempKey = (Byte *)"0123456789ABCDEF0123456789ABCDEF";
 static size_t tempKeyLen = 32;
 static Byte *permKey = (Byte *)"abcdefghijklmnopqrstuvwxyzABCDEF";
 static size_t permKeyLen = 32;
+
+/*
+ * Function to return a temp file sequence number.
+ * The temp numbers are reset after a crash, so the
+ * encryption key must also be regenerated after a crash.
+ * Any leftover temp files are not valid after a crash and
+ * should be deleted.
+ */
+static uint64 tempSeqNr(void)
+{
+	return GetFakeLSNForUnloggedRel();
+}
 
 /* Function to create a test stack for unit testing */
 IoStack *(*testStackNew)() = NULL;
@@ -70,10 +85,10 @@ void ioStackSetup(void)
 {
 	/* Set up the prototype stacks */
 	ioStackRaw = vfdStackNew();
-	ioStackPlain = bufferedNew(16*1024, vfdStackNew());
+	ioStackPlain = bufferedNew(8*1024, vfdStackNew());
+	ioStackEncrypt = bufferedNew(1, aeadNew("AES-256-GCM", 8 * 1024, tempKey, tempKeyLen, tempSeqNr, vfdStackNew()));
 
 #ifdef NOTYET
-	ioStackEncrypt = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, tempKey, tempKeyLen, vfdStackNew()));
 	ioStackEncryptPerm = bufferedNew(1, aeadNew("AES-256-GCM", 16 * 1024, permKey, permKeyLen, vfdStackNew()));
 	ioStackCompress = bufferedNew(1, lz4CompressNew(64 * 1024, vfdStackNew(), vfdStackNew()));
 	ioStackCompressEncrypt = bufferedNew(1,
@@ -89,7 +104,9 @@ void ioStackSetup(void)
 	ioStacksInitialized = true;
 }
 
-
+/*
+ * Write an entire buffer, making multiple writes if necessary.
+ */
 ssize_t stackWriteAll(void *thisVoid, const Byte *buf, size_t size, off_t offset, uint32 wait)
 {
 	IoStack *this = thisVoid;

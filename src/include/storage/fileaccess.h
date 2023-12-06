@@ -13,8 +13,22 @@ typedef struct FState
 {
 	IoStack *ioStack;
 	off_t offset;
-	//ssize_t fileSize;
 } FState;
+
+/*
+ * Additional open flags.
+ */
+#define PG_XACT  (1ll << 32)           /* Close at end of transaction */
+#define PG_DELETE (1ll << 33)          /* Delete file when closing */
+#define PG_TEMP_LIMIT  (1ll << 34)     /* Enable temp file accounting */
+
+#define PG_STACK_MASK     (7ll << 36)
+#define PG_ENCRYPT        (1ll << 36)
+#define PG_ECOMPRESS      (2ll << 36)
+#define PG_ENCRYPT_PERM   (3ll << 36)
+#define PG_TESTSTACK      (4ll << 36)
+#define PG_PLAIN          (5ll << 36)
+#define PG_RAW            (6ll << 36)
 
 /*
  * New names for basic file functions.

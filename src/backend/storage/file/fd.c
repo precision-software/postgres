@@ -1522,7 +1522,7 @@ ReportTemporaryFileUsage(const char *path, off_t size)
  * ResourceOwnerEnlarge(CurrentResourceOwner) must have been called
  * before the file was opened.
  */
-static void
+void
 RegisterTemporaryFile(File file)
 {
 	ResourceOwnerRememberFile(CurrentResourceOwner, file);

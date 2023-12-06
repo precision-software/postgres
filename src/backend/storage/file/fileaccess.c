@@ -6,6 +6,8 @@
 #include "storage/fd.h"
 #include "storage/fileaccess.h"
 #include "storage/iostack_internal.h"
+#include "utils/resowner.h"
+
 
 /*
 * The following functions add sequential and error handling to the VFD routines.
@@ -237,6 +239,13 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 	append = (fileFlags & O_APPEND) != 0;
 	fileFlags &= ~O_APPEND;
 
+	/* Reserve a resource owner slot if we need one */
+	if (fileFlags & PG_XACT)
+	{
+		Assert(CurrentResourceOwner);
+		ResourceOwnerEnlarge(CurrentResourceOwner);
+	}
+
 	/* Open the  prototype I/O stack */
 	ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
 	if (ioStack == NULL)
@@ -254,6 +263,18 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 	/* Success. Save the io stack in the vfd */
 	fstate = getFState(file);
 	fstate->ioStack = ioStack;
+
+	/* Close at end of transaction? */
+	if (fileFlags & PG_XACT)
+		RegisterTemporaryFile(file);
+
+	/* Delete file when closing */
+	if (fileFlags & PG_DELETE)
+		setDeleteOnClose(file);
+
+	/* Account for temp file growth */
+	if (fileFlags & PG_TEMP_LIMIT)
+		setTempFileLimit(file);
 
 	/* Position at end of file if appending */
 	fstate->offset = append ? stackSize(ioStack): 0;
@@ -278,26 +299,27 @@ bool FClose(File file)
 
 	bool success;
 	bool previousError;
+	IoStack *stack;
 	file_debug("name=%s, file=%d  iostack=%p", FilePathName(file), file, getStack(file));
 
-	/* Do a regular FileClose if it was opened other than by FOpen */
 	if (badFile(file))
-		return FileClose(file);
+		return false;
+	stack = getStack(file);
 
 	/* If there was a previous error, save it in dummy slot */
 	previousError = FError(file);
 	if (previousError)
-		stackCopyError(getErrStack(-1), getStack(file));
+		stackCopyError(getErrStack(-1), stack);
 
-	/* Close the file.  The low level routine will invalidate the "file" index */
-	success = stackClose(getStack(file));
+	/* Close the file.  The low level routine will invalidate the "file" vfd index */
+	success = stackClose(stack);
 
 	/* If a new error occurred, copy it to dummy slot */
 	if (!success && !previousError)
-		stackCopyError(getErrStack(-1), getStack(file));
+		stackCopyError(getErrStack(-1), stack);
 
-	/* No matter what, release the I/O stack on Close */
-	getFState(file)->ioStack = NULL; /* Be safe */
+	/* No matter what, release the I/O stack element after Close */
+	free(stack);
 
 	file_debug("(done): file=%d success=%d", file, success);
 

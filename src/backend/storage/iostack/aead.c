@@ -70,11 +70,11 @@ size_t paddingSize(Aead *this, size_t suggestedSize);
 off_t cryptOffset(Aead *this, off_t plainOffset);
 size_t cryptSize(Aead *this, size_t plainSize);
 static Aead *aeadCleanup(Aead *this);
-static bool aeadTruncate(Aead *this, off_t offset);
-static bool aeadExpand(Aead *this, off_t newSize);
+static bool aeadTruncate(Aead *this, off_t offset, uint32 wait);
+static bool aeadExpand(Aead *this, off_t newSize, uint32 wait);
 
 
-/**
+/*
  * Converter structure for encrypting and decrypting TLS Blocks.
  */
 #define MAX_CIPHER_NAME 64
@@ -108,7 +108,7 @@ struct Aead
 };
 
 
-/**
+/*
  * Open an encrypted file.
  * @param path - the path or file name.
  * @param oflag - the open flags, say O_RDONLY or O_CREATE.
@@ -209,7 +209,7 @@ aeadOpen(Aead *proto, const char *path, uint64 oflags, mode_t mode)
 /**
  * Read a block of encrypted data into our internal buffer, placing plaintext into the caller's buffer.
  */
-static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
+static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset, uint32 wait)
 {
 	off_t cipherOffset;
 	ssize_t actual;
@@ -241,7 +241,7 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
 	cipherOffset = cryptOffset(this, offset);
 
 	/* Read a block of downstream encrypted text into our buffer. */
-	actual = stackReadAll(nextStack(this), this->cryptBuf, this->cryptSize, cipherOffset);
+	actual = stackReadAll(nextStack(this), this->cryptBuf, this->cryptSize, cipherOffset, wait);
 	if (actual <= 0)
 		return copyNextError(this, actual);
 	if (actual < sizeof(uint64) + cipherGetTagSize(this->cipher))
@@ -275,14 +275,14 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset)
 	return plainSize;
 }
 
-/**
+/*
  * Encrypt data into our internal buffer and write to the output file.
  *   @param buf - data to be converted.
  *   @param size - number of bytes to be converted.
  *   @param error - error status, both input and output.
  *   @returns - number of bytes actually used.
  */
-static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
+static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset, uint32 wait)
 {
 	size_t cryptSize;
 	Byte *sequenceBuf;
@@ -335,7 +335,7 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
 	cipherOffset = cryptOffset(this, offset);
 
 	/* Write the encrypted block out */
-	if (stackWriteAll(nextStack(this), this->cryptBuf, cryptSize, cipherOffset) != cryptSize)
+	if (stackWriteAll(nextStack(this), this->cryptBuf, cryptSize, cipherOffset, wait) != cryptSize)
 		return copyNextError(this, -1);
 
 	/* Track file sizes */
@@ -345,8 +345,9 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset)
 	return size;
 }
 
-/**
+/*
  * Close this encryption stack releasing resources.
+ * TODO: may want to add wait to close routines.
  */
 static bool aeadClose(Aead *this)
 {
@@ -356,7 +357,7 @@ static bool aeadClose(Aead *this)
 	 * If not already done, add a partial (empty) block to mark the end of encrypted data.
 	 */
 	if (this->writable && this->fileSize % this->plainSize == 0 && this->cryptFileSize % this->cryptSize == 0)
-		aeadWrite(this, NULL, 0, this->fileSize);  /* sets errno and msg */
+		aeadWrite(this, NULL, 0, this->fileSize, 0);  /* sets errno and msg */
 
 	/* Release resources, including closing the downstream file */
 	aeadCleanup(this);
@@ -377,14 +378,14 @@ static off_t aeadSize(Aead *this)
 /*
  * Change the size of the file, truncating or filling with zeros.
  */
-static bool aeadResize(Aead *this, off_t offset)
+static bool aeadResize(Aead *this, off_t offset, uint32 wait)
 {
 	bool success;
 
 	if (offset < this->fileSize)
-		success = aeadTruncate(this, offset);
+		success = aeadTruncate(this, offset, wait);
 	else
-		success = aeadExpand(this, offset);
+		success = aeadExpand(this, offset, wait);
 
 	return success;
 }
@@ -392,7 +393,7 @@ static bool aeadResize(Aead *this, off_t offset)
 /*
  * Redefine to truncate at the beginning of a block??? Much simpler, and let buffering handle the rest.
  */
-static bool aeadTruncate(Aead *this, off_t offset)
+static bool aeadTruncate(Aead *this, off_t offset, uint32 wait)
 {
 	bool success;
 
@@ -400,13 +401,13 @@ static bool aeadTruncate(Aead *this, off_t offset)
 	off_t blockOffset = ROUNDDOWN(offset, this->plainSize);
 	if (blockOffset != offset)
 	{
-		success = stackReadAll(this, this->plainBuf, this->plainSize, blockOffset) >= 0;
+		success = stackReadAll(this, this->plainBuf, this->plainSize, blockOffset, wait) >= 0;
 		if (!success)
 			return false;
 	}
 
 	/* Truncate the downstream file to match the new sizes */
-	success = stackResize(nextStack(this), this->cryptFileSize);
+	success = stackResize(nextStack(this), this->cryptFileSize, wait);
 	if (!success)
 		return copyNextError(this, false);
 
@@ -416,13 +417,13 @@ static bool aeadTruncate(Aead *this, off_t offset)
 
 	/* If we have a partial block, then write it out */
 	if (blockOffset != offset)
-		if (stackWriteAll(this, this->plainBuf, offset-blockOffset, blockOffset) < 0)
+		if (stackWriteAll(this, this->plainBuf, offset-blockOffset, blockOffset, wait) < 0)
 			return false;
 
 	return true;
 }
 
-static bool aeadExpand(Aead *this, off_t newSize)
+static bool aeadExpand(Aead *this, off_t newSize, uint32 wait)
 {
 	off_t lastBlockOffset;  /* Offset of last block in file */
 	ssize_t lastBlockSize;  /* Size of last partial block */
@@ -442,7 +443,7 @@ static bool aeadExpand(Aead *this, off_t newSize)
 		lastBlockOffset = this->fileSize - lastBlockSize;
 
 		/* Read in the partial block */
-		actual = stackReadAll(this, this->plainBuf, this->plainSize, lastBlockOffset);
+		actual = stackReadAll(this, this->plainBuf, this->plainSize, lastBlockOffset, wait);
 		if (actual < 0)
 			return false;
 		Assert(actual == lastBlockSize);  /* Would suggest this->fileSize is incorrect */
@@ -452,14 +453,14 @@ static bool aeadExpand(Aead *this, off_t newSize)
 		bzero(this->plainBuf + lastBlockSize, nZeros);
 
 		/* Write out the last partial buffer with the zeros appended */
-		actual = stackWriteAll(this, this->plainBuf, lastBlockSize + nZeros, lastBlockOffset);
+		actual = stackWriteAll(this, this->plainBuf, lastBlockSize + nZeros, lastBlockOffset, wait);
 		if (actual < 0)
 			return false;
 	}
 
 	/* Fill in remaining blocks. Note each write increases this->fileSize. */
 	while (this->fileSize < newSize)
-		if (stackWriteAll(this, this->zeros, MIN(newSize - this->fileSize, this->plainSize), this->fileSize) < 0)
+		if (stackWriteAll(this, this->zeros, MIN(newSize - this->fileSize, this->plainSize), this->fileSize, wait) < 0)
 			return false;
 
 	/* Done */
@@ -467,10 +468,10 @@ static bool aeadExpand(Aead *this, off_t newSize)
 }
 
 
-static bool aeadSync(Aead *this)
+static bool aeadSync(Aead *this, uint32 wait)
 {
 	/* Sync the downstream file */
-	bool success = stackSync(nextStack(this));
+	bool success = stackSync(nextStack(this), wait);
 	if (!success)
 		copyNextError(this, -1);
 	return success;

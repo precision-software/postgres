@@ -120,16 +120,17 @@ vfdClose(VfdBottom *this)
 	bool success;
 	file_debug("file=%d name=%s", this->file, FilePathName(this->file));
 
+	/* Clear the I/O stack pointer contained in the VFD. */
+	getFState(this->file)->ioStack = NULL;
+
 	/* Close the file for real. */
 	success = (FileClose(this->file) >= 0);
+	if (!success)
+		stackSetError(this, errno, "Unable to close file %d", this->file);
 
 	/* Note: We allocated ioStack in FileOpen, so we will free it in FileClose */
 	file_debug("(done): file=%d  success=%d", this->file, success);
 
-	if (!success)
-	    stackSetError(this, errno, "Unable to close file %d", this->file);
-
-	this->file = this->ioStack.openVal = -1; /* Just to be sure */
 	return success;
 }
 

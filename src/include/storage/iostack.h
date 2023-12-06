@@ -169,16 +169,6 @@ stackErrorNo(void *thisVoid)
 	return this->errNo;
 }
 
-/* Additional open flags to support encryption/compression */
-#define PG_ENCRYPT        (1ll << 32)
-#define PG_ECOMPRESS      (2ll << 32)
-#define PG_ENCRYPT_PERM   (3ll << 32)
-#define PG_TESTSTACK      (4ll << 32)
-#define PG_PLAIN          (5ll << 32)
-#define PG_RAW            (6ll << 32)
-
-#define PG_STACK_MASK     (7ll << 32)
-
 /* Declare a "debug" macro */
 //#define FILE_DEBUG
 #ifdef FILE_DEBUG
