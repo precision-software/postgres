@@ -1373,12 +1373,12 @@ PostmasterMain(int argc, char *argv[])
 	 */
 	if (external_pid_file)
 	{
-		FILE	   *fpidfile = fopen(external_pid_file, "w");
+		File	   fpidfile = FOpen(external_pid_file, O_CREAT | O_TRUNC | O_WRONLY | PG_TEXT);
 
-		if (fpidfile)
+		if (fpidfile >= 0)
 		{
-			fprintf(fpidfile, "%d\n", MyProcPid);
-			fclose(fpidfile);
+			FPrint(fpidfile, "%d\n", MyProcPid);
+			FClose(fpidfile);
 
 			/* Make PID file world readable */
 			if (chmod(external_pid_file, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH) != 0)
@@ -1587,12 +1587,12 @@ static void
 checkControlFile(void)
 {
 	char		path[MAXPGPATH];
-	FILE	   *fp;
+	File 		file;
 
 	snprintf(path, sizeof(path), "%s/global/pg_control", DataDir);
 
-	fp = AllocateFile(path, PG_BINARY_R);
-	if (fp == NULL)
+	file = FOpen(path, O_RDONLY);
+	if (file < 0)
 	{
 		write_stderr("%s: could not find the database system\n"
 					 "Expected to find it in the directory \"%s\",\n"
@@ -1600,7 +1600,7 @@ checkControlFile(void)
 					 progname, DataDir, path, strerror(errno));
 		ExitPostmaster(2);
 	}
-	FreeFile(fp);
+	FClose(file);
 }
 
 /*
@@ -4522,7 +4522,7 @@ internal_forkexec(int argc, char *argv[], Port *port, BackgroundWorker *worker)
 	pid_t		pid;
 	char		tmpfilename[MAXPGPATH];
 	BackendParameters param;
-	FILE	   *fp;
+	File	   file;
 
 	/*
 	 * Make sure padding bytes are initialized, to prevent Valgrind from
@@ -4540,9 +4540,9 @@ internal_forkexec(int argc, char *argv[], Port *port, BackgroundWorker *worker)
 			 PG_TEMP_FILES_DIR, PG_TEMP_FILE_PREFIX,
 			 MyProcPid, ++tmpBackendFileNum);
 
-	/* Open file */
-	fp = AllocateFile(tmpfilename, PG_BINARY_W);
-	if (!fp)
+	/* Open file.  */
+	file = FOpen(tmpfilename, PG_ENCRYPT | O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+	if (file < 0)
 	{
 		/*
 		 * As in OpenTemporaryFileInTablespace, try to make the temp-file
@@ -4550,8 +4550,8 @@ internal_forkexec(int argc, char *argv[], Port *port, BackgroundWorker *worker)
 		 */
 		(void) MakePGDirectory(PG_TEMP_FILES_DIR);
 
-		fp = AllocateFile(tmpfilename, PG_BINARY_W);
-		if (!fp)
+	    file = FOpen(tmpfilename, PG_ENCRYPT | O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+		if (file < 0)
 		{
 			ereport(LOG,
 					(errcode_for_file_access(),
@@ -4561,17 +4561,17 @@ internal_forkexec(int argc, char *argv[], Port *port, BackgroundWorker *worker)
 		}
 	}
 
-	if (fwrite(&param, sizeof(param), 1, fp) != 1)
+	if (FWrite(file, &param, sizeof(param), 0) != sizeof(param))
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", tmpfilename)));
-		FreeFile(fp);
+		FClose(file);
 		return -1;
 	}
 
 	/* Release file */
-	if (FreeFile(fp))
+	if (!Close(file))
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -5525,12 +5525,13 @@ MaybeStartWalSummarizer(void)
 static bool
 CreateOptsFile(int argc, char *argv[], char *fullprogname)
 {
-	FILE	   *fp;
+	File 		file;
 	int			i;
 
 #define OPTS_FILE	"postmaster.opts"
 
-	if ((fp = fopen(OPTS_FILE, "w")) == NULL)
+	file = FOpen(OPTS_FILE, PG_RAW | O_CREAT | O_TRUNC | O_WRONLY);
+	if (file < 0)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -5538,12 +5539,12 @@ CreateOptsFile(int argc, char *argv[], char *fullprogname)
 		return false;
 	}
 
-	fprintf(fp, "%s", fullprogname);
+	FPrint(file, "%s", fullprogname);
 	for (i = 1; i < argc; i++)
-		fprintf(fp, " \"%s\"", argv[i]);
-	fputs("\n", fp);
+		FPrint(file, " \"%s\"", argv[i]);
+	FPuts(file, "\n");
 
-	if (fclose(fp))
+	if (!FClose(file))
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -5573,7 +5574,7 @@ MaxLivePostmasterChildren(void)
 				max_wal_senders + max_worker_processes);
 }
 
-/*
+/*dd
  * Connect background worker to a database.
  */
 void
@@ -6234,18 +6235,18 @@ read_backend_variables(char *id, Port **port, BackgroundWorker **worker)
 
 #ifndef WIN32
 	/* Non-win32 implementation reads from file */
-	FILE	   *fp;
+	File	   file;
 
 	/* Open file */
-	fp = AllocateFile(id, PG_BINARY_R);
-	if (!fp)
+	file = FOpen(id, PG_EBCRYPT | O_RDONLY | PG_BINARY);
+	if (file < 0)
 	{
 		write_stderr("could not open backend variables file \"%s\": %s\n",
 					 id, strerror(errno));
 		exit(1);
 	}
 
-	if (fread(&param, sizeof(param), 1, fp) != 1)
+	if (FRead(file, &param, sizeof(param)) != sizeof(param);
 	{
 		write_stderr("could not read from backend variables file \"%s\": %s\n",
 					 id, strerror(errno));
@@ -6253,12 +6254,12 @@ read_backend_variables(char *id, Port **port, BackgroundWorker **worker)
 	}
 
 	/* Release file */
-	FreeFile(fp);
-	if (unlink(id) != 0)
+	FClose(file);
+	if (unlink(id) != 0
 	{
 		write_stderr("could not remove file \"%s\": %s\n",
 					 id, strerror(errno));
-		exit(1);
+		exit(1);s
 	}
 #else
 	/* Win32 version uses mapped file */
@@ -6376,6 +6377,7 @@ restore_backend_variables(BackendParameters *param, Port **port, BackgroundWorke
 	 * We need to restore fd.c's counts of externally-opened FDs; to avoid
 	 * confusion, be sure to do this after restoring max_safe_fds.  (Note:
 	 * BackendInitialize will handle this for port->sock.)
+	 * TODO: Is there action? We have problems when buffered files are shared.
 	 */
 #ifndef WIN32
 	if (postmaster_alive_fds[0] >= 0)
