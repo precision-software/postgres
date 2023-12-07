@@ -878,7 +878,7 @@ durable_unlink(const char *fname, int elevel)
  * InitFileAccess --- initialize this module during backend startup
  *
  * This is called during either normal or standalone backend start.
- * It is *not* called in the postmaster.
+ * It is also called in the postmaster.
  *
  * Note that this does not initialize temporary file access, that is
  * separately initialized via InitTemporaryFileAccess().
@@ -886,7 +886,9 @@ durable_unlink(const char *fname, int elevel)
 void
 InitFileAccess(void)
 {
-	Assert(SizeVfdCache == 0);	/* call me only once */
+	/* May be called more than once */
+	if (SizeVfdCache > 0)
+		return;
 
 	/* initialize cache header entry */
 	VfdCache = (Vfd *) malloc(sizeof(Vfd));
@@ -1402,7 +1404,9 @@ AllocateVfd(void)
 
 	DO_DB(elog(LOG, "AllocateVfd. Size %zu", SizeVfdCache));
 
-	Assert(SizeVfdCache > 0);	/* InitFileAccess not called? */
+	/* Initialize file access if not already done. */
+	if (SizeVfdCache == 0)
+		InitFileAccess();
 
 	if (VfdCache[0].nextFree == 0)
 	{
@@ -2129,6 +2133,7 @@ FileRead(File file, void *buffer, size_t amount, off_t offset,
 	int			returnCode;
 	Vfd		   *vfdP;
 
+	file_debug("file=%d(%s)  amount=%zd  offset=%lld", file, FilePathName(file), amount, offset);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %zu %p",
@@ -2185,6 +2190,7 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 	int			returnCode;
 	Vfd		   *vfdP;
 
+	file_debug("file=%d(%s)  amount=%zd  offset=%lld", file, FilePathName(file), amount, offset);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %zu %p",
@@ -2438,12 +2444,14 @@ FileTruncate(File file, off_t offset, uint32 wait_event_info)
  * Return the pathname associated with an open file.
  *
  * The returned string points to an internal buffer, which is valid until
- * the file is closed.
+ * the file is closed. Since this routine can be used for debugging,
+ * it always returns a valid string, even if the file index is invalid.
  */
 char *
 FilePathName(File file)
 {
-	Assert(FileIsValid(file));
+	if (!FileIsValid(file))
+		return "INVALID_FILE";
 
 	return VfdCache[file].fileName;
 }
@@ -3111,6 +3119,7 @@ GetNextTempTableSpace(void)
  * that the subtransaction may have opened.  At commit, we reassign the
  * files that were opened to the parent subtransaction.
  */
+/* TODO: Do we need to do similar for FOpen() files? Or is it handled by resource owner? */
 void
 AtEOSubXact_Files(bool isCommit, SubTransactionId mySubid,
 				  SubTransactionId parentSubid)
@@ -3185,10 +3194,11 @@ BeforeShmemExit_Files(int code, Datum arg)
  * isProcExit: if true, this is being called as the backend process is
  * exiting. If that's the case, we close all open files.
  * Files with the PG_DELETE flag set will be removed.
- * Question: At a minimum, surviving files with buffers need to be
+ *
+ * TODO: Question: At a minimum, surviving files with buffers need to be
  * flushed to disk. Regular files are about to be closed anyway.
- * Is this too early to close them, or will there be additional file I/O
- * after this is called?
+ * We could do minimal work - flush iostack files, delete on close,
+ * and leave other files open, just in case there is more I/O coming.
  *
  * Note we call FClose to close the file. FClose will invoke FileClose
  * for files which do not use I/O stacks.

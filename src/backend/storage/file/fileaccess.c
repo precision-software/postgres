@@ -146,7 +146,7 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 	bool append;
 	FState *fstate;
 
-	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%x", fileName, fileFlags, fileMode);
+	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%llx", fileName, fileFlags, fileMode);
 
 	/* Select the I/O stack prototype for fstate file. */
 	proto = selectIoStack(fileName, fileFlags, fileMode);
@@ -464,4 +464,21 @@ static inline IoStack *getErrStack(File file)
 
 	/* In all cases, return an I/O stack */
 	return stack;
+}
+
+
+bool PathNameFSync(const char *path, uint32 wait)
+{
+	File file;
+	bool success;
+
+	file = FOpen(path, PG_RAW | O_RDWR);
+
+	success =
+		file >= 0 &&
+		FSync(file, wait)  &&
+		FClose(file);
+
+
+	return success;
 }

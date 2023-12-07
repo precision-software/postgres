@@ -59,7 +59,7 @@ bufferedOpen(Buffered *proto, const char *path, uint64 oflags, mode_t perm)
 {
 	IoStack *next;
 	Buffered *this;
-	file_debug("path=%s oflags=%x perm=%x", path, oflags, perm);
+	file_debug("path=%s oflags=%zx perm=%x", path, oflags, perm);
 
     /* Below us, we need to read/modify/write even if write only. */
     if ( (oflags & O_ACCMODE) == O_WRONLY)

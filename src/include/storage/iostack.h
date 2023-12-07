@@ -170,7 +170,7 @@ stackErrorNo(void *thisVoid)
 }
 
 /* Declare a "debug" macro */
-//#define FILE_DEBUG
+#define FILE_DEBUG
 #ifdef FILE_DEBUG
 #define file_debug(...) \
     do {  \

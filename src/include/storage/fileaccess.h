@@ -31,6 +31,8 @@ typedef struct FState
 #define PG_PLAIN          (5ll << 36)
 #define PG_RAW            (6ll << 36)
 
+#define PG_TEXT           (1ll << 40)
+
 /*
  * New names for basic file functions.
  * Want to keep the original FILE_* functions untouched.
@@ -55,6 +57,13 @@ extern ssize_t FPuts(File file, const char *string);
 extern off_t FSeek(File file, off_t offset);
 extern off_t FTell(File file);
 
+/* Convenience */
+static inline bool FTruncate(File file, off_t newSize, uint32 wait)
+{
+	Assert(newSize <= FSize(file));
+	return FResize(file, newSize, wait);
+}
+
 /* Error handling */
 extern bool FError(File file);
 extern bool FEof(File file);
@@ -66,6 +75,7 @@ extern int FErrorCode(File file);
 extern int setFileError(File file, int errorCode, const char *fmt, ...);
 extern ssize_t FBlockSize(File file);
 static bool FileIsLegacy(File file);
+extern bool PathNameFSync(const char *name, uint32 wait);
 
 /* Expermental - belongs elsewhere */
 #ifdef _MSC_VER
