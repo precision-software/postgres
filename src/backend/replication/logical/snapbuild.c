@@ -1750,20 +1750,18 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 	FIN_CRC32C(ondisk->checksum);
 
 	/* we have valid data now, open tempfile and write it there */
-	fd = OpenTransientFile(tmppath,
-						   O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
+	fd = FOpen(tmppath, PG_ENCRYPT | O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", tmppath)));
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_WRITE);
-	if ((write(fd, ondisk, needed_length)) != needed_length)
+	if (FWriteSeq(fd, ondisk, needed_length, WAIT_EVENT_SNAPBUILD_WRITE) != needed_length)
 	{
 		int			save_errno = errno;
 
-		CloseTransientFile(fd);
+		FClose(fd);
 
 		/* if write didn't set errno, assume problem is no disk space */
 		errno = save_errno ? save_errno : ENOSPC;
@@ -1771,7 +1769,6 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", tmppath)));
 	}
-	pgstat_report_wait_end();
 
 	/*
 	 * fsync the file before renaming so that even if we crash after this we
@@ -1784,20 +1781,18 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 	 * some noticeable overhead since it's performed synchronously during
 	 * decoding?
 	 */
-	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_SYNC);
-	if (pg_fsync(fd) != 0)
+	if (!FSync(fd, WAIT_EVENT_SNAPBUILD_SYNC))
 	{
 		int			save_errno = errno;
 
-		CloseTransientFile(fd);
+		FClose(fd);
 		errno = save_errno;
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
 	}
-	pgstat_report_wait_end();
 
-	if (CloseTransientFile(fd) != 0)
+	if (!FClose(fd))
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", tmppath)));
@@ -1858,7 +1853,7 @@ SnapBuildRestore(SnapBuild *builder, XLogRecPtr lsn)
 	sprintf(path, "pg_logical/snapshots/%X-%X.snap",
 			LSN_FORMAT_ARGS(lsn));
 
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	fd = FOpen(path, PG_ENCRYPT | O_RDONLY | PG_BINARY);
 
 	if (fd < 0 && errno == ENOENT)
 		return false;
@@ -1921,7 +1916,7 @@ SnapBuildRestore(SnapBuild *builder, XLogRecPtr lsn)
 		COMP_CRC32C(checksum, ondisk.builder.catchange.xip, sz);
 	}
 
-	if (CloseTransientFile(fd) != 0)
+	if (!FClose(fd))
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", path)));
@@ -2019,14 +2014,12 @@ SnapBuildRestoreContents(int fd, char *dest, Size size, const char *path)
 {
 	int			readBytes;
 
-	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_READ);
-	readBytes = read(fd, dest, size);
-	pgstat_report_wait_end();
+	readBytes = FReadSeq(fd, dest, size, 0);
 	if (readBytes != size)
 	{
 		int			save_errno = errno;
 
-		CloseTransientFile(fd);
+		FClose(fd);
 
 		if (readBytes < 0)
 		{
