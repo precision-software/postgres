@@ -8,4 +8,5 @@ backend_sources += files(
   'fileset.c',
   'reinit.c',
   'sharedfileset.c',
+  'tempfile.c',
 )

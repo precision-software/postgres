@@ -19,6 +19,7 @@ OBJS = \
 	fileaccess.o \
 	fileset.o \
 	reinit.o \
-	sharedfileset.o
+	sharedfileset.o \
+	tempfile.o
 
 include $(top_srcdir)/src/backend/common.mk
