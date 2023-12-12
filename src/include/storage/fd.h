@@ -196,6 +196,7 @@ PURE extern FState *getFState(File file);
 extern void setTempFileLimit(File file);
 extern void setDeleteOnClose(File file);
 extern void RegisterTemporaryFile(File file);
+extern void setTransient(File file);
 
 inline static bool
 FileIsLegacy(File file)

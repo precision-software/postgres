@@ -193,6 +193,7 @@ int			io_direct_flags;
 #define FD_DELETE_AT_CLOSE	(1 << 0)	/* T = delete when closed */
 #define FD_CLOSE_AT_EOXACT	(1 << 1)	/* T = close at eoXact */
 #define FD_TEMP_FILE_LIMIT	(1 << 2)	/* T = respect temp_file_limit */
+#define FD_TRANSIENT        (1 << 3)    /* T = close when subtrans aborts */
 
 typedef struct vfd
 {
@@ -208,6 +209,7 @@ typedef struct vfd
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
 	FState      fState;         /* State to support FRead/FWrite/encyption */
+	SubTransactionId create_subid;  /* Subtransaction which owns this file */
 } Vfd;
 
 /*
@@ -296,7 +298,7 @@ static int	nextTempTableSpace = 0;
  */
 static bool FlushTempFiles(void);
 static bool FileIsXact(File file);
-
+static bool FileIsTransient(File file);
 /*--------------------
  *
  * Private Routines
@@ -3119,12 +3121,12 @@ GetNextTempTableSpace(void)
  * that the subtransaction may have opened.  At commit, we reassign the
  * files that were opened to the parent subtransaction.
  */
-/* TODO: Do we need to do similar for FOpen() files? Or is it handled by resource owner? */
 void
 AtEOSubXact_Files(bool isCommit, SubTransactionId mySubid,
 				  SubTransactionId parentSubid)
 {
 	Index		i;
+	File        file;
 
 	for (i = 0; i < numAllocatedDescs; i++)
 	{
@@ -3137,6 +3139,18 @@ AtEOSubXact_Files(bool isCommit, SubTransactionId mySubid,
 				/* have to recheck the item after FreeDesc (ugly) */
 				FreeDesc(&allocatedDescs[i--]);
 			}
+		}
+	}
+
+	/* Do for each vfd associated with this subtransaction */
+	for (file = 1; file < SizeVfdCache; file++)
+	{
+		if (FileIsTransient(file) && VfdCache[file].create_subid == mySubid)
+		{
+			if (isCommit)
+				VfdCache[file].create_subid = parentSubid;
+			else
+				FClose(file);
 		}
 	}
 }
@@ -3232,7 +3246,7 @@ CleanupTempFiles(bool isCommit, bool isProcExit)
 			 * Close all files if we are exiting, and close temp files if
 			 * we are at the end of the transaction.
 			 */
-			if (isProcExit || FileIsXact(file))
+			if (isProcExit || FileIsXact(file) || FileIsTransient(file))
 				FClose(file);
 		}
 
@@ -4069,15 +4083,24 @@ FState *getFState(File file)
 
 /*
  * Is this a temporary file to be closed at end of transaction?
+ * TODO: verify transient files are temp files too and are closed
  */
 static bool FileIsXact(File file)
 {
 	return (FileIsValid(file) && (VfdCache[file].fdstate & FD_CLOSE_AT_EOXACT) != 0);
 }
 
+/*
+ * Is this a transient file to be closed at subtransaction abort?
+ */
+static bool FileIsTransient(File file)
+{
+	return (FileIsValid(file) && (VfdCache[file].fdstate & FD_TRANSIENT) != 0);
+}
+
 
 /*
- * Set a flag so this file is subject to limitations on temp file space
+ * Set a flag so this file is subject to l(imitations on temp file space
  */
 void setTempFileLimit(File file)
 {
@@ -4092,6 +4115,13 @@ void setDeleteOnClose(File file)
 {
 	Assert(FileIsValid(file));
 	VfdCache[file].fdstate |= FD_DELETE_AT_CLOSE;
+}
+
+void setTransient(File file)
+{
+	Assert(FileIsValid(file));
+	VfdCache[file].create_subid = GetCurrentSubTransactionId();
+	VfdCache[file].fdstate |= FD_TRANSIENT;
 }
 
 /*

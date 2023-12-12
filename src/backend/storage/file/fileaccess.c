@@ -192,6 +192,10 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 	if (fileFlags & PG_TEMP_LIMIT)
 		setTempFileLimit(file);
 
+	/* Transient File associated with subtransaction */
+	if (fileFlags & PG_TRANSIENT)
+		setTransient(file);
+
 	/* Position at end of file if appending */
 	fstate->offset = append ? stackSize(ioStack): 0;
 	if (fstate->offset == -1)
