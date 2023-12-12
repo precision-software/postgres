@@ -308,9 +308,9 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 	char		tmppath[MAXPGPATH];
 	char		histfname[MAXFNAMELEN];
 	char		buffer[BLCKSZ];
-	int			srcfd;
-	int			fd;
-	int			nbytes;
+	File		srcfd;
+	File		fd;
+	int64		nbytes;
 
 	Assert(newTLI > parentTLI); /* else bad selection of newTLI */
 
@@ -322,7 +322,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 	unlink(tmppath);
 
 	/* do not use get_sync_bit() here --- want to fsync only at end of fill */
-	fd = OpenTransientFile(tmppath, O_RDWR | O_CREAT | O_EXCL);
+	fd = FOpen(tmppath, PG_PLAIN | O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -339,7 +339,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 	else
 		TLHistoryFilePath(path, parentTLI);
 
-	srcfd = OpenTransientFile(path, O_RDONLY);
+	srcfd = FOpen(path, PG_RAW | PG_XACT | O_RDONLY | PG_BINARY);
 	if (srcfd < 0)
 	{
 		if (errno != ENOENT)
@@ -353,9 +353,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 		for (;;)
 		{
 			errno = 0;
-			pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_READ);
-			nbytes = (int) read(srcfd, buffer, sizeof(buffer));
-			pgstat_report_wait_end();
+			nbytes = FReadSeq(srcfd, buffer, sizeof(buffer), WAIT_EVENT_TIMELINE_HISTORY_WRITE);
 			if (nbytes < 0 || errno != 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
@@ -363,8 +361,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 			if (nbytes == 0)
 				break;
 			errno = 0;
-			pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
-			if ((int) write(fd, buffer, nbytes) != nbytes)
+			if (FWriteSeq(fd, buffer, nbytes, WAIT_EVENT_TIMELINE_HISTORY_WRITE) != nbytes)
 			{
 				int			save_errno = errno;
 
@@ -383,10 +380,9 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 						(errcode_for_file_access(),
 						 errmsg("could not write to file \"%s\": %m", tmppath)));
 			}
-			pgstat_report_wait_end();
 		}
 
-		if (CloseTransientFile(srcfd) != 0)
+		if (!FClose(srcfd))
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not close file \"%s\": %m", path)));
@@ -407,10 +403,9 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 
 	nbytes = strlen(buffer);
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
-	if ((int) write(fd, buffer, nbytes) != nbytes)
+	if (FWriteSeq(fd, buffer, nbytes, WAIT_EVENT_TIMELINE_HISTORY_WRITE) != nbytes)
 	{
-		int			save_errno = errno;
+		int save_errno = errno;
 
 		/*
 		 * If we fail to make the file, delete it to release disk space
@@ -421,18 +416,16 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not write to file \"%s\": %m", tmppath)));
+					errmsg("could not write to file \"%s\": %m", tmppath)));
 	}
-	pgstat_report_wait_end();
 
-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_SYNC);
-	if (pg_fsync(fd) != 0)
+
+	if (!FSync(fd, WAIT_EVENT_TIMELINE_HISTORY_WRITE))
 		ereport(data_sync_elevel(ERROR),
-				(errcode_for_file_access(),
-				 errmsg("could not fsync file \"%s\": %m", tmppath)));
-	pgstat_report_wait_end();
+				errcode_for_file_access(),
+				 errmsg("could not fsync file \"%s\": %m", tmppath));
 
-	if (CloseTransientFile(fd) != 0)
+	if (!FClose(fd))
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", tmppath)));
@@ -474,15 +467,14 @@ writeTimeLineHistoryFile(TimeLineID tli, char *content, int size)
 	unlink(tmppath);
 
 	/* do not use get_sync_bit() here --- want to fsync only at end of fill */
-	fd = OpenTransientFile(tmppath, O_RDWR | O_CREAT | O_EXCL);
+	fd = FOpen(tmppath, PG_PLAIN | PG_XACT | O_RDWR | O_CREAT | O_EXCL);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create file \"%s\": %m", tmppath)));
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE);
-	if ((int) write(fd, content, size) != size)
+	if (FWriteSeq(fd, content, size, WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE) != size)
 	{
 		int			save_errno = errno;
 
@@ -497,16 +489,13 @@ writeTimeLineHistoryFile(TimeLineID tli, char *content, int size)
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", tmppath)));
 	}
-	pgstat_report_wait_end();
 
-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC);
-	if (pg_fsync(fd) != 0)
+	if (!FSync(fd, WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE))
 		ereport(data_sync_elevel(ERROR),
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
-	pgstat_report_wait_end();
 
-	if (CloseTransientFile(fd) != 0)
+	if (!FClose(fd))
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", tmppath)));
