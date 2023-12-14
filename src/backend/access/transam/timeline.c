@@ -339,7 +339,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 	else
 		TLHistoryFilePath(path, parentTLI);
 
-	srcfd = FOpen(path, PG_RAW | PG_XACT | O_RDONLY | PG_BINARY);
+	srcfd = FOpen(path, PG_RAW | PG_TRANSIENT | O_RDONLY | PG_BINARY);
 	if (srcfd < 0)
 	{
 		if (errno != ENOENT)
@@ -352,29 +352,25 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 	{
 		for (;;)
 		{
-			errno = 0;
 			nbytes = FReadSeq(srcfd, buffer, sizeof(buffer), WAIT_EVENT_TIMELINE_HISTORY_WRITE);
-			if (nbytes < 0 || errno != 0)
+			if (nbytes < 0)
+			{
+				setDeleteOnClose(fd);
+
 				ereport(ERROR,
 						(errcode_for_file_access(),
-						 errmsg("could not read file \"%s\": %m", path)));
+							errmsg("could not read file \"%s\": %m", path)));
+			}
 			if (nbytes == 0)
 				break;
-			errno = 0;
+
 			if (FWriteSeq(fd, buffer, nbytes, WAIT_EVENT_TIMELINE_HISTORY_WRITE) != nbytes)
 			{
-				int			save_errno = errno;
-
 				/*
 				 * If we fail to make the file, delete it to release disk
 				 * space
 				 */
-				unlink(tmppath);
-
-				/*
-				 * if write didn't set errno, assume problem is no disk space
-				 */
-				errno = save_errno ? save_errno : ENOSPC;
+				setDeleteOnClose(fd);
 
 				ereport(ERROR,
 						(errcode_for_file_access(),
@@ -402,17 +398,11 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 			 reason);
 
 	nbytes = strlen(buffer);
-	errno = 0;
 	if (FWriteSeq(fd, buffer, nbytes, WAIT_EVENT_TIMELINE_HISTORY_WRITE) != nbytes)
 	{
-		int save_errno = errno;
-
-		/*
-		 * If we fail to make the file, delete it to release disk space
-		 */
-		unlink(tmppath);
-		/* if write didn't set errno, assume problem is no disk space */
-		errno = save_errno ? save_errno : ENOSPC;
+		/* If we fail to make the file, delete it to release disk space. */
+		setDeleteOnClose(fd);
+		FClose(fd);
 
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -466,24 +456,17 @@ writeTimeLineHistoryFile(TimeLineID tli, char *content, int size)
 
 	unlink(tmppath);
 
-	/* do not use get_sync_bit() here --- want to fsync only at end of fill */
-	fd = FOpen(tmppath, PG_PLAIN | PG_XACT | O_RDWR | O_CREAT | O_EXCL);
+	/* do not use get_sync_bit() here --- want to fsync only at end of file */
+	fd = FOpen(tmppath, PG_PLAIN | PG_XACT | O_RDWR | O_CREAT | O_TRUNC | O_EXCL);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create file \"%s\": %m", tmppath)));
 
-	errno = 0;
 	if (FWriteSeq(fd, content, size, WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE) != size)
 	{
-		int			save_errno = errno;
-
-		/*
-		 * If we fail to make the file, delete it to release disk space
-		 */
-		unlink(tmppath);
-		/* if write didn't set errno, assume problem is no disk space */
-		errno = save_errno ? save_errno : ENOSPC;
+		/* If we fail to make the file, delete it to release disk space */
+		setDeleteOnClose(fd);
 
 		ereport(ERROR,
 				(errcode_for_file_access(),
