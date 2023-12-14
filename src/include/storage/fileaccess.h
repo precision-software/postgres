@@ -19,21 +19,21 @@ typedef struct FState
  * Additional open flags, all in upper word so they don't interfere
  * with existing kernel flags.
  */
-#define PG_XACT           (1ll << 32)       /* Close at end of transaction */
-#define PG_DELETE         (1ll << 33)       /* Delete file when closing */
-#define PG_TEMP_LIMIT     (1ll << 34)       /* Enable temp file accounting */
+#define PG_XACT           (1ll << 36)       /* Close at end of transaction */
+#define PG_DELETE         (1ll << 37)       /* Delete file when closing */
+#define PG_TEMP_LIMIT     (1ll << 38)       /* Enable temp file accounting */
+#define PG_TRANSIENT      (1ll << 39)       /* Transient file closed when subtran aborts */
+#define PG_TEXT           (1ll << 40)       /* Open as text file */
 
-#define PG_TRANSIENT      (1ll << 35)       /* Transient file closed when subtran aborts */
+#define PG_STACK_MASK     (15ll << 32)
+#define PG_ENCRYPT        (1ll << 32)
+#define PG_ECOMPRESS      (2ll << 32)
+#define PG_ENCRYPT_PERM   (3ll << 32)
+#define PG_TESTSTACK      (4ll << 32)
+#define PG_PLAIN          (5ll << 32)
+#define PG_RAW            (6ll << 32)
 
-#define PG_STACK_MASK     (7ll << 36)
-#define PG_ENCRYPT        (1ll << 36)
-#define PG_ECOMPRESS      (2ll << 36)
-#define PG_ENCRYPT_PERM   (3ll << 36)
-#define PG_TESTSTACK      (4ll << 36)
-#define PG_PLAIN          (5ll << 36)
-#define PG_RAW            (6ll << 36)
 
-#define PG_TEXT           (1ll << 40)
 
 /*
  * New names for basic file functions.

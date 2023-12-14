@@ -121,7 +121,14 @@ ssize_t stackWriteAll(void *thisVoid, const Byte *buf, size_t size, off_t offset
 			break;
 	}
 
-	/* Check for errors. Return the same error state as fileWrite. */
+	/* If we failed to write entire buffer, then assume out of space */
+	if (current == 0 && total != size)
+	{
+		errno = ENOSPC;
+		current = -1;
+	}
+
+	/* Check for errors. */
 	if (current < 0)
 		total = current;
 
