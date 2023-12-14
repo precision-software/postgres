@@ -603,17 +603,12 @@ CheckPointReplicationOrigin(void)
 						tmppath)));
 
 	/* write magic */
-	errno = 0;
 	if ((FWriteSeq(tmpfd, &magic, sizeof(magic), 0)) != sizeof(magic))
-	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m",
 						tmppath)));
-	}
+
 	COMP_CRC32C(crc, &magic, sizeof(magic));
 
 	/* prevent concurrent creations/drops */
@@ -644,18 +639,12 @@ CheckPointReplicationOrigin(void)
 		/* make sure we only write out a commit that's persistent */
 		XLogFlush(local_lsn);
 
-		errno = 0;
 		if (FWriteSeq(tmpfd, &disk_state, sizeof(disk_state), 0) !=
 			sizeof(disk_state))
-		{
-			/* if write didn't set errno, assume problem is no disk space */
-			if (errno == 0)
-				errno = ENOSPC;
 			ereport(PANIC,
 					(errcode_for_file_access(),
 					 errmsg("could not write to file \"%s\": %m",
 							tmppath)));
-		}
 
 		COMP_CRC32C(crc, &disk_state, sizeof(disk_state));
 	}
@@ -664,17 +653,11 @@ CheckPointReplicationOrigin(void)
 
 	/* write out the CRC */
 	FIN_CRC32C(crc);
-	errno = 0;
 	if (FWriteSeq(tmpfd, &crc, sizeof(crc), 0) != sizeof(crc))
-	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m",
 						tmppath)));
-	}
 
 	if (!FClose(tmpfd))
 		ereport(PANIC,

@@ -896,12 +896,8 @@ SlruPhysicalWritePage(SlruCtl ctl, int64 pageno, int slotno, SlruWriteAll fdata)
 		}
 	}
 
-	errno = 0;
 	if (FWrite(fd, shared->page_buffer[slotno], BLCKSZ, offset, WAIT_EVENT_SLRU_WRITE) != BLCKSZ)
 	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
 		slru_errcause = SLRU_WRITE_FAILED;
 		slru_errno = errno;
 		if (!fdata)

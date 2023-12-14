@@ -419,7 +419,7 @@ BufFileClose(BufFile *file)
 	BufFileFlush(file);
 	/* close and delete the underlying file(s) */
 	for (i = 0; i < file->numFiles; i++)
-		FileClose(file->files[i]);
+		FClose(file->files[i]);
 	/* release the buffer space */
 	pfree(file->files);
 	pfree(file);
@@ -459,7 +459,7 @@ BufFileLoadBuffer(BufFile *file)
 	/*
 	 * Read whatever we can get, up to a full bufferload.
 	 */
-	file->nbytes = FileRead(thisfile,
+	file->nbytes = FRead(thisfile,
 							file->buffer.data,
 							sizeof(file->buffer),
 							file->curOffset,
@@ -536,7 +536,7 @@ BufFileDumpBuffer(BufFile *file)
 		else
 			INSTR_TIME_SET_ZERO(io_start);
 
-		bytestowrite = FileWrite(thisfile,
+		bytestowrite = FWrite(thisfile,
 								 file->buffer.data + wpos,
 								 bytestowrite,
 								 file->curOffset,
@@ -769,7 +769,7 @@ BufFileSeek(BufFile *file, int fileno, off_t offset, int whence)
 			 * file.
 			 */
 			newFile = file->numFiles - 1;
-			newOffset = FileSize(file->files[file->numFiles - 1]);
+			newOffset = FSize(file->files[file->numFiles - 1]);
 			if (newOffset < 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
@@ -872,7 +872,7 @@ BufFileSize(BufFile *file)
 	Assert(file->fileset != NULL);
 
 	/* Get the size of the last physical file. */
-	lastFileSize = FileSize(file->files[file->numFiles - 1]);
+	lastFileSize = FSize(file->files[file->numFiles - 1]);
 	if (lastFileSize < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -951,7 +951,7 @@ BufFileTruncateFileSet(BufFile *file, int fileno, off_t offset)
 		if ((i != fileno || offset == 0) && i != 0)
 		{
 			FileSetSegmentName(segment_name, file->name, i);
-			FileClose(file->files[i]);
+			FClose(file->files[i]);
 			if (!FileSetDelete(file->fileset, segment_name, true))
 				ereport(ERROR,
 						(errcode_for_file_access(),
@@ -969,8 +969,8 @@ BufFileTruncateFileSet(BufFile *file, int fileno, off_t offset)
 		}
 		else
 		{
-			if (FileTruncate(file->files[i], offset,
-							 WAIT_EVENT_BUFFILE_TRUNCATE) < 0)
+			if (!FTruncate(file->files[i], offset,
+							 WAIT_EVENT_BUFFILE_TRUNCATE))
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not truncate file \"%s\": %m",
