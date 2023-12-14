@@ -267,6 +267,7 @@ BufFile *
 BufFileCreateFileSet(FileSet *fileset, const char *name)
 {
 	BufFile    *file;
+	file_debug("name=%s", name);
 
 	file = makeBufFileCommon(1);
 	file->fileset = fileset;
@@ -297,6 +298,7 @@ BufFileOpenFileSet(FileSet *fileset, const char *name, int mode,
 	File	   *files;
 	int			nfiles = 0;
 
+	file_debug("name=%s mode=0x%x missing_ok=%d", name, mode, missing_ok);
 	files = palloc(sizeof(File) * capacity);
 
 	/*

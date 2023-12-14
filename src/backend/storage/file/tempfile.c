@@ -58,7 +58,7 @@ PGDLLEXPORT int	nextTempTableSpace = 0;
 extern PGDLLIMPORT bool temporary_files_allowed;
 
 /* Forward references */
-static File OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError);
+static File OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError, bool interXact);
 
 /*
 * Open a temporary file that will disappear when we close it.
@@ -82,13 +82,6 @@ OpenTemporaryFile(bool interXact)
 	Assert(temporary_files_allowed);	/* check temp file access is up */
 
 	/*
-	 * Make sure the current resource owner has space for this File before we
-	 * open it, if we'll be registering it below.
-	 */
-	if (!interXact)
-		ResourceOwnerEnlarge(CurrentResourceOwner);
-
-	/*
 	 * If some temp tablespace(s) have been given to us, try to use the next
 	 * one.  If a given tablespace can't be found, we silently fall back to
 	 * the database's default tablespace.
@@ -102,7 +95,7 @@ OpenTemporaryFile(bool interXact)
 		Oid			tblspcOid = GetNextTempTableSpace();
 
 		if (OidIsValid(tblspcOid))
-			file = OpenTemporaryFileInTablespace(tblspcOid, false);
+			file = OpenTemporaryFileInTablespace(tblspcOid, false, interXact);
 	}
 
 	/*
@@ -114,15 +107,7 @@ OpenTemporaryFile(bool interXact)
 		file = OpenTemporaryFileInTablespace(MyDatabaseTableSpace ?
 											 MyDatabaseTableSpace :
 											 DEFAULTTABLESPACE_OID,
-											 true);
-
-	/* Mark it for deletion at close and temporary file size limit */
-	setTempFileLimit(file);
-	setDeleteOnClose(file);
-
-	/* Register it with the current resource owner */
-	if (!interXact)
-		RegisterTemporaryFile(file);
+											 true, interXact);
 
 	return file;
 }
@@ -156,11 +141,12 @@ TempTablespacePath(char *path, Oid tablespace)
  * Subroutine for OpenTemporaryFile, which see for details.
  */
 static File
-OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
+OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError, bool interXact)
 {
 	char		tempdirpath[MAXPGPATH];
 	char		tempfilepath[MAXPGPATH];
 	File		file;
+	uint64      oflags;
 
 	TempTablespacePath(tempdirpath, tblspcOid);
 
@@ -172,11 +158,16 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 			 tempdirpath, PG_TEMP_FILE_PREFIX, MyProcPid, tempFileCounter++);
 
 	/*
-	 * Open the file.  Note: we don't use O_EXCL, in case there is an orphaned
+	 * Choose oflags. Note we don't use O_EXCL in case there is an orphaned
 	 * temp file that can be reused.
-	 */
-	file = PathNameOpenFile(tempfilepath,
-							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
+     */
+	oflags = PG_RAW | PG_DELETE | PG_TEMP_LIMIT |
+			 O_RDWR | O_CREAT | O_TRUNC | PG_BINARY;
+	if (!interXact)
+		oflags |= PG_XACT;
+
+	/* Open the file. */
+	file = FOpen(tempfilepath, oflags);
 	if (file <= 0)
 	{
 		/*
@@ -189,8 +180,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 		 */
 		(void) MakePGDirectory(tempdirpath);
 
-		file = PathNameOpenFile(tempfilepath,
-								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
+		file = FOpen(tempfilepath, oflags);
 		if (file <= 0 && rejectError)
 			elog(ERROR, "could not create temporary file \"%s\": %m",
 				 tempfilepath);
@@ -216,65 +206,48 @@ File
 PathNameCreateTemporaryFile(const char *path, bool error_on_failure)
 {
 	File		file;
+	uint64 		oflags;
 
 	Assert(temporary_files_allowed);	/* check temp file access is up */
 
-	ResourceOwnerEnlarge(CurrentResourceOwner);
-
 	/*
-	 * Open the file.  Note: we don't use O_EXCL, in case there is an orphaned
+	 * Choose oflags. Note we don't use O_EXCL in case there is an orphaned
 	 * temp file that can be reused.
 	 */
-	file = PathNameOpenFile(path, O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
-	if (file <= 0)
-	{
-		if (error_on_failure)
+	oflags = PG_RAW | PG_TEMP_LIMIT |
+		     O_RDWR | O_CREAT | O_TRUNC | PG_BINARY;
+
+	/* Open the file. */
+	file = FOpen(path, oflags);
+	if (file <= 0 && error_on_failure)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 						errmsg("could not create temporary file \"%s\": %m",
 							   path)));
-		else
-			return file;
-	}
-
-	/* Mark it for temp_file_limit accounting. */
-	setTempFileLimit(file);
-
-	/* Register it for automatic close. */
-	RegisterTemporaryFile(file);
 
 	return file;
 }
 
 /*
  * Open a file that was created with PathNameCreateTemporaryFile, possibly in
- * another backend.  Files opened this way don't count against the
+ * another backend. Files opened this way don't count against the
  * temp_file_limit of the caller, are automatically closed at the end of the
  * transaction but are not deleted on close.
  */
 File
-PathNameOpenTemporaryFile(const char *path, int mode)
+PathNameOpenTemporaryFile(const char *path, int oflags)
 {
 	File		file;
 
 	Assert(temporary_files_allowed);	/* check temp file access is up */
 
-	ResourceOwnerEnlarge(CurrentResourceOwner);
-
-	file = PathNameOpenFile(path, mode | PG_BINARY);
-
-	/* If no such file, then we don't raise an error. */
+	/* Open the file, but don't throw error if no such file */
+	file = FOpen(path, PG_RAW | PG_XACT | oflags);
 	if (file <= 0 && errno != ENOENT)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 					errmsg("could not open temporary file \"%s\": %m",
 						   path)));
-
-	if (file > 0)
-	{
-		/* Register it for automatic close. */
-		RegisterTemporaryFile(file);
-	}
 
 	return file;
 }
