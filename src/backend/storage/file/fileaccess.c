@@ -157,10 +157,7 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 
 	/* Reserve a resource owner slot if we need one */
 	if (fileFlags & PG_XACT)
-	{
-		Assert(CurrentResourceOwner);
 		ResourceOwnerEnlarge(CurrentResourceOwner);
-	}
 
 	/* Open the  prototype I/O stack */
 	ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
@@ -228,7 +225,7 @@ bool FClose(File file)
 	if (badFile(file))
 		return false;
 
-    /* Point the file's I/O stack */
+    /* Point to the file's I/O stack */
 	stack = getStack(file);
 
 	/* If there was a previous error, save it in dummy slot */
