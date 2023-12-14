@@ -1756,15 +1756,9 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", tmppath)));
 
-	errno = 0;
 	if (FWriteSeq(fd, ondisk, needed_length, WAIT_EVENT_SNAPBUILD_WRITE) != needed_length)
 	{
-		int			save_errno = errno;
-
 		FClose(fd);
-
-		/* if write didn't set errno, assume problem is no disk space */
-		errno = save_errno ? save_errno : ENOSPC;
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", tmppath)));

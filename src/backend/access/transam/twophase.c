@@ -1767,25 +1767,15 @@ RecreateTwoPhaseFile(TransactionId xid, void *content, int len)
 				 errmsg("could not recreate file \"%s\": %m", path)));
 
 	/* Write content and CRC */
-	errno = 0;
 	if (FWriteSeq(file, content, len, WAIT_EVENT_TWOPHASE_FILE_WRITE) != len)
-	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write file \"%s\": %m", path)));
-	}
+
 	if (FWriteSeq(file, &statefile_crc, sizeof(pg_crc32c), WAIT_EVENT_TWOPHASE_FILE_WRITE) != sizeof(pg_crc32c))
-	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write file \"%s\": %m", path)));
-	}
 
 	/*
 	 * We must fsync the file because the end-of-replay checkpoint will not do
