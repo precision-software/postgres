@@ -3914,15 +3914,9 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 	ondisk->size = sz;
 
-	errno = 0;
 	if (FWriteSeq(file, rb->outbuf, ondisk->size, WAIT_EVENT_REORDER_BUFFER_WRITE) != ondisk->size)
 	{
-		int			save_errno = errno;
-
 		FClose(file);
-
-		/* if write didn't set errno, assume problem is no disk space */
-		errno = save_errno ? save_errno : ENOSPC;
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write to data file for XID %u: %m",
