@@ -363,11 +363,14 @@ static const ResourceOwnerDesc file_resowner_desc =
 static inline void
 ResourceOwnerRememberFile(ResourceOwner owner, File file)
 {
+	file_debug("owner=%p  file=%d(%s)", owner, file, FilePathName(file));
 	ResourceOwnerRemember(owner, Int32GetDatum(file), &file_resowner_desc);
 }
+
 static inline void
 ResourceOwnerForgetFile(ResourceOwner owner, File file)
 {
+	file_debug("owner=%p  fle=%d(%s)", owner, file, FilePathName(file));
 	ResourceOwnerForget(owner, Int32GetDatum(file), &file_resowner_desc);
 }
 
@@ -1519,6 +1522,8 @@ ReportTemporaryFileUsage(const char *path, off_t size)
 void
 RegisterTemporaryFile(File file)
 {
+	Assert(FileIsValid(file));
+	Assert(VfdCache[file].resowner == NULL);
 	ResourceOwnerRememberFile(CurrentResourceOwner, file);
 	VfdCache[file].resowner = CurrentResourceOwner;
 
@@ -1564,6 +1569,7 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	File		file;
 	Vfd		   *vfdP;
 
+	file_debug("fileName=%s flags=0x%x  mode=0x%x", fileName, fileFlags, fileMode);
 	DO_DB(elog(LOG, "PathNameOpenFilePerm: %s %x %o",
 			   fileName, fileFlags, fileMode));
 
@@ -1735,6 +1741,7 @@ FileClose(File file)
 	Vfd		   *vfdP;
 	bool       save_errno = 0;
 
+	file_debug("file=%d(%s)", file, FilePathName(file));
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileClose: %d (%s)",
@@ -2820,6 +2827,7 @@ AtEOSubXact_Files(bool isCommit, SubTransactionId mySubid,
 	}
 
 	/* Do for each vfd associated with this subtransaction */
+	/* TODO: Alternative approach is to add VFD to allocatedDesc */
 	for (file = 1; file < SizeVfdCache; file++)
 	{
 		if (FileIsTransient(file) && VfdCache[file].create_subid == mySubid)
@@ -3807,6 +3815,10 @@ void setDeleteOnClose(File file)
 	VfdCache[file].fdstate |= FD_DELETE_AT_CLOSE;
 }
 
+/*
+ * Mark this file as transient, meaning it will be closed on error
+ * or subtransaction abort.
+ */
 void setTransient(File file)
 {
 	Assert(FileIsValid(file));
