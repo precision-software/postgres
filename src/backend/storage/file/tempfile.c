@@ -161,7 +161,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError, bool interXact)
 	 * Choose oflags. Note we don't use O_EXCL in case there is an orphaned
 	 * temp file that can be reused.
      */
-	oflags = PG_RAW | PG_DELETE | PG_TEMP_LIMIT |
+	oflags = PG_ENCRYPT | PG_DELETE | PG_TEMP_LIMIT |
 			 O_RDWR | O_CREAT | O_TRUNC | PG_BINARY;
 	if (!interXact)
 		oflags |= PG_XACT;
@@ -214,7 +214,7 @@ PathNameCreateTemporaryFile(const char *path, bool error_on_failure)
 	 * Choose oflags. Note we don't use O_EXCL in case there is an orphaned
 	 * temp file that can be reused.
 	 */
-	oflags = PG_RAW | PG_TEMP_LIMIT |
+	oflags = PG_ENCRYPT | PG_TEMP_LIMIT |
 		     O_RDWR | O_CREAT | O_TRUNC | PG_BINARY;
 
 	/* Open the file. */
@@ -242,7 +242,7 @@ PathNameOpenTemporaryFile(const char *path, int oflags)
 	Assert(temporary_files_allowed);	/* check temp file access is up */
 
 	/* Open the file, but don't throw error if no such file */
-	file = FOpen(path, PG_RAW | PG_XACT | oflags);
+	file = FOpen(path, PG_ENCRYPT | PG_XACT | oflags);
 	if (file <= 0 && errno != ENOENT)
 		ereport(ERROR,
 				(errcode_for_file_access(),
