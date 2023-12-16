@@ -326,6 +326,8 @@ static size_t aeadWrite(Aead *this, const Byte *buf, size_t size, off_t offset, 
 								sequenceBuf, sizeof(sequenceNr), /* Do we benefit from including this? */
 								this->cryptBuf, cryptSize,
 								iv, tagBuf);
+	Assert(encryptSize == size);
+
 	if (encryptSize < 0)
 		return setIoStackError(this, -1, "Unable to encrypt: %s", cipherGetMsg(this->cipher));
 	if (encryptSize != size)
@@ -406,14 +408,14 @@ static bool aeadTruncate(Aead *this, off_t offset, uint32 wait)
 			return false;
 	}
 
-	/* Truncate the downstream file to match the new sizes */
-	success = stackResize(nextStack(this), this->cryptFileSize, wait);
-	if (!success)
-		return copyNextError(this, false);
-
 	/* Set the new file size to the block boundary */
 	this->fileSize = blockOffset;
 	this->cryptFileSize = cryptOffset(this, this->fileSize);
+
+	/* Truncate the downstream file to match the end of the last full block */
+	success = stackResize(nextStack(this), this->cryptFileSize, wait);
+	if (!success)
+		return copyNextError(this, false);
 
 	/* If we have a partial block, then write it out */
 	if (blockOffset != offset)
@@ -725,7 +727,7 @@ cipherDecrypt(CipherContext *this,
 	if (cipherSize != actual)
 		return setIoStackError(this, -1, "Decryption doesn't support padding  (%zd bytes)", actual - cipherSize);
 
-	file_debug("plainActual=%zd plainText='%.*s'", actual, (int)actual, plainText);
+	file_debug("plainActual=%zd plainText='%.*s'", actual, (int)actual, asHex(plainText, actual));
 	return actual;
 }
 
@@ -754,7 +756,7 @@ cipherEncrypt(CipherContext *this,
 	int cipherFinalSize;
 	ssize_t actual;
 	file_debug("plainSize=%zd   plainText='%.*s'",
-		  plainSize, (int)plainSize, plainText);
+		  plainSize, (int)plainSize, asHex(plainText, plainSize));
 	file_debug("    headerSize=%zd  header=%s", headerSize, asHex(header, headerSize));
 	file_debug("    iv=%s", asHex(iv, this->ivSize));
 
@@ -832,6 +834,7 @@ ssize_t cipherSetMsg(CipherContext *this, ssize_t retval, const char *msg, ...)
 	va_start(args, msg);
 	vsnprintf(this->msg, sizeof(this->msg), msg, args);
 	va_end(args);
+	Assert(false);
 	return retval;
 }
 

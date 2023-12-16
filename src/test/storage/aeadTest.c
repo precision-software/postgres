@@ -29,3 +29,16 @@ void testMain()
 	singleSeekTest(createStack, TEST_DIR "encryption/testfile_%u_%u.dat", 0, 64);
 	seekTest(createStack, TEST_DIR "encryption/testfile_%u_%u.dat");
 }
+
+void testBadFile(char *name)
+{
+	int64 blockSize;
+	buf = malloc(blockSize);
+
+	allocateFile(name, 64*1024, blockSize);
+	raw = FOpen(name, O_RAW | O_RDWR);
+	blockSize = FBlockSize(raw);
+	PG_ASSSERT(raw >= 0);
+	FRead(raw,
+
+}

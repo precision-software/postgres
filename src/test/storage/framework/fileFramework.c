@@ -273,6 +273,7 @@ static void regression(char *name, size_t blockSize)
     File file;
 	int idx;
     Byte *buf = malloc(blockSize);
+	int64 newSize;
 
 
     deleteFile(name);
@@ -327,6 +328,17 @@ static void regression(char *name, size_t blockSize)
 	PG_ASSERT_EQ(blockSize, FRead(file, buf, blockSize, blockSize, 0));
 	verifyBuffer(blockSize, buf, blockSize);
 	PG_ASSERT(FClose(file));
+
+	/* Truncate 1/2 block should still have valid file */
+	file = FOpen(name, O_RDWR | PG_TESTSTACK);
+	PG_ASSERT_EQ(2*blockSize, FSize(file));
+	newSize = 3 * blockSize / 2;
+	PG_ASSERT(FTruncate(file, newSize, 0));
+	PG_ASSERT_EQ(blockSize, FRead(file, buf, blockSize, 0, 0));
+	for (idx = 0; idx<blockSize; idx++)
+		PG_ASSERT_EQ(0, buf[idx]);
+	PG_ASSERT_EQ(newSize - blockSize, FRead(file, buf, blockSize, blockSize, 0));
+	verifyBuffer(blockSize, buf, newSize - blockSize);
 
 
 	deleteFile(name);
