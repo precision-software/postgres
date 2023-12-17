@@ -59,7 +59,7 @@ static bool verifyBuffer(size_t position, Byte *buf, size_t size)
  *   - doesn't align with typical block sizes, and
  *   - is compressible.
  */
-static void generateFile(char *path, off_t size, size_t bufferSize)
+void generateFile(const char *path, off_t size, size_t bufferSize)
 {
     Byte *buf;
     off_t position;
@@ -84,34 +84,41 @@ static void generateFile(char *path, off_t size, size_t bufferSize)
 }
 
 /* Verify a iostack has the correct data */
-static void verifyFile(char *path, off_t fileSize, ssize_t bufferSize)
+bool verifyFile(const char *path, off_t fileSize, size_t bufferSize)
 {
     File file;
     Byte *buf;
 
-    file_debug("verifyFile: path=%s", path);
+    file_debug("path=%s", path);
     file = FOpen(path, O_RDONLY|PG_TESTSTACK);
-	PG_ASSERT(file >= 0);
-	PG_ASSERT(!FEof(file));
-	PG_ASSERT(!FError(file));
+	if (file < 0 || FEof(file) || FError(file))
+		return false;
+
     buf = malloc(bufferSize);
 
     for (off_t actual, position = 0; position < fileSize; position += actual)
     {
         size_t expected = MIN(bufferSize, fileSize - position);
         actual = FReadSeq(file, buf, bufferSize, 0);
-        PG_ASSERT_EQ(expected, actual);
-        PG_ASSERT(verifyBuffer(position, buf, actual));
-		PG_ASSERT(!FEof(file));
-		PG_ASSERT(!FError(file));
+		if (actual != expected)
+			return false;
+		if (!verifyBuffer(position, buf, actual))
+			return false;
+		if (FEof(file) || FError(file))
+			return false;
     }
 
     // Read a final EOF.
-	PG_ASSERT(!FEof(file));
-    FReadSeq(file, buf, 1, 0);
-    PG_ASSERT(FEof(file));
+	if (FEof(file))
+		return false;
+    if (FReadSeq(file, buf, 1, 0) != 0)
+		return false;
+    if (!FEof(file))
+		return false;
+    if (!(FClose(file)))
+	    return false;
 
-    PG_ASSERT(FClose(file));
+    return true;
 }
 
 /*
@@ -127,7 +134,7 @@ static void allocateFile(char *path, off_t size, ssize_t bufferSize)
     Byte *buf;
     off_t position;
 
-    file_debug("allocateFile: path=%s", path);
+    file_debug("path=%s", path);
     /* Start out by allocating space and filling the file with "X"s. */
     file = FOpen(path, O_WRONLY|O_CREAT|O_TRUNC|PG_TESTSTACK);
     buf = malloc(bufferSize);
@@ -223,7 +230,7 @@ static void appendFile(char *path, off_t fileSize, size_t bufferSize)
 
     /* Close the file and verify it is correct. */
     PG_ASSERT(FClose(file));
-    verifyFile(path, fileSize+bufferSize, bufferSize);
+    PG_ASSERT(verifyFile(path, fileSize+bufferSize, bufferSize));
 }
 
 /*
@@ -362,16 +369,16 @@ void singleSeekTest(CreateStackFn createStack, char *nameFmt, off_t size, size_t
 
     /* create and read back as a stream */
     generateFile(fileName, size, bufSize);
-    verifyFile(fileName, size, bufSize);
+    PG_ASSERT(verifyFile(fileName, size, bufSize));
 
     /* Fill in the file with garbage, then write it out as random writes */
     allocateFile(fileName, size, bufSize);
     generateRandomFile(fileName, size, bufSize);
-    verifyFile(fileName, size, bufSize);
+    PG_ASSERT(verifyFile(fileName, size, bufSize));
 
     /* append to the file */
     appendFile(fileName, size, bufSize);
-    verifyFile(fileName, size + bufSize, ROUNDDOWN(16 * 1024, bufSize));  /* larger buffer */
+    PG_ASSERT(verifyFile(fileName, size + bufSize, ROUNDDOWN(16 * 1024, bufSize)));  /* larger buffer */
 
     /* Read back as random reads */
     verifyRandomFile(fileName, size + bufSize, bufSize);
@@ -406,10 +413,10 @@ void singleStreamTest(CreateStackFn createStack, char *nameFmt, off_t size, size
 	regression(fileName, bufferSize);
 
 	generateFile(fileName, size, bufferSize);
-    verifyFile(fileName, size, bufferSize);
+    PG_ASSERT(verifyFile(fileName, size, bufferSize));
 
     appendFile(fileName, size, bufferSize);
-    verifyFile(fileName, size + bufferSize, 16 * 1024);
+    PG_ASSERT(verifyFile(fileName, size + bufferSize, 16 * 1024));
 
 
     /* Clean things up */
