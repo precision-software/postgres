@@ -35,7 +35,7 @@ extern void *vfdStackNew(void);
  * Quick and dirty debug function to display a buffer in hex.
  * Avoids memory allocation by reusing portions of static buffer.
  */
-static inline char *asHex(uint8_t *buf, size_t size)
+static inline char *asHex(const uint8_t *buf, size_t size)
 {
 	/* Static buffer for formatting hex string. */
     static char hex[1024];

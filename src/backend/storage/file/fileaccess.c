@@ -148,10 +148,14 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 
 	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%llx", fileName, fileFlags, fileMode);
 
-	/* Select the I/O stack prototype for fstate file. */
+	/* If legacy (no special flags), call low level open directly */
+	if (fileFlags == (uint32)fileFlags)
+		return PathNameOpenFilePerm(fileName, (uint32)fileFlags, fileMode);
+
+	/* Select the I/O stack prototype. */
 	proto = selectIoStack(fileName, fileFlags, fileMode);
 
-	/* I/O stacks don't implement O_APPEND, so seek to FileSize explicitly */
+	/* I/O stacks don't implement O_APPEND, so seek to end of file */
 	append = (fileFlags & O_APPEND) != 0;
 	fileFlags &= ~O_APPEND;
 

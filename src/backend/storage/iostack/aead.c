@@ -38,6 +38,7 @@ ssize_t cipherDecrypt(CipherContext *this,
 static void cipherCleanup(CipherContext *this);
 
 const char *cipherGetMsg(CipherContext *this);
+ssize_t cipherSetMsg(CipherContext *this, ssize_t retval, const char *msg, ...);
 size_t cipherGetIVSize(CipherContext *this);
 size_t cipherGetTagSize(CipherContext *this);
 size_t cipherGetPadding(CipherContext *this, size_t plainTextSize);
@@ -73,9 +74,8 @@ static Aead *aeadCleanup(Aead *this);
 static bool aeadTruncate(Aead *this, off_t offset, uint32 wait);
 static bool aeadExpand(Aead *this, off_t newSize, uint32 wait);
 
-
 /*
- * Converter structure for encrypting and decrypting TLS Blocks.
+ * Converter structure for encrypting and decrypting Blocks.
  */
 #define MAX_CIPHER_NAME 64
 #define MAX_AEAD_HEADER_SIZE 1024
@@ -124,11 +124,12 @@ aeadOpen(Aead *proto, const char *path, uint64 oflags, mode_t mode)
 	Aead *this;
 	IoStack *next;
 
-	/* Open our successor and clone ourself */
+	/* Open our successor */
 	next = stackOpen(nextStack(proto), path, oflags, mode);
 	if (next == NULL)
 		return NULL;
 
+	/* Clone our prototype and join to the opened successor */
 	this = aeadNew(proto->cipherName, proto->suggestedSize, proto->key, proto->keySize, proto->getSequenceNr, next);
 	if (this == NULL)
 	{
@@ -215,18 +216,13 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset, uint32
 	ssize_t actual;
 	size_t cipherTextSize;
 	Byte *sequenceBuf;
-	Byte *tag;
-	uint64_t sequenceNr;
+	Byte *tagBuf;
+	uint64 sequenceNr;
 	size_t blockNr;
 	Byte iv[EVP_MAX_IV_LENGTH];
 	ssize_t plainSize;
 
 	file_debug("size=%zd  offset=%lld", size, offset);
-
-	/* Check for EOF first */
-	this->ioStack.eof = (offset >= this->fileSize);
-	if (this->ioStack.eof)
-		return 0;
 
 	/* All reads must be aligned */
 	if (offset < 0 || offset % this->plainSize != 0)
@@ -250,7 +246,7 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset, uint32
 	/* Point to the sequence number, encrypted text and tag in our buffer */
 	cipherTextSize = actual - cipherGetTagSize(this->cipher) - sizeof(uint64);
 	sequenceBuf = this->cryptBuf + cipherTextSize;
-	tag = sequenceBuf + cipherTextSize;
+	tagBuf = sequenceBuf + sizeof(sequenceNr);
 
 	/* Generate an IV based on block nr and sequence nr */
 	blockNr = (offset / this->plainSize);
@@ -262,7 +258,7 @@ static ssize_t aeadRead(Aead *this, Byte *buf, size_t size, off_t offset, uint32
 							  buf, size,
 							  sequenceBuf, sizeof(uint64),
 							  this->cryptBuf, cipherTextSize,
-							  iv, tag);
+							  iv, tagBuf);
 	if (plainSize < 0)
 		return setIoStackError(this, -1, "Unable to decrypt: %s", cipherGetMsg(this->cipher));
 
@@ -380,14 +376,17 @@ static off_t aeadSize(Aead *this)
 /*
  * Change the size of the file, truncating or filling with zeros.
  */
-static bool aeadResize(Aead *this, off_t offset, uint32 wait)
+static bool aeadResize(Aead *this, off_t newSize, uint32 wait)
 {
 	bool success;
+	file_debug("newSize=%lld", newSize);
 
-	if (offset < this->fileSize)
-		success = aeadTruncate(this, offset, wait);
+	if (newSize < this->fileSize)
+		success = aeadTruncate(this, newSize, wait);
+	else if (newSize > this->fileSize)
+		success = aeadExpand(this, newSize, wait);
 	else
-		success = aeadExpand(this, offset, wait);
+		success = true;
 
 	return success;
 }
@@ -465,6 +464,8 @@ static bool aeadExpand(Aead *this, off_t newSize, uint32 wait)
 		if (stackWriteAll(this, this->zeros, MIN(newSize - this->fileSize, this->plainSize), this->fileSize, wait) < 0)
 			return false;
 
+	Assert(this->fileSize == newSize);
+
 	/* Done */
 	return true;
 }
@@ -497,21 +498,13 @@ IoStackInterface aeadInterface = {
  */
 void *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keySize, uint64 (*getSequenceNr)(), void *next)
 {
-	size_t cryptSize;
-	size_t plainSize;
 	Aead *this;
 
 	/* Pick a default cipher name */
 	if (cipherName == NULL)
 		cipherName = "AES-256-GCM";
 
-	/* Our cipher block size must be a multiple of the next layer's block size */
-	/* TODO: We haven't initialized the cipher yet, so assume the tag is 16 bytes */
-	/* TODO: Do this calculation at open() time after it is initialized */
-	cryptSize = ROUNDOFF(suggestedSize + 16 + sizeof(uint64), thisStack(next)->blockSize);
-	plainSize = cryptSize - 16 - sizeof(uint64);
-
-	/* Create the aead structure */
+	/* Create the aead structure. TODO: test for NULL */
 	this = malloc(sizeof(Aead));
 	*this = (Aead) {
 		.suggestedSize = suggestedSize,
@@ -520,7 +513,6 @@ void *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keySize,
 		.ioStack = (IoStack) {
 			.iface = &aeadInterface,
 			.next = next,
-			.blockSize = plainSize,
 		}
 	};
 
@@ -532,7 +524,7 @@ void *aeadNew(char *cipherName, size_t suggestedSize, Byte *key, size_t keySize,
 }
 
 /*
- * Create an Initialization Vector (IV).
+ * Construct an Initialization Vector (IV).
  */
 void generateIV(Aead *this, Byte *iv, uint64 blockNr, uint64 sequenceNr)
 {
@@ -622,15 +614,16 @@ bool cipherSetup(CipherContext *this, char *cipherName, Byte *key, ssize_t keySi
 	if (this->cipher == NULL)
 		return cipherSetMsg(this, false, "Encryption problem - cipher name %s not recognized", cipherName);
 
-	/* TODO: initialize the ciher here, so we can get the tagsize */
+	/* Initialize the cipher here, so we can get the tagsize. */
+	if (!EVP_EncryptInit_ex2(this->ctx, this->cipher, NULL, NULL, NULL))
+		return cipherSetMsg(this, false, "Encryption problem - can't fetch tag size for %s", cipherName);
 
 	/* Get the properties of the selected cipher */
 	this->ivSize = EVP_CIPHER_iv_length(this->cipher);
 	if (keySize != EVP_CIPHER_key_length(this->cipher))
 		return setIoStackError(this, false, "Cipher key is the wrong size.");
 	this->cipherBlockSize = EVP_CIPHER_block_size(this->cipher);
-	//this->tagSize = EVP_CIPHER_CTX_tag_length(this->ctx); // TODO:
-	this->tagSize = 16;
+	this->tagSize = EVP_CIPHER_CTX_tag_length(this->ctx);
 
 	/* Save the key */
 	Assert(keySize <= sizeof(this->key));
@@ -682,16 +675,17 @@ cipherDecrypt(CipherContext *this,
 	int plainUpdateSize;
 	int plainFinalSize;
 	ssize_t actual;
-	free(malloc(1));
+
 	file_debug("cipherSize=%zd   cipherText=%.128s ", cipherSize,  asHex(cipherText, cipherSize));
-	file_debug("    headerSize=%zd  header=%s", headerSize, asHex(header, headerSize));
+	file_debug("    headerSize=%zd  header=%s  tagSize=%zd  tag=%s",
+			   headerSize, asHex(header, headerSize), this->tagSize, asHex(tag, this->tagSize));
 	file_debug("    iv=%s", asHex(iv, this->ivSize));
 
 	/* Reinitialize the encryption context to start a new record */
 	EVP_CIPHER_CTX_reset(this->ctx);
 
 	/* Configure the cipher with key and initialization vector */
-	if (!EVP_CipherInit_ex2(this->ctx, this->cipher, this->key, iv, 0, NULL))
+	if (!EVP_DecryptInit_ex2(this->ctx, this->cipher, this->key, iv, NULL))
 		return cypherSetSslError(this, -1);
 
 	/* Set the MAC tag we need to match */
@@ -702,7 +696,7 @@ cipherDecrypt(CipherContext *this,
 	if (headerSize > 0)
 	{
 		int zero = 0;
-		if (!EVP_CipherUpdate(this->ctx, NULL, &zero, header, (int)headerSize))
+		if (!EVP_DecryptUpdate(this->ctx, NULL, &zero, header, (int)headerSize))
 			return cypherSetSslError(this, -1);
 	}
 
@@ -711,21 +705,21 @@ cipherDecrypt(CipherContext *this,
 	if (cipherSize > 0)
 	{
 		plainUpdateSize = (int)plainSize;
-		if (!EVP_CipherUpdate(this->ctx, plainText, &plainUpdateSize, cipherText, (int)cipherSize))
+		if (!EVP_DecryptUpdate(this->ctx, plainText, &plainUpdateSize, cipherText, (int)cipherSize))
 			return cypherSetSslError(this, -1);
 	}
 
 	/* Finalise the decryption. This can, but probably won't, generate plaintext. */
 	plainFinalSize = (int)plainSize - plainUpdateSize; /* CipherFinal expects "int" */
-	if (!EVP_CipherFinal_ex(this->ctx, plainText + plainUpdateSize, &plainFinalSize) && ERR_get_error() != 0)
+	if (!EVP_DecryptFinal_ex(this->ctx, plainText + plainUpdateSize, &plainFinalSize))
 		return cypherSetSslError(this, -1);
 
-	/* Output plaintext size combines the update part of the encryption and the finalization. */
+	/* Plaintext size combines the update part of the encryption and the finalization. */
 	actual = plainUpdateSize + plainFinalSize;
 
 	/* We do not support padded encryption, so the encrypted size should match the plaintext size. */
 	if (cipherSize != actual)
-		return setIoStackError(this, -1, "Decryption doesn't support padding  (%zd bytes)", actual - cipherSize);
+		return cipherSetMsg(this, -1, "Decryption doesn't support padding  (%zd bytes)", actual - cipherSize);
 
 	file_debug("plainActual=%zd plainText='%.*s'", actual, (int)actual, asHex(plainText, actual));
 	return actual;
@@ -755,8 +749,7 @@ cipherEncrypt(CipherContext *this,
 	int cipherUpdateSize;
 	int cipherFinalSize;
 	ssize_t actual;
-	file_debug("plainSize=%zd   plainText='%.*s'",
-		  plainSize, (int)plainSize, asHex(plainText, plainSize));
+	file_debug("plainSize=%zd   plainText='%s'", plainSize, asHex(plainText, plainSize));
 	file_debug("    headerSize=%zd  header=%s", headerSize, asHex(header, headerSize));
 	file_debug("    iv=%s", asHex(iv, this->ivSize));
 
@@ -764,14 +757,14 @@ cipherEncrypt(CipherContext *this,
 	EVP_CIPHER_CTX_reset(this->ctx);
 
 	/* Configure the cipher with the key and IV */
-	if (!EVP_CipherInit_ex2(this->ctx, this->cipher, this->key, iv, 1, NULL))
+	if (!EVP_EncryptInit_ex2(this->ctx, this->cipher, this->key, iv, NULL))
 		return cypherSetSslError(this, -1);
 
 	/* Include the header, if any, in the digest */
 	if (headerSize > 0)
 	{
 		int zero = 0;
-		if (!EVP_CipherUpdate(this->ctx, NULL, &zero, header, (int)headerSize))
+		if (!EVP_EncryptUpdate(this->ctx, NULL, &zero, header, (int)headerSize))
 			return cypherSetSslError(this, -1);
 	}
 
@@ -780,26 +773,26 @@ cipherEncrypt(CipherContext *this,
 	if (plainSize > 0)
 	{
 		cipherUpdateSize = (int)cipherSize;
-		if (!EVP_CipherUpdate(this->ctx, (Byte *)cipherText, &cipherUpdateSize, plainText, (int)plainSize))
-		return cypherSetSslError(this, -1);
+		if (!EVP_EncryptUpdate(this->ctx, (Byte *)cipherText, &cipherUpdateSize, plainText, (int)plainSize))
+		    return cypherSetSslError(this, -1);
 	}
 
 	/* Finalise the plaintext encryption. This can generate data, usually padding, even if there is no plain text. */
 	cipherFinalSize = (int)cipherSize - cipherUpdateSize;
-	if (!EVP_CipherFinal_ex(this->ctx, (Byte *)cipherText + cipherUpdateSize, &cipherFinalSize))
+	if (!EVP_EncryptFinal_ex(this->ctx, (Byte *)cipherText + cipherUpdateSize, &cipherFinalSize))
 	    return cypherSetSslError(this, -1);
 
 	/* Get the authentication tag  */
 	if (!EVP_CIPHER_CTX_ctrl(this->ctx, EVP_CTRL_AEAD_GET_TAG, (int)this->tagSize, tag))
 		return cypherSetSslError(this, -1);
-	file_debug("tag=%s cryptSize=%d cipherText=%.128s ", asHex(tag, this->tagSize), cipherUpdateSize+cipherFinalSize, asHex(cipherText, cipherUpdateSize + cipherFinalSize));
 
 	/* Output size combines both the encyption (update) and the finalization. */
 	actual = cipherUpdateSize + cipherFinalSize;
+	file_debug("tag=%s cryptSize=%zd cipherText=%s", asHex(tag, this->tagSize), actual, asHex(cipherText, actual));
 
 	/* We do not support padded encryption, so the encrypted size should match the plaintext size. */
 	if (actual != plainSize)
-		return setIoStackError(this, -1, "Encryption doesn't support padding (%zd bytes)", actual - plainSize);
+		return cipherSetMsg(this, -1, "Encryption doesn't support padding (%zd bytes)", actual - plainSize);
 
 	return actual;
 }
@@ -834,11 +827,22 @@ ssize_t cipherSetMsg(CipherContext *this, ssize_t retval, const char *msg, ...)
 	va_start(args, msg);
 	vsnprintf(this->msg, sizeof(this->msg), msg, args);
 	va_end(args);
-	Assert(false);
+	file_debug("msg=%s", this->msg);
 	return retval;
 }
 
 ssize_t cypherSetSslError(CipherContext *this, ssize_t retval)
 {
-	return cipherSetMsg(this, retval, "OpenSSL error: %s", ERR_error_string(ERR_get_error(), NULL));
+	int sslCode;
+	int lastCode;
+
+	/* Get the latest error code */
+	for (lastCode = 0; (sslCode = ERR_get_error()) != 0; lastCode = sslCode)
+		;
+
+	/* Some errors aren't reported properly by openssl. eg. mismatched MAC on decryption */
+	if (lastCode == 0)
+		return cipherSetMsg(this, -1, "OpenSSL error: Unrecognized error (corrupt decryption?)");
+
+	return cipherSetMsg(this, retval, "OpenSSL error: %s", ERR_error_string(lastCode, NULL));
 }

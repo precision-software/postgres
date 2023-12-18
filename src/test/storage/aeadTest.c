@@ -6,6 +6,8 @@
 #include "./framework/unitTest.h"
 #include "storage/iostack_internal.h"
 
+const char *FILE_NAME = TEST_DIR "encryption/testfile_corrupt";
+
 static void testCorruptedFile(const char *name, off_t fileSize, size_t blockSize);
 
 
@@ -28,7 +30,10 @@ void testMain()
 	beginTest("AEAD Encrypted Files");
 
 	/* Generate encryption errors and verify failure */
-	testCorruptedFile(TEST_DIR "encryption/testfile_corrupt", 64*1024, 8*1024);
+	testCorruptedFile(FILE_NAME, 1024, 1024);
+	testCorruptedFile(FILE_NAME, 2060, 1024);
+	testCorruptedFile(FILE_NAME, 512, 1024);
+	testCorruptedFile(FILE_NAME, 64*1024, 8*1024);
 
 	singleSeekTest(createStack, TEST_DIR "encryption/testfile_%u_%u.dat", 0, 64);
 	seekTest(createStack, TEST_DIR "encryption/testfile_%u_%u.dat");
