@@ -96,6 +96,7 @@
 #include "portability/mem.h"
 #include "postmaster/startup.h"
 #include "storage/fd.h"
+#include "storage/fileaccess.h"
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
@@ -192,12 +193,14 @@ int			io_direct_flags;
 #define FD_DELETE_AT_CLOSE	(1 << 0)	/* T = delete when closed */
 #define FD_CLOSE_AT_EOXACT	(1 << 1)	/* T = close at eoXact */
 #define FD_TEMP_FILE_LIMIT	(1 << 2)	/* T = respect temp_file_limit */
+#define FD_TRANSIENT        (1 << 3)    /* T = close when subtrans aborts */
 
 typedef struct vfd
 {
 	int			fd;				/* current FD, or VFD_CLOSED if none */
 	unsigned short fdstate;		/* bitflags for VFD's state */
 	ResourceOwner resowner;		/* owner, for automatic cleanup */
+	SubTransactionId create_subid;  /* Subtransaction for automatic cleanup */
 	File		nextFree;		/* link to next free VFD, if in freelist */
 	File		lruMoreRecently;	/* doubly linked recency-of-use list */
 	File		lruLessRecently;
@@ -206,6 +209,8 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
+	FState      fState;         /* State to support FRead/FWrite/encyption */
+
 } Vfd;
 
 /*
@@ -237,7 +242,7 @@ static uint64 temporary_files_size = 0;
 
 /* Temporary file access initialized and not yet shut down? */
 #ifdef USE_ASSERT_CHECKING
-static bool temporary_files_allowed = false;
+PGDLLEXPORT bool temporary_files_allowed = false;
 #endif
 
 /*
@@ -272,24 +277,12 @@ static AllocateDesc *allocatedDescs = NULL;
  * Number of open "external" FDs reported to Reserve/ReleaseExternalFD.
  */
 static int	numExternalFDs = 0;
-
 /*
- * Number of temporary files opened during the current session;
- * this is used in generation of tempfile names.
+ * Forward references
  */
-static long tempFileCounter = 0;
-
-/*
- * Array of OIDs of temp tablespaces.  (Some entries may be InvalidOid,
- * indicating that the current database's default tablespace should be used.)
- * When numTempTableSpaces is -1, this has not been set in the current
- * transaction.
- */
-static Oid *tempTableSpaces = NULL;
-static int	numTempTableSpaces = -1;
-static int	nextTempTableSpace = 0;
-
-
+static bool FlushTempFiles(void);
+static bool FileIsXact(File file);
+static bool FileIsTransient(File file);
 /*--------------------
  *
  * Private Routines
@@ -332,7 +325,6 @@ static File AllocateVfd(void);
 static void FreeVfd(File file);
 
 static int	FileAccess(File file);
-static File OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError);
 static bool reserveAllocatedDesc(void);
 static int	FreeDesc(AllocateDesc *desc);
 
@@ -871,7 +863,7 @@ durable_unlink(const char *fname, int elevel)
  * InitFileAccess --- initialize this module during backend startup
  *
  * This is called during either normal or standalone backend start.
- * It is *not* called in the postmaster.
+ * It is also called in the postmaster.
  *
  * Note that this does not initialize temporary file access, that is
  * separately initialized via InitTemporaryFileAccess().
@@ -879,7 +871,9 @@ durable_unlink(const char *fname, int elevel)
 void
 InitFileAccess(void)
 {
-	Assert(SizeVfdCache == 0);	/* call me only once */
+	/* May be called more than once */
+	if (SizeVfdCache > 0)
+		return;
 
 	/* initialize cache header entry */
 	VfdCache = (Vfd *) malloc(sizeof(Vfd));
@@ -1395,7 +1389,9 @@ AllocateVfd(void)
 
 	DO_DB(elog(LOG, "AllocateVfd. Size %zu", SizeVfdCache));
 
-	Assert(SizeVfdCache > 0);	/* InitFileAccess not called? */
+	/* Initialize file access if not already done. */
+	if (SizeVfdCache == 0)
+		InitFileAccess();
 
 	if (VfdCache[0].nextFree == 0)
 	{
@@ -1520,7 +1516,7 @@ ReportTemporaryFileUsage(const char *path, off_t size)
  * ResourceOwnerEnlarge(CurrentResourceOwner) must have been called
  * before the file was opened.
  */
-static void
+void
 RegisterTemporaryFile(File file)
 {
 	ResourceOwnerRememberFile(CurrentResourceOwner, file);
@@ -1684,224 +1680,6 @@ PathNameDeleteTemporaryDir(const char *dirname)
 }
 
 /*
- * Open a temporary file that will disappear when we close it.
- *
- * This routine takes care of generating an appropriate tempfile name.
- * There's no need to pass in fileFlags or fileMode either, since only
- * one setting makes any sense for a temp file.
- *
- * Unless interXact is true, the file is remembered by CurrentResourceOwner
- * to ensure it's closed and deleted when it's no longer needed, typically at
- * the end-of-transaction. In most cases, you don't want temporary files to
- * outlive the transaction that created them, so this should be false -- but
- * if you need "somewhat" temporary storage, this might be useful. In either
- * case, the file is removed when the File is explicitly closed.
- */
-File
-OpenTemporaryFile(bool interXact)
-{
-	File		file = 0;
-
-	Assert(temporary_files_allowed);	/* check temp file access is up */
-
-	/*
-	 * Make sure the current resource owner has space for this File before we
-	 * open it, if we'll be registering it below.
-	 */
-	if (!interXact)
-		ResourceOwnerEnlarge(CurrentResourceOwner);
-
-	/*
-	 * If some temp tablespace(s) have been given to us, try to use the next
-	 * one.  If a given tablespace can't be found, we silently fall back to
-	 * the database's default tablespace.
-	 *
-	 * BUT: if the temp file is slated to outlive the current transaction,
-	 * force it into the database's default tablespace, so that it will not
-	 * pose a threat to possible tablespace drop attempts.
-	 */
-	if (numTempTableSpaces > 0 && !interXact)
-	{
-		Oid			tblspcOid = GetNextTempTableSpace();
-
-		if (OidIsValid(tblspcOid))
-			file = OpenTemporaryFileInTablespace(tblspcOid, false);
-	}
-
-	/*
-	 * If not, or if tablespace is bad, create in database's default
-	 * tablespace.  MyDatabaseTableSpace should normally be set before we get
-	 * here, but just in case it isn't, fall back to pg_default tablespace.
-	 */
-	if (file <= 0)
-		file = OpenTemporaryFileInTablespace(MyDatabaseTableSpace ?
-											 MyDatabaseTableSpace :
-											 DEFAULTTABLESPACE_OID,
-											 true);
-
-	/* Mark it for deletion at close and temporary file size limit */
-	VfdCache[file].fdstate |= FD_DELETE_AT_CLOSE | FD_TEMP_FILE_LIMIT;
-
-	/* Register it with the current resource owner */
-	if (!interXact)
-		RegisterTemporaryFile(file);
-
-	return file;
-}
-
-/*
- * Return the path of the temp directory in a given tablespace.
- */
-void
-TempTablespacePath(char *path, Oid tablespace)
-{
-	/*
-	 * Identify the tempfile directory for this tablespace.
-	 *
-	 * If someone tries to specify pg_global, use pg_default instead.
-	 */
-	if (tablespace == InvalidOid ||
-		tablespace == DEFAULTTABLESPACE_OID ||
-		tablespace == GLOBALTABLESPACE_OID)
-		snprintf(path, MAXPGPATH, "base/%s", PG_TEMP_FILES_DIR);
-	else
-	{
-		/* All other tablespaces are accessed via symlinks */
-		snprintf(path, MAXPGPATH, "pg_tblspc/%u/%s/%s",
-				 tablespace, TABLESPACE_VERSION_DIRECTORY,
-				 PG_TEMP_FILES_DIR);
-	}
-}
-
-/*
- * Open a temporary file in a specific tablespace.
- * Subroutine for OpenTemporaryFile, which see for details.
- */
-static File
-OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
-{
-	char		tempdirpath[MAXPGPATH];
-	char		tempfilepath[MAXPGPATH];
-	File		file;
-
-	TempTablespacePath(tempdirpath, tblspcOid);
-
-	/*
-	 * Generate a tempfile name that should be unique within the current
-	 * database instance.
-	 */
-	snprintf(tempfilepath, sizeof(tempfilepath), "%s/%s%d.%ld",
-			 tempdirpath, PG_TEMP_FILE_PREFIX, MyProcPid, tempFileCounter++);
-
-	/*
-	 * Open the file.  Note: we don't use O_EXCL, in case there is an orphaned
-	 * temp file that can be reused.
-	 */
-	file = PathNameOpenFile(tempfilepath,
-							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
-	if (file <= 0)
-	{
-		/*
-		 * We might need to create the tablespace's tempfile directory, if no
-		 * one has yet done so.
-		 *
-		 * Don't check for an error from MakePGDirectory; it could fail if
-		 * someone else just did the same thing.  If it doesn't work then
-		 * we'll bomb out on the second create attempt, instead.
-		 */
-		(void) MakePGDirectory(tempdirpath);
-
-		file = PathNameOpenFile(tempfilepath,
-								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
-		if (file <= 0 && rejectError)
-			elog(ERROR, "could not create temporary file \"%s\": %m",
-				 tempfilepath);
-	}
-
-	return file;
-}
-
-
-/*
- * Create a new file.  The directory containing it must already exist.  Files
- * created this way are subject to temp_file_limit and are automatically
- * closed at end of transaction, but are not automatically deleted on close
- * because they are intended to be shared between cooperating backends.
- *
- * If the file is inside the top-level temporary directory, its name should
- * begin with PG_TEMP_FILE_PREFIX so that it can be identified as temporary
- * and deleted at startup by RemovePgTempFiles().  Alternatively, it can be
- * inside a directory created with PathNameCreateTemporaryDir(), in which case
- * the prefix isn't needed.
- */
-File
-PathNameCreateTemporaryFile(const char *path, bool error_on_failure)
-{
-	File		file;
-
-	Assert(temporary_files_allowed);	/* check temp file access is up */
-
-	ResourceOwnerEnlarge(CurrentResourceOwner);
-
-	/*
-	 * Open the file.  Note: we don't use O_EXCL, in case there is an orphaned
-	 * temp file that can be reused.
-	 */
-	file = PathNameOpenFile(path, O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
-	if (file <= 0)
-	{
-		if (error_on_failure)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not create temporary file \"%s\": %m",
-							path)));
-		else
-			return file;
-	}
-
-	/* Mark it for temp_file_limit accounting. */
-	VfdCache[file].fdstate |= FD_TEMP_FILE_LIMIT;
-
-	/* Register it for automatic close. */
-	RegisterTemporaryFile(file);
-
-	return file;
-}
-
-/*
- * Open a file that was created with PathNameCreateTemporaryFile, possibly in
- * another backend.  Files opened this way don't count against the
- * temp_file_limit of the caller, are automatically closed at the end of the
- * transaction but are not deleted on close.
- */
-File
-PathNameOpenTemporaryFile(const char *path, int mode)
-{
-	File		file;
-
-	Assert(temporary_files_allowed);	/* check temp file access is up */
-
-	ResourceOwnerEnlarge(CurrentResourceOwner);
-
-	file = PathNameOpenFile(path, mode | PG_BINARY);
-
-	/* If no such file, then we don't raise an error. */
-	if (file <= 0 && errno != ENOENT)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open temporary file \"%s\": %m",
-						path)));
-
-	if (file > 0)
-	{
-		/* Register it for automatic close. */
-		RegisterTemporaryFile(file);
-	}
-
-	return file;
-}
-
-/*
  * Delete a file by pathname.  Return true if the file existed, false if
  * didn't.
  */
@@ -1949,12 +1727,13 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 }
 
 /*
- * close a file when done with it
+ * close a file when done with it. True if successful.
  */
-void
+int
 FileClose(File file)
 {
 	Vfd		   *vfdP;
+	bool       save_errno = 0;
 
 	Assert(FileIsValid(file));
 
@@ -1968,6 +1747,7 @@ FileClose(File file)
 		/* close the file */
 		if (close(vfdP->fd) != 0)
 		{
+			save_errno = errno;
 			/*
 			 * We may need to panic on failure to close non-temporary files;
 			 * see LruDelete.
@@ -1996,7 +1776,6 @@ FileClose(File file)
 	if (vfdP->fdstate & FD_DELETE_AT_CLOSE)
 	{
 		struct stat filestats;
-		int			stat_errno;
 
 		/*
 		 * If we get an error, as could happen within the ereport/elog calls,
@@ -2010,22 +1789,23 @@ FileClose(File file)
 
 		/* first try the stat() */
 		if (stat(vfdP->fileName, &filestats))
-			stat_errno = errno;
-		else
-			stat_errno = 0;
+			save_errno = errno;
 
 		/* in any case do the unlink */
 		if (unlink(vfdP->fileName))
+		{
+			save_errno = errno;
 			ereport(LOG,
 					(errcode_for_file_access(),
-					 errmsg("could not delete file \"%s\": %m", vfdP->fileName)));
+						errmsg("could not delete file \"%s\": %m", vfdP->fileName)));
+		}
 
 		/* and last report the stat results */
-		if (stat_errno == 0)
+		if (save_errno == 0)
 			ReportTemporaryFileUsage(vfdP->fileName, filestats.st_size);
 		else
 		{
-			errno = stat_errno;
+			errno = save_errno;
 			ereport(LOG,
 					(errcode_for_file_access(),
 					 errmsg("could not stat file \"%s\": %m", vfdP->fileName)));
@@ -2040,6 +1820,10 @@ FileClose(File file)
 	 * Return the Vfd slot to the free list
 	 */
 	FreeVfd(file);
+
+	/* Return -1 and set errno if error occurred */
+	errno = save_errno;
+	return (save_errno == 0) ? 0 : -1;
 }
 
 /*
@@ -2116,6 +1900,7 @@ FileReadV(File file, const struct iovec *iov, int iovcnt, off_t offset,
 	int			returnCode;
 	Vfd		   *vfdP;
 
+	file_debug("file=%d(%s)  amount=%zd  offset=%lld", file, FilePathName(file), amount, offset);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileReadV: %d (%s) " INT64_FORMAT " %d",
@@ -2172,6 +1957,7 @@ FileWriteV(File file, const struct iovec *iov, int iovcnt, off_t offset,
 	int			returnCode;
 	Vfd		   *vfdP;
 
+	file_debug("file=%d(%s)  amount=%zd  offset=%lld", file, FilePathName(file), amount, offset);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileWriteV: %d (%s) " INT64_FORMAT " %d",
@@ -2432,12 +2218,14 @@ FileTruncate(File file, off_t offset, uint32 wait_event_info)
  * Return the pathname associated with an open file.
  *
  * The returned string points to an internal buffer, which is valid until
- * the file is closed.
+ * the file is closed. Since this routine can be used for debugging,
+ * it always returns a valid string, even if the file index is invalid.
  */
 char *
 FilePathName(File file)
 {
-	Assert(FileIsValid(file));
+	if (!FileIsValid(file))
+		return "INVALID_FILE";
 
 	return VfdCache[file].fileName;
 }
@@ -3011,94 +2799,6 @@ closeAllVfds(void)
 
 
 /*
- * SetTempTablespaces
- *
- * Define a list (actually an array) of OIDs of tablespaces to use for
- * temporary files.  This list will be used until end of transaction,
- * unless this function is called again before then.  It is caller's
- * responsibility that the passed-in array has adequate lifespan (typically
- * it'd be allocated in TopTransactionContext).
- *
- * Some entries of the array may be InvalidOid, indicating that the current
- * database's default tablespace should be used.
- */
-void
-SetTempTablespaces(Oid *tableSpaces, int numSpaces)
-{
-	Assert(numSpaces >= 0);
-	tempTableSpaces = tableSpaces;
-	numTempTableSpaces = numSpaces;
-
-	/*
-	 * Select a random starting point in the list.  This is to minimize
-	 * conflicts between backends that are most likely sharing the same list
-	 * of temp tablespaces.  Note that if we create multiple temp files in the
-	 * same transaction, we'll advance circularly through the list --- this
-	 * ensures that large temporary sort files are nicely spread across all
-	 * available tablespaces.
-	 */
-	if (numSpaces > 1)
-		nextTempTableSpace = pg_prng_uint64_range(&pg_global_prng_state,
-												  0, numSpaces - 1);
-	else
-		nextTempTableSpace = 0;
-}
-
-/*
- * TempTablespacesAreSet
- *
- * Returns true if SetTempTablespaces has been called in current transaction.
- * (This is just so that tablespaces.c doesn't need its own per-transaction
- * state.)
- */
-bool
-TempTablespacesAreSet(void)
-{
-	return (numTempTableSpaces >= 0);
-}
-
-/*
- * GetTempTablespaces
- *
- * Populate an array with the OIDs of the tablespaces that should be used for
- * temporary files.  (Some entries may be InvalidOid, indicating that the
- * current database's default tablespace should be used.)  At most numSpaces
- * entries will be filled.
- * Returns the number of OIDs that were copied into the output array.
- */
-int
-GetTempTablespaces(Oid *tableSpaces, int numSpaces)
-{
-	int			i;
-
-	Assert(TempTablespacesAreSet());
-	for (i = 0; i < numTempTableSpaces && i < numSpaces; ++i)
-		tableSpaces[i] = tempTableSpaces[i];
-
-	return i;
-}
-
-/*
- * GetNextTempTableSpace
- *
- * Select the next temp tablespace to use.  A result of InvalidOid means
- * to use the current database's default tablespace.
- */
-Oid
-GetNextTempTableSpace(void)
-{
-	if (numTempTableSpaces > 0)
-	{
-		/* Advance nextTempTableSpace counter with wraparound */
-		if (++nextTempTableSpace >= numTempTableSpaces)
-			nextTempTableSpace = 0;
-		return tempTableSpaces[nextTempTableSpace];
-	}
-	return InvalidOid;
-}
-
-
-/*
  * AtEOSubXact_Files
  *
  * Take care of subtransaction commit/abort.  At abort, we close temp files
@@ -3110,6 +2810,7 @@ AtEOSubXact_Files(bool isCommit, SubTransactionId mySubid,
 				  SubTransactionId parentSubid)
 {
 	Index		i;
+	File        file;
 
 	for (i = 0; i < numAllocatedDescs; i++)
 	{
@@ -3122,6 +2823,18 @@ AtEOSubXact_Files(bool isCommit, SubTransactionId mySubid,
 				/* have to recheck the item after FreeDesc (ugly) */
 				FreeDesc(&allocatedDescs[i--]);
 			}
+		}
+	}
+
+	/* Do for each vfd associated with this subtransaction */
+	for (file = 1; file < SizeVfdCache; file++)
+	{
+		if (FileIsTransient(file) && VfdCache[file].create_subid == mySubid)
+		{
+			if (isCommit)
+				VfdCache[file].create_subid = parentSubid;
+			else
+				FClose(file);
 		}
 	}
 }
@@ -3137,7 +2850,15 @@ AtEOSubXact_Files(bool isCommit, SubTransactionId mySubid,
  *
  * The isCommit flag is used only to decide whether to emit warnings about
  * unclosed files.
+ *
+ * For historical reasons, we reset the tempfile tablespaces here.
+ * Eventually this should move to tempfile.c, but for now, we import
+ * the values and reset them here. Note we should move the temp
+ * directory routines to tempfile.c as well.
  */
+extern PGDLLIMPORT Oid *tempTableSpaces;
+extern PGDLLIMPORT int numTempTableSpaces;
+
 void
 AtEOXact_Files(bool isCommit)
 {
@@ -3174,45 +2895,59 @@ BeforeShmemExit_Files(int code, Datum arg)
  * that's not the case, we are being called for transaction commit/abort
  * and should only remove transaction-local temp files.  In either case,
  * also clean up "allocated" stdio files, dirs and fds.
+ *
+ * NOTE: Revised behavior on ProcExit. Please Review!
+ * isProcExit: if true, this is being called as the backend process is
+ * exiting. If that's the case, we close all open files.
+ * Files with the PG_DELETE flag set will be removed.
+ *
+ * TODO: Question: At a minimum, surviving files with buffers need to be
+ * flushed to disk. Regular files are about to be closed anyway.
+ * We could do minimal work - flush iostack files, delete on close,
+ * and leave other files open, just in case there is more I/O coming.
+ *
+ * Note we call FClose to close the file. FClose will invoke FileClose
+ * for files which do not use I/O stacks.
+ *
+ * Tempfiles have been moved to tempfile.c, but we wtill need to initialize
+ * tempfiles. As a workaround, we import the tempfile variables and reset them
+ * here.
  */
+
 static void
 CleanupTempFiles(bool isCommit, bool isProcExit)
 {
-	Index		i;
+	File   file;
+	file_debug("isCommit=%d  isProcExit=%d", isCommit, isProcExit);
+	Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
 
-	/*
-	 * Careful here: at proc_exit we need extra cleanup, not just
-	 * xact_temporary files.
-	 */
+	/* If we might have files to clean up ...*/
 	if (isProcExit || have_xact_temporary_files)
 	{
-		Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
-		for (i = 1; i < SizeVfdCache; i++)
+		/* Do for each valid file */
+		for (file = 1; file < SizeVfdCache; file++)
 		{
-			unsigned short fdstate = VfdCache[i].fdstate;
+			if (!FileIsValid(file))
+				continue;
 
-			if (((fdstate & FD_DELETE_AT_CLOSE) || (fdstate & FD_CLOSE_AT_EOXACT)) &&
-				VfdCache[i].fileName != NULL)
-			{
-				/*
-				 * If we're in the process of exiting a backend process, close
-				 * all temporary files. Otherwise, only close temporary files
-				 * local to the current transaction. They should be closed by
-				 * the ResourceOwner mechanism already, so this is just a
-				 * debugging cross-check.
-				 */
-				if (isProcExit)
-					FileClose(i);
-				else if (fdstate & FD_CLOSE_AT_EOXACT)
-				{
-					elog(WARNING,
-						 "temporary file %s not closed at end-of-transaction",
-						 VfdCache[i].fileName);
-					FileClose(i);
-				}
-			}
+			/*
+			 * If EOXACT files are still open at commit time, show a warning.
+			 * They should have been closed by the ResourceOwner machanism already.
+			 */
+			if (isCommit && FileIsXact(file))
+				elog(WARNING,
+					 "temporary file %s not closed at end-of-transaction",
+					 VfdCache[file].fileName);
+
+			/*
+			 * Close all files if we are exiting, and close temp files if
+			 * we are at the end of the transaction.
+			 */
+			if (isProcExit || FileIsXact(file) || FileIsTransient(file))
+				FClose(file);
 		}
 
+		/* Note we no longer have temp files open */
 		have_xact_temporary_files = false;
 	}
 
@@ -3525,6 +3260,9 @@ SyncDataDirectory(void)
 	/* We can skip this whole thing if fsync is disabled. */
 	if (!enableFsync)
 		return;
+
+	/* Flush all open temp files to ensure their buffers are flushed to kernel */
+	FlushTempFiles(); /* TODO: is this necessary? */
 
 	/*
 	 * If pg_wal is a symlink, we'll need to recurse into it separately,
@@ -4025,4 +3763,83 @@ static char *
 ResOwnerPrintFile(Datum res)
 {
 	return psprintf("File %d", DatumGetInt32(res));
+}
+
+
+/*
+ * Provide access to the state used for FRead/FWrite/Encryption.
+ * Called frequently, so it is a candidate for inlining.
+ */
+FState *getFState(File file)
+{
+	if (!FileIsValid(file))
+		return NULL;
+	return &VfdCache[file].fState;
+}
+
+
+/*
+ * Is this a temporary file to be closed at end of transaction?
+ * TODO: verify transient files are temp files too and are closed
+ */
+static bool FileIsXact(File file)
+{
+	return (FileIsValid(file) && (VfdCache[file].fdstate & FD_CLOSE_AT_EOXACT) != 0);
+}
+
+/*
+ * Is this a transient file to be closed at subtransaction abort?
+ */
+static bool FileIsTransient(File file)
+{
+	return (FileIsValid(file) && (VfdCache[file].fdstate & FD_TRANSIENT) != 0);
+}
+
+
+/*
+ * Set a flag so this file is subject to l(imitations on temp file space
+ */
+void setTempFileLimit(File file)
+{
+	Assert(FileIsValid(file));
+	VfdCache[file].fdstate |= FD_TEMP_FILE_LIMIT;
+}
+
+/*
+ * Set a flag so this file is deleted on close.
+ */
+void setDeleteOnClose(File file)
+{
+	Assert(FileIsValid(file));
+	VfdCache[file].fdstate |= FD_DELETE_AT_CLOSE;
+}
+
+void setTransient(File file)
+{
+	Assert(FileIsValid(file));
+	VfdCache[file].create_subid = GetCurrentSubTransactionId();
+	VfdCache[file].fdstate |= FD_TRANSIENT;
+}
+
+/*
+ * Flush all of the I/O stack files. Some of them have buffers which
+ * must be flushed to disk.
+ * Note the legacy files are not buffered and do not need to be flushed.
+ * TODO: move to fileaccess.c?
+ */
+static bool
+FlushTempFiles()
+{
+	File file;
+	bool success;
+
+	/* Synchronize each file which has an I/O stack */
+	success = true;
+	for (file = 1; file < SizeVfdCache; file++)
+		if (!FileIsLegacy(file))
+			success &= FSync(file, 0);
+
+	/* TODO: Warning or Error message if can't sync? */
+
+	return success;
 }
