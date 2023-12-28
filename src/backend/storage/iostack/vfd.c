@@ -55,6 +55,12 @@ vfdOpen(VfdBottom *proto, const char *path, uint64 oflags, mode_t mode)
 	/* Clear the I/O Stack flags so we don't get confused */
 	oflags &= ~PG_STACK_MASK;
 
+	/* Set the low level PG_BINARY flag to the opposite of our PG_TEXT flag */
+	if (oflags & PG_TEXT)
+		oflags &= ~PG_BINARY;
+	else
+		oflags |= PG_BINARY;
+
 	/* Open the file and get a VFD. */
 	thisStack(this)->openVal = PathNameOpenFilePerm(path, oflags, mode);
 	if (thisStack(this)->openVal < 0)
