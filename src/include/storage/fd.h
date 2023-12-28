@@ -50,6 +50,8 @@
 
 typedef int File;
 
+#include "storage/fileaccess.h"
+
 
 #define IO_DIRECT_DATA			0x01
 #define IO_DIRECT_WAL			0x02
@@ -105,7 +107,7 @@ extern PGDLLIMPORT int max_safe_fds;
 extern File PathNameOpenFile(const char *fileName, int fileFlags);
 extern File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
 extern File OpenTemporaryFile(bool interXact);
-extern void FileClose(File file);
+extern int  FileClose(File file);
 extern int	FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info);
 extern int	FileReadV(File file, const struct iovec *ioc, int iovcnt, off_t offset, uint32 wait_event_info);
 extern int	FileWriteV(File file, const struct iovec *ioc, int iovcnt, off_t offset, uint32 wait_event_info);
@@ -191,13 +193,27 @@ extern int	durable_unlink(const char *fname, int elevel);
 extern void SyncDataDirectory(void);
 extern int	data_sync_elevel(int elevel);
 
+/* new routines to support I/O stacks and encryption. */
+PURE extern FState *getFState(File file);
+extern void setTempFileLimit(File file);
+extern void setDeleteOnClose(File file);
+extern void RegisterTemporaryFile(File file);
+extern void setTransient(File file);
+
+inline static bool
+FileIsLegacy(File file)
+{
+	FState *fstate = getFState(file);
+	return (fstate != NULL && fstate->ioStack == NULL);
+}
+
 static inline int
 FileRead(File file, void *buffer, size_t amount, off_t offset,
 		 uint32 wait_event_info)
 {
 	struct iovec iov = {
 		.iov_base = buffer,
-		.iov_len = amount
+		.iov_len = amount,
 	};
 
 	return FileReadV(file, &iov, 1, offset, wait_event_info);
@@ -208,11 +224,12 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 		  uint32 wait_event_info)
 {
 	struct iovec iov = {
-		.iov_base = unconstify(void *, buffer),
-		.iov_len = amount
+		        .iov_base = unconstify(void *, buffer),
+		        .iov_len = amount,
 	};
 
 	return FileWriteV(file, &iov, 1, offset, wait_event_info);
 }
+
 
 #endif							/* FD_H */
