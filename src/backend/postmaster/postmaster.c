@@ -4541,7 +4541,7 @@ internal_forkexec(int argc, char *argv[], Port *port, BackgroundWorker *worker)
 			 MyProcPid, ++tmpBackendFileNum);
 
 	/* Open file.  */
-	file = FOpen(tmpfilename, PG_ENCRYPT | O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+	file = FOpen(tmpfilename, PG_ENCRYPT | O_WRONLY | O_CREAT | O_TRUNC );
 	if (file < 0)
 	{
 		/*
@@ -4550,7 +4550,7 @@ internal_forkexec(int argc, char *argv[], Port *port, BackgroundWorker *worker)
 		 */
 		(void) MakePGDirectory(PG_TEMP_FILES_DIR);
 
-	    file = FOpen(tmpfilename, PG_ENCRYPT | O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY);
+	    file = FOpen(tmpfilename, PG_ENCRYPT | O_WRONLY | O_CREAT | O_TRUNC );
 		if (file < 0)
 		{
 			ereport(LOG,

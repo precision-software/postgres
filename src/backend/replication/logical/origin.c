@@ -595,7 +595,7 @@ CheckPointReplicationOrigin(void)
 	 * no other backend can perform this at the same time; only one checkpoint
 	 * can happen at a time.
 	 */
-	tmpfd = FOpen(tmppath, PG_ENCRYPT | O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
+	tmpfd = FOpen(tmppath, PG_ENCRYPT | O_CREAT | O_EXCL | O_WRONLY );
 	if (tmpfd < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
@@ -703,7 +703,7 @@ StartupReplicationOrigin(void)
 
 	elog(DEBUG2, "starting up replication origin progress state");
 
-	fd = FOpen(path, PG_ENCRYPT | O_RDONLY | PG_BINARY);
+	fd = FOpen(path, PG_ENCRYPT | O_RDONLY );
 
 	/*
 	 * might have had max_replication_slots == 0 last run, or we just brought

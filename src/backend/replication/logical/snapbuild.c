@@ -1750,7 +1750,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 	FIN_CRC32C(ondisk->checksum);
 
 	/* we have valid data now, open tempfile and write it there */
-	fd = FOpen(tmppath, PG_ENCRYPT | O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
+	fd = FOpen(tmppath, PG_ENCRYPT | O_CREAT | O_EXCL | O_WRONLY );
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -1847,7 +1847,7 @@ SnapBuildRestore(SnapBuild *builder, XLogRecPtr lsn)
 	sprintf(path, "pg_logical/snapshots/%X-%X.snap",
 			LSN_FORMAT_ARGS(lsn));
 
-	fd = FOpen(path, PG_ENCRYPT | O_RDONLY | PG_BINARY);
+	fd = FOpen(path, PG_ENCRYPT | O_RDONLY );
 
 	if (fd < 0 && errno == ENOENT)
 		return false;

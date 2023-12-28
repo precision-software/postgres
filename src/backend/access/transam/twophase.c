@@ -1330,7 +1330,7 @@ ReadTwoPhaseFile(TransactionId xid, bool missing_ok)
 
 	TwoPhaseFilePath(path, xid);
 
-	file = FOpen(path, PG_ENCRYPT | O_RDONLY | PG_BINARY);
+	file = FOpen(path, PG_ENCRYPT | O_RDONLY );
 	if (file < 0)
 	{
 		if (missing_ok && errno == ENOENT)
@@ -1760,7 +1760,7 @@ RecreateTwoPhaseFile(TransactionId xid, void *content, int len)
 
 	TwoPhaseFilePath(path, xid);
 
-	file = FOpen(path, PG_ENCRYPT | O_CREAT | O_TRUNC | O_WRONLY | PG_BINARY);
+	file = FOpen(path, PG_ENCRYPT | O_CREAT | O_TRUNC | O_WRONLY );
 	if (file < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
