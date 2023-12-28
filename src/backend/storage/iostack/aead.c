@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <fcntl.h>
+#include "postgres.h"
 
 #include <openssl/opensslv.h>
 #include <openssl/ssl.h>
@@ -14,6 +15,7 @@
 #include <openssl/err.h>
 #include <openssl/rand.h>
 
+#include "storage/fd.h"
 #include "storage/iostack.h"
 #include "utils/wait_event.h"
 #include "packed.h"
@@ -123,6 +125,9 @@ aeadOpen(Aead *proto, const char *path, uint64 oflags, mode_t mode)
 	off_t lastPlainBlock;
 	Aead *this;
 	IoStack *next;
+
+	/* Our actual file will always be binary, so clear the text flag */
+	oflags &= ~PG_TEXT;
 
 	/* Open our successor */
 	next = stackOpen(nextStack(proto), path, oflags, mode);
