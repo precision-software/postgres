@@ -35,7 +35,6 @@ typedef struct VfdStack
 {
 	IoStack ioStack;   /* Header used for all I/O stack types */
 	File file;         /* Duplicate of ioStack.openVal */
-	off_t fileSize;    /* Track size of the file */
 } VfdBottom;
 
 /* Forward reference */
@@ -52,30 +51,20 @@ vfdOpen(VfdBottom *proto, const char *path, uint64 oflags, mode_t mode)
 	if (this == NULL)
 		return NULL;
 
-	/* Clear the I/O Stack flags so we don't get confused */
-	oflags &= ~PG_STACK_MASK;
-
 	/* Set the low level PG_BINARY flag to the opposite of our PG_TEXT flag */
 	if (oflags & PG_TEXT)
 		oflags &= ~PG_BINARY;
 	else
 		oflags |= PG_BINARY;
 
-	/* Open the file and get a VFD. */
-	thisStack(this)->openVal = PathNameOpenFilePerm(path, oflags, mode);
+	/* Open the file and get a VFD. Ignore any of the high word flags. */
+	thisStack(this)->openVal = PathNameOpenFilePerm(path, (int)oflags, mode);
 	if (thisStack(this)->openVal < 0)
 	    return stackErrorSet(this, this, errno, "Unable to open file %s", path);
 
 	/* We are byte oriented and can support all block sizes TODO allow blockSize to support O_DIRECT */
 	thisStack(this)->blockSize = 1;
 	this->file = thisStack(this)->openVal;
-	this->fileSize = FileSize(this->file);
-	if (this->fileSize < 0)
-	{
-		int save_errno = errno;
-		vfdClose(this);
-		return stackErrorSet(this, this, save_errno, "Unable to get size of file %s", path);
-	}
 
 	/* Always return a new I/O stack structure. It contains error info if problems occurred. */
 	file_debug("(done): file=%d  name=%s oflags=0x%lx  mode=0x%x", this->file, path, oflags, mode);
@@ -93,9 +82,6 @@ vfdWrite(VfdBottom *this, const Byte *buf, ssize_t bufSize, off_t offset, uint32
 	file_debug("file=%d  name=%s  size=%zd  offset=%lld  actual=%zd", this->file, FilePathName(this->file), bufSize, offset, actual);
 	if (actual < 0)
 		return stackErrorSet(this, -1, errno, "Unable to write to file %d(%s", this->file, FilePathName(this->file));
-
-	/* Update the file size */
-	this->fileSize = MAX(this->fileSize, offset+actual);
 
 	return actual;
 }
@@ -147,7 +133,7 @@ vfdClose(VfdBottom *this)
 static bool
 vfdSync(VfdBottom *this, uint32 wait)
 {
-	int retval = FileSync(this->file, 0);
+	int retval = FileSync(this->file, wait);
 	if (retval < 0)
 	    return stackErrorSet(this, false, errno, "Unable to sync file %d(%s)", this->file, FilePathName(this->file));
 
@@ -196,10 +182,8 @@ static bool vfdResize(VfdBottom *this, off_t newSize, uint32 wait)
 	else
 		success = FileFallocate(this->file, fileSize, newSize - fileSize, wait) >= 0;
 
-	if (success)
-		this->fileSize = newSize;
-	else
-		stackSetError(this, errno, "Unable to resize file %d(%s)", /* TODO: Include error message */
+	if (!success)
+		stackSetError(this, errno, "Unable to resize file %d(%s): %m",
 					  this->file, FilePathName(this->file), this->file);
 
 	return success;
@@ -218,7 +202,7 @@ IoStackInterface vfdInterface = (IoStackInterface)
 	};
 
 
-/**
+/*
  * Create a new Vfd I/O Stack.
  */
 void *vfdStackNew()
