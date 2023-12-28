@@ -666,7 +666,7 @@ SimpleLruDoesPhysicalPageExist(SlruCtl ctl, int64 pageno)
 
 	SlruFileName(ctl, path, segno);
 
-	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDONLY | PG_BINARY);
+	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDONLY );
 	if (fd < 0)
 	{
 		/* expected: file doesn't exist */
@@ -727,7 +727,7 @@ SlruPhysicalReadPage(SlruCtl ctl, int64 pageno, int slotno)
 	 * SlruPhysicalWritePage).  Hence, if we are InRecovery, allow the case
 	 * where the file doesn't exist, and return zeroes instead.
 	 */
-	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDONLY | PG_BINARY);
+	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDONLY );
 	if (fd < 0)
 	{
 		if (errno != ENOENT || !InRecovery)
@@ -869,7 +869,7 @@ SlruPhysicalWritePage(SlruCtl ctl, int64 pageno, int slotno, SlruWriteAll fdata)
 		 * don't use O_EXCL or O_TRUNC or anything like that.
 		 */
 		SlruFileName(ctl, path, segno);
-		fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDWR | O_CREAT | PG_BINARY);
+		fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDWR | O_CREAT );
 		if (fd < 0)
 		{
 			slru_errcause = SLRU_OPEN_FAILED;
@@ -1639,7 +1639,7 @@ SlruSyncFileTag(SlruCtl ctl, const FileTag *ftag, char *path)
 
 	SlruFileName(ctl, path, ftag->segno);
 
-	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDWR | PG_BINARY);
+	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDWR );
 	if (fd < 0)
 		return -1;
 

@@ -509,9 +509,9 @@ CreateDirAndVersionFile(char *dbpath, Oid dbid, Oid tsid, bool isRedo)
 	 */
 	snprintf(versionfile, sizeof(versionfile), "%s/%s", dbpath, "PG_VERSION");
 
-	fd = FOpen(versionfile, PG_PLAIN | PG_TRANSIENT | O_WRONLY | O_CREAT | O_EXCL | PG_BINARY);
+	fd = FOpen(versionfile, PG_PLAIN | PG_TRANSIENT | O_WRONLY | O_CREAT | O_EXCL );
 	if (fd < 0 && errno == EEXIST && isRedo)
-		fd = FOpen(versionfile, PG_PLAIN | PG_TRANSIENT | O_WRONLY | O_TRUNC | PG_BINARY);
+		fd = FOpen(versionfile, PG_PLAIN | PG_TRANSIENT | O_WRONLY | O_TRUNC );
 
 	if (fd < 0)
 		ereport(ERROR,
