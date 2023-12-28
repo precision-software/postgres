@@ -2198,7 +2198,8 @@ qtext_store(const char *query, int query_len,
 			Size *query_offset, int *gc_count)
 {
 	Size		off;
-	int			fd;
+	File		file;
+
 
 	/*
 	 * We use a spinlock to protect extent/n_writers/gc_count, so that
@@ -2226,21 +2227,22 @@ qtext_store(const char *query, int query_len,
 	if (unlikely(query_len >= MaxAllocHugeSize - off))
 	{
 		errno = EFBIG;			/* not quite right, but it'll do */
-		fd = -1;
+		file = -1;
 		goto error;
 	}
 
 	/* Now write the data into the successfully-reserved part of the file */
-	fd = OpenTransientFile(PGSS_TEXT_FILE, O_RDWR | O_CREAT | PG_BINARY);
-	if (fd < 0)
+	/* TODO: to support encryption, writes to shared file must be on block boundaries. Use RAW for now. */
+	file = FOpen(PGSS_TEXT_FILE, PG_RAW | PG_TRANSIENT | O_RDWR | O_CREAT);
+	if (file < 0)
 		goto error;
 
-	if (pg_pwrite(fd, query, query_len, off) != query_len)
+	if (FWrite(file, query, query_len, off, 0) != query_len)
 		goto error;
-	if (pg_pwrite(fd, "\0", 1, off + query_len) != 1)
+	if (FWrite(file, "\0", 1, off + query_len, 0) != 1)
 		goto error;
 
-	CloseTransientFile(fd);
+	FClose(file);
 
 	/* Mark our write complete */
 	{
@@ -2259,8 +2261,8 @@ error:
 			 errmsg("could not write file \"%s\": %m",
 					PGSS_TEXT_FILE)));
 
-	if (fd >= 0)
-		CloseTransientFile(fd);
+	if (file >= 0)
+		FClose(file);
 
 	/* Mark our write complete */
 	{
@@ -2289,12 +2291,12 @@ static char *
 qtext_load_file(Size *buffer_size)
 {
 	char	   *buf;
-	int			fd;
-	struct stat stat;
+	File		file;
 	Size		nread;
+	off_t		fileSize;
 
-	fd = OpenTransientFile(PGSS_TEXT_FILE, O_RDONLY | PG_BINARY);
-	if (fd < 0)
+	file = FOpen(PGSS_TEXT_FILE, PG_RAW | PG_TRANSIENT | O_RDONLY);
+	if (file < 0)
 	{
 		if (errno != ENOENT)
 			ereport(LOG,
@@ -2305,19 +2307,20 @@ qtext_load_file(Size *buffer_size)
 	}
 
 	/* Get file length */
-	if (fstat(fd, &stat))
+	fileSize = FSize(file);
+	if (fileSize < 0)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
-				 errmsg("could not stat file \"%s\": %m",
+				 errmsg("could not get size of file \"%s\": %m",
 						PGSS_TEXT_FILE)));
-		CloseTransientFile(fd);
+		FClose(file);
 		return NULL;
 	}
 
 	/* Allocate buffer; beware that off_t might be wider than size_t */
-	if (stat.st_size <= MaxAllocHugeSize)
-		buf = (char *) malloc(stat.st_size);
+	if (fileSize <= MaxAllocHugeSize)
+		buf = (char *) malloc(fileSize);
 	else
 		buf = NULL;
 	if (buf == NULL)
@@ -2327,7 +2330,7 @@ qtext_load_file(Size *buffer_size)
 				 errmsg("out of memory"),
 				 errdetail("Could not allocate enough memory to read file \"%s\".",
 						   PGSS_TEXT_FILE)));
-		CloseTransientFile(fd);
+		FClose(file);
 		return NULL;
 	}
 
@@ -2337,9 +2340,9 @@ qtext_load_file(Size *buffer_size)
 	 * so read a very large file in 1GB segments.
 	 */
 	nread = 0;
-	while (nread < stat.st_size)
+	while (nread < fileSize)
 	{
-		int			toread = Min(1024 * 1024 * 1024, stat.st_size - nread);
+		int		toread = Min(1024 * 1024 * 1024, fileSize - nread);
 
 		/*
 		 * If we get a short read and errno doesn't get set, the reason is
@@ -2348,22 +2351,21 @@ qtext_load_file(Size *buffer_size)
 		 * the data, either, since it's most likely corrupt due to concurrent
 		 * writes from garbage collection.
 		 */
-		errno = 0;
-		if (read(fd, buf + nread, toread) != toread)
+		if (FReadSeq(file, buf + nread, toread, 0) != toread)
 		{
-			if (errno)
+			if (FError(file))
 				ereport(LOG,
 						(errcode_for_file_access(),
 						 errmsg("could not read file \"%s\": %m",
 								PGSS_TEXT_FILE)));
 			free(buf);
-			CloseTransientFile(fd);
+			FClose(file);
 			return NULL;
 		}
 		nread += toread;
 	}
 
-	if (CloseTransientFile(fd) != 0)
+	if (!FClose(file))
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", PGSS_TEXT_FILE)));

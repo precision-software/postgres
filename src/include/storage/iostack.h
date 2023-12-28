@@ -170,13 +170,14 @@ stackErrorNo(void *thisVoid)
 }
 
 /* Declare a "debug" macro */
-//#define FILE_DEBUG
+#define FILE_DEBUG
 #ifdef FILE_DEBUG
 #define file_debug(...) \
     do {  \
         int save_errno = errno; \
-		setvbuf(stderr, NULL, _IOLBF, 256); \
-		fprintf(stderr, "%s(%d): ", __func__, getpid());     \
+		setvbuf(stderr, NULL, PG_IOLBF, 256); \
+		fprintf(stderr, "%s(%d): ", __func__, getpid()); \
+		errno = save_errno;  /* to support %m */ \
 		fprintf(stderr, __VA_ARGS__); \
 		fprintf(stderr, "\n");\
         /* elog(DEBUG2, __VA_ARGS__);  */ \
