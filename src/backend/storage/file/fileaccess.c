@@ -148,36 +148,48 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 
 	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%llx", fileName, fileFlags, fileMode);
 
-	/* If legacy (no special flags), call low level open directly */
-	if (fileFlags == (uint32)fileFlags)
-		return PathNameOpenFilePerm(fileName, (uint32)fileFlags, fileMode);
-
-	/* Select the I/O stack prototype. */
-	proto = selectIoStack(fileName, fileFlags, fileMode);
-
-	/* I/O stacks don't implement O_APPEND, so seek to end of file */
-	append = (fileFlags & O_APPEND) != 0;
-	fileFlags &= ~O_APPEND;
-
 	/* Reserve a resource owner slot if we need one */
 	if (fileFlags & PG_XACT)
 		ResourceOwnerEnlarge(CurrentResourceOwner);
 
-	/* Open the  prototype I/O stack */
-	ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
-	if (ioStack == NULL)
-		return setFileError(-1, errno, "Unable to allocate I/O stack for %s", fileName);
+	/* I/O stacks don't implement O_APPEND, so seek to end of file instead */
+	append = (fileFlags & O_APPEND) != 0;
+	fileFlags &= ~O_APPEND;
 
-	/* Save error info if open failed */
-	file = (File)ioStack->openVal;
-	if (file < 0)
+	/* If legacy, the prototype I/O stack will be NULL. Call low level open directly */
+	proto = selectIoStack(fileName, fileFlags, fileMode);
+	if (proto == NULL)
 	{
-		copyError(getErrStack(-1), -1, ioStack);
-		free(ioStack);
-		return -1;
+		file = PathNameOpenFilePerm(fileName, (int)fileFlags, fileMode);
+		if (file < 0)
+			return -1;
+
+		/* We do not have an I/O Stack */
+		ioStack = NULL;
 	}
 
-	/* Success. Save the io stack in the vfd */
+	/* Otherwise, open the file through the I/O stack */
+	else
+	{
+
+		/* Open the  prototype I/O stack */
+		ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
+		if (ioStack == NULL)
+			return setFileError(-1, errno, "Unable to allocate I/O stack for %s", fileName);
+
+		/* Save error info if open failed */
+		file = (File) ioStack->openVal;
+		if (file < 0)
+		{
+			copyError(getErrStack(-1), -1, ioStack);
+			free(ioStack);
+			return -1;
+		}
+	}
+
+	Assert (file > 0);
+
+	/* Success. Save the io stack (unless legacy) in the vfd */
 	fstate = getFState(file);
 	fstate->ioStack = ioStack;
 
@@ -198,7 +210,7 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 		setTransient(file);
 
 	/* Position at end of file if appending */
-	fstate->offset = append ? stackSize(ioStack): 0;
+	fstate->offset = append ? FSize(file): 0;
 	if (fstate->offset == -1)
 	{
 		FClose(file);
