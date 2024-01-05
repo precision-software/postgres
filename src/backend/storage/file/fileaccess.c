@@ -1,9 +1,6 @@
 /*
  * Routines for accessing Temp and other non-relational files opened
  * with the "FOpen()" call.
- *
- * For compatibility, these routines also work on
- * "legacy" vfd files including those opened with PathNameOpenFile().
  */
 #include "postgres.h"
 #include "common/file_perm.h"
@@ -156,44 +153,30 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 	append = (fileFlags & O_APPEND) != 0;
 	fileFlags &= ~O_APPEND;
 
-	/* If legacy, the prototype I/O stack will be NULL. Call low level open directly */
+	/* Decide which I/O stack to use. */
 	proto = selectIoStack(fileName, fileFlags, fileMode);
-	if (proto == NULL)
-	{
-		file = PathNameOpenFilePerm(fileName, (int)fileFlags, fileMode);
-		if (file < 0)
-			return -1;
 
-		/* We do not have an I/O Stack */
-		ioStack = NULL;
+	/* Open the  prototype I/O stack */
+	ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
+	if (ioStack == NULL)
+		return setFileError(-1, errno, "Unable to allocate I/O stack for %s", fileName);
+
+	/* Save error info if open failed */
+	file = (File) ioStack->openVal;
+	if (file < 0)
+	{
+		copyError(getErrStack(-1), -1, ioStack);
+		free(ioStack);
+		return -1;
 	}
 
-	/* Otherwise, open the file through the I/O stack */
-	else
-	{
-
-		/* Open the  prototype I/O stack */
-		ioStack = stackOpen(proto, fileName, fileFlags, fileMode);
-		if (ioStack == NULL)
-			return setFileError(-1, errno, "Unable to allocate I/O stack for %s", fileName);
-
-		/* Save error info if open failed */
-		file = (File) ioStack->openVal;
-		if (file < 0)
-		{
-			copyError(getErrStack(-1), -1, ioStack);
-			free(ioStack);
-			return -1;
-		}
-	}
-
-	Assert (file > 0);
+	Assert(file > 0);
 
 	/* Success. Save the io stack (unless legacy) in the vfd */
 	fstate = getFState(file);
 	fstate->ioStack = ioStack;
 
-	/* Close at end of transaction? */
+	/* Close when resource owner is released */
 	if (fileFlags & PG_XACT)
 		RegisterTemporaryFile(file);
 
@@ -210,7 +193,7 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 		setTransient(file);
 
 	/* Position at end of file if appending */
-	fstate->offset = append ? FSize(file): 0;
+	fstate->offset = append ? FSize(file) : 0;
 	if (fstate->offset == -1)
 	{
 		FClose(file);
@@ -235,8 +218,13 @@ bool FClose(File file)
 	IoStack *stack;
 	file_debug("name=%s, file=%d  iostack=%p", FilePathName(file), file, getStack(file));
 
+	/*
+	 * If a legacy file, close it using the legacy FileClose().
+	 * A convenience so we don't have to distinguish between
+	 * legacy files and FOpen files when cleaning things up.
+	 */
 	if (FileIsLegacy(file))
-		return (FileClose(file) != -1);
+		return (FileClose(file) != 0);
 
 	if (badFile(file))
 		return false;
@@ -272,9 +260,6 @@ ssize_t FRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_
 	ssize_t actual;
 	file_debug("FileRead: name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 
-	if (FileIsLegacy(file))
-		return FileRead(file, buffer, amount, offset, wait_info);
-
 	if (badFile(file))
 		return -1;
 
@@ -296,9 +281,6 @@ ssize_t FWrite(File file, const void *buffer, size_t amount, off_t offset, uint3
 	off_t fileSize;
 	file_debug("name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 
-	if (FileIsLegacy(file))
-		return FileWrite(file, buffer, amount, offset, wait);
-
 	if (badFile(file))
 		return -1;
 
@@ -306,7 +288,7 @@ ssize_t FWrite(File file, const void *buffer, size_t amount, off_t offset, uint3
 	 * Normally these "holes" are zeroed out by the Posix filesystem,
 	 * but encryption or compression may require special handling.
 	 */
-	fileSize = FSize(file); /* TODO: track fileSize in FState? */
+	fileSize = FSize(file); /* TODO: track fileSize in FState! */
 	if (fileSize < 0)
 		return -1;
 
@@ -331,9 +313,6 @@ ssize_t FWrite(File file, const void *buffer, size_t amount, off_t offset, uint3
  */
 bool FSync(File file, uint32 wait)
 {
-	if (FileIsLegacy(file))
-		return FileSync(file, wait);
-
 	if (badFile(file))
 		return -1;
 
@@ -346,8 +325,6 @@ bool FSync(File file, uint32 wait)
 off_t FSize(File file)
 {
 	off_t size;
-	if (FileIsLegacy(file))
-		return  FileSize(file);
 
 	if (badFile(file))
 		return -1;
@@ -388,6 +365,8 @@ bool	FResize(File file, off_t offset, uint32 wait)
  * Error handling code.
  * These functions are similar to ferror(), but can be accessed even when the file is closed or -1.
  * This added feature allows error info to be fetched after a failed "open" or "close" call.
+ *
+ * TODO: move error info from IoStack to FStat, and let IoStack point to FStat.
  */
 
 /* True if an error occurred on the file.  (EOF is not an error) */
