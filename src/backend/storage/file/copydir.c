@@ -117,8 +117,8 @@ void
 copy_file(const char *fromfile, const char *tofile)
 {
 	char	   *buffer;
-	int			srcfd;
-	int			dstfd;
+	File		srcfd;
+	File		dstfd;
 	int			nbytes;
 	off_t		offset;
 	off_t		flush_offset;
@@ -144,13 +144,13 @@ copy_file(const char *fromfile, const char *tofile)
 	/*
 	 * Open the files
 	 */
-	srcfd = OpenTransientFile(fromfile, O_RDONLY | PG_BINARY);
+    srcfd = FOpen(fromfile, PG_TRANSIENT | O_RDONLY);
 	if (srcfd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", fromfile)));
 
-	dstfd = OpenTransientFile(tofile, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
+	dstfd = FOpen(tofile, PG_TRANSIENT | O_RDWR | O_CREAT | O_EXCL);
 	if (dstfd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -172,42 +172,33 @@ copy_file(const char *fromfile, const char *tofile)
 		 */
 		if (offset - flush_offset >= FLUSH_DISTANCE)
 		{
-			pg_flush_data(dstfd, flush_offset, offset - flush_offset);
+			FSync(dstfd, WAIT_EVENT_COPY_FILE_WRITE); /* TODO: want async version of FSync with offset,size */
 			flush_offset = offset;
 		}
 
-		pgstat_report_wait_start(WAIT_EVENT_COPY_FILE_READ);
-		nbytes = read(srcfd, buffer, COPY_BUF_SIZE);
-		pgstat_report_wait_end();
+        nbytes = FReadSeq(srcfd, buffer, COPY_BUF_SIZE, WAIT_EVENT_COPY_FILE_READ);
 		if (nbytes < 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not read file \"%s\": %m", fromfile)));
 		if (nbytes == 0)
 			break;
-		errno = 0;
-		pgstat_report_wait_start(WAIT_EVENT_COPY_FILE_WRITE);
-		if ((int) write(dstfd, buffer, nbytes) != nbytes)
-		{
-			/* if write didn't set errno, assume problem is no disk space */
-			if (errno == 0)
-				errno = ENOSPC;
+
+		if ((int) FWriteSeq(dstfd, buffer, nbytes, WAIT_EVENT_COPY_FILE_WRITE) != nbytes)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not write to file \"%s\": %m", tofile)));
-		}
-		pgstat_report_wait_end();
 	}
 
 	if (offset > flush_offset)
-		pg_flush_data(dstfd, flush_offset, offset - flush_offset);
+		FSync(dstfd, WAIT_EVENT_COPY_FILE_WRITE);  /* TODO: add flush_offset, offset - flush_offset); */
 
-	if (CloseTransientFile(dstfd) != 0)
+	if (!FClose(dstfd))
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", tofile)));
 
-	if (CloseTransientFile(srcfd) != 0)
+	if (!FClose(srcfd))
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", fromfile)));
