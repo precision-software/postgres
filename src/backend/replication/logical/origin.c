@@ -595,6 +595,7 @@ CheckPointReplicationOrigin(void)
 	/*
 	 * no other backend can perform this at the same time; only one checkpoint
 	 * can happen at a time.
+     * TODO: Can we drop the unlink above and replace O_EXCL witb O_TRUNC?
 	 */
 	tmpfd = FOpen(tmppath, PG_ENCRYPT | O_CREAT | O_EXCL | O_WRONLY );
 	if (tmpfd < 0)
