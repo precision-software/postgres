@@ -78,7 +78,7 @@ readTimeLineHistory(TimeLineID targetTLI)
 	List	   *result;
 	char		path[MAXPGPATH];
 	char		histfname[MAXFNAMELEN];
-	FILE	   *fd;
+	File	    fd;
 	TimeLineHistoryEntry *entry;
 	TimeLineID	lasttli = 0;
 	XLogRecPtr	prevend;
@@ -102,8 +102,8 @@ readTimeLineHistory(TimeLineID targetTLI)
 	else
 		TLHistoryFilePath(path, targetTLI);
 
-	fd = AllocateFile(path, "r");
-	if (fd == NULL)
+    fd = FOpen(path, PG_TRANSIENT | /*PG_PLAIN | */O_RDWR | O_CREAT | O_TRUNC);
+	if (fd < 0)
 	{
 		if (errno != ENOENT)
 			ereport(FATAL,
@@ -125,25 +125,14 @@ readTimeLineHistory(TimeLineID targetTLI)
 	for (;;)
 	{
 		char		fline[MAXPGPATH];
-		char	   *res;
 		char	   *ptr;
 		TimeLineID	tli;
 		uint32		switchpoint_hi;
 		uint32		switchpoint_lo;
 		int			nfields;
 
-		pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_READ);
-		res = fgets(fline, sizeof(fline), fd);
-		pgstat_report_wait_end();
-		if (res == NULL)
-		{
-			if (ferror(fd))
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not read file \"%s\": %m", path)));
-
-			break;
-		}
+        if (!FReadLine(fd, fline, sizeof(fline), WAIT_EVENT_TIMELINE_HISTORY_READ))
+		    break;
 
 		/* skip leading whitespace and check for # comment */
 		for (ptr = fline; *ptr; ptr++)
@@ -187,7 +176,13 @@ readTimeLineHistory(TimeLineID targetTLI)
 		/* we ignore the remainder of each line */
 	}
 
-	FreeFile(fd);
+	/* We exited loop either by error or eof. Check for error */
+	if (FError(fd))
+		ereport(ERROR,
+				(errcode_for_file_access(),
+					errmsg("could not read file \"%s\": %m", path)));
+
+	FClose(fd);
 
 	if (result && targetTLI <= lasttli)
 		ereport(FATAL,
