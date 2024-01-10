@@ -102,7 +102,7 @@ readTimeLineHistory(TimeLineID targetTLI)
 	else
 		TLHistoryFilePath(path, targetTLI);
 
-    fd = FOpen(path, PG_TRANSIENT | /*PG_PLAIN | */O_RDWR | O_CREAT | O_TRUNC);
+    fd = FOpen(path, PG_TRANSIENT | PG_PLAIN | O_RDONLY);
 	if (fd < 0)
 	{
 		if (errno != ENOENT)
