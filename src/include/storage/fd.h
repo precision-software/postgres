@@ -195,7 +195,7 @@ extern void SyncDataDirectory(void);
 extern int	data_sync_elevel(int elevel);
 
 /* new routines to support I/O stacks and encryption. */
-PURE extern FState *getFState(File file);
+PURE extern FileState *getFState(File file);
 extern void setTempFileLimit(File file);
 extern void setDeleteOnClose(File file);
 extern void RegisterTemporaryFile(File file);
@@ -204,7 +204,7 @@ extern void setTransient(File file);
 inline static bool
 FileIsLegacy(File file)
 {
-	FState *fstate = getFState(file);
+	FileState *fstate = getFState(file);
 	return (fstate != NULL && fstate->ioStack == NULL);
 }
 

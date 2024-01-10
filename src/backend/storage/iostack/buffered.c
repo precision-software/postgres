@@ -404,6 +404,7 @@ static bool fillBuffer(Buffered *this, uint32 wait)
 	this->currentSize = stackReadAll(nextStack(this), this->buf, this->bufferSize, this->currentBlock, wait);
 	if (this->currentSize < 0)
 		return copyNextError(this, false);
+	this->ioStack.eof = (this->currentSize == 0);
 
 	Assert(this->currentSize == this->bufferSize || this->currentBlock + this->currentSize == this->fileSize);
 

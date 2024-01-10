@@ -8,11 +8,13 @@
 #include "storage/fileaccess.h"
 #include "storage/iostack_internal.h"
 #include "utils/resowner.h"
+#include "utils/wait_event.h"
 
 /* Forward references */
 static IoStack *getStack(File file);
 static IoStack *getErrStack(File file);
 static bool badFile(File file);
+static inline void updateFileState(File file, off_t offset, ssize_t actual);
 
 /*========================================================================================
  * Routines to emuulate C library FILE routines (fgetc, fprintf,
@@ -22,10 +24,10 @@ static bool badFile(File file);
  * Similar to fgetc. Best if used with buffered files.
  */
 int
-FGetc(File file)
+FGetc(File file, uint32 wait)
 {
 	unsigned char c;
-	int ret = (int) FReadSeq(file, &c, 1, 0);
+	int ret = (int) FReadSeq(file, &c, 1, wait);
 	if (ret <= 0)
 		return EOF;
 	return c;
@@ -34,11 +36,41 @@ FGetc(File file)
 /*
  * Similar to fputc
  */
-int FPutc(File file, unsigned char c)
+int FPutc(File file, unsigned char c, uint32 wait)
 {
-	if (FWriteSeq(file, &c, 1, 0) <= 0) /* TODO: Zero case would be ouf of disk space? */
+	if (FWriteSeq(file, &c, 1, wait) <= 0)
 		return EOF;
 	return c;
+}
+
+/*
+ * Read a line of text, dropping cr/lf and terminate with EOL.
+ */
+bool FReadLine(File file, char *line, ssize_t maxLen, uint32 wait)
+{
+    ssize_t len;
+	file_debug("file=%d path=%s  maxLen=%zd", file, FilePathName(file), maxLen);
+
+    for (len = 0; len < maxLen-1; len++)
+    {
+        /* Get the next character */
+        line[len] = FGetc(file, wait);
+
+        /* Skip C/R in case it came from Windows. */
+        if (line[len] == '\r')
+            line[len] = FGetc(file, wait);
+
+        /* Check for end of line */
+        if (line[len] == '\n' || line[len] == EOF)
+            break;
+    }
+
+    /* Terminate the line we just read */
+    line[len] = '\0';
+
+	/* Successful if we read a valid line.  Failed if error or eof */
+	file_debug("   line=%s  len=%zd  eof=%d  errno=%d", line, len, FEof(file), FErrorCode(file));
+    return !FError(file) && (len > 0 || !FEof(file));
 }
 
 /*
@@ -84,6 +116,7 @@ FReadSeq(File file, void *buffer, size_t amount, uint32 wait)
 {
 	if (badFile(file))
 		return -1;
+
 	return FRead(file, buffer, amount, getFState(file)->offset, wait);
 }
 
@@ -141,9 +174,9 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 	IoStack *proto;
 	IoStack *ioStack;
 	bool append;
-	FState *fstate;
+	FileState *fstate;
 
-	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%x fileMode=0x%llx", fileName, fileFlags, fileMode);
+	file_debug("FileOpenPerm: fileName=%s fileFlags=0x%lx fileMode=0x%hx", fileName, fileFlags, fileMode);
 
 	/* Reserve a resource owner slot if we need one */
 	if (fileFlags & PG_XACT)
@@ -267,8 +300,7 @@ ssize_t FRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_
 	actual = stackReadAll(getStack(file), buffer, amount, offset, wait_info);
 
 	/* If successful, update the file offset */
-	if (actual >= 0)
-		getFState(file)->offset = offset + actual;
+	updateFileState(file, offset, actual);
 
 	file_debug("FileRead(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;
@@ -278,30 +310,26 @@ ssize_t FRead(File file, void *buffer, size_t amount, off_t offset, uint32 wait_
 ssize_t FWrite(File file, const void *buffer, size_t amount, off_t offset, uint32 wait)
 {
 	ssize_t actual;
-	off_t fileSize;
 	file_debug("name=%s file=%d  amount=%zd offset=%lld", FilePathName(file), file, amount, offset);
 
 	if (badFile(file))
 		return -1;
 
-	/* Extend the file explicitly if new block starts past EOF.
-	 * Normally these "holes" are zeroed out by the Posix filesystem,
-	 * but encryption or compression may require special handling.
+	/*
+	 * If we think we are creating a hole, update the file size first.
 	 */
-	fileSize = FSize(file); /* TODO: track fileSize in FState! */
-	if (fileSize < 0)
+	if (offset > getFState(file)->fileSize && FSize(file) < 0)
 		return -1;
 
-	/* If file size is increased, then extend the file to fill in the hole */
-	if (offset > fileSize && !FResize(file, offset, wait))
+	/* If creating a hole, extend the file to fill in the hole first. */
+	if (offset > getFState(file)->fileSize && !FResize(file, offset, wait))
 		return -1;
 
 	/* Write the data as requested */
 	actual = stackWriteAll(getStack(file), buffer, amount, offset, wait);
 
-	/* If successful, update the file offset */
-	if (actual >= 0)
-		getFState(file)->offset = offset + actual;
+	/* Update the file state */
+	updateFileState(file, offset, actual);
 
 	file_debug("(done): file=%d  name=%s  actual=%zd", file, FilePathName(file), actual);
 	return actual;
@@ -329,7 +357,10 @@ off_t FSize(File file)
 	if (badFile(file))
 		return -1;
 
+	/* Query the file's size */
 	size = stackSize(getStack(file));
+	getFState(file)->fileSize = size;
+
 	file_debug("name=%s file=%d  size=%lld", FilePathName(file), file, size);
 	return size;
 }
@@ -424,11 +455,11 @@ int setFileError(File file, int errorCode, const char *fmt, ...)
  */
 static inline IoStack *getStack(File file)
 {
-	FState *fState = getFState(file);  // TODO: Inline if possible
-	if (fState == NULL)
+	FileState *fs = getFState(file);  // TODO: Inline if possible
+	if (fs == NULL)
 		return NULL;
 
-	return fState->ioStack;
+	return fs->ioStack;
 }
 
 
@@ -477,4 +508,16 @@ bool PathNameFSync(const char *path, uint32 wait)
 
 
 	return success;
+}
+
+
+static inline void updateFileState(File file, off_t offset, ssize_t actual)
+{
+	FileState *fs = getFState(file);
+	Assert(fs != NULL);
+	if (actual > 0)
+	{
+		fs->offset = offset + actual;
+		fs->fileSize = MAX(fs->fileSize, fs->offset);
+	}
 }

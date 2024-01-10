@@ -9,11 +9,12 @@
 /*
  * Additional information to support FReadSeq/FWriteSeq/Encryption interface.
  */
-typedef struct FState
+typedef struct FileState
 {
 	IoStack *ioStack;
 	off_t offset;
-} FState;
+	off_t fileSize;
+} FileState;
 
 /*
  * Additional open flags, all in upper word so they don't interfere
@@ -53,13 +54,14 @@ extern bool FSync(File file, uint32 wait);  /* TODO: add offset and size */
 extern bool FResize(File file, off_t offset, uint32 wait);
 
 /* Additional Sequential I/O functions */
-extern int FGetc(File file);
-extern int FPutc(File file, unsigned char c);
+extern int FGetc(File file, uint32 wait);
+extern int FPutc(File file, unsigned char c, uint32 wait);
 extern ssize_t FPrint(File file, const char *format, ...);
 extern ssize_t FScan(File file, const char *format, ...);
 extern ssize_t FPuts(File file, const char *string);
 extern off_t FSeek(File file, off_t offset);
 extern off_t FTell(File file);
+extern bool FReadLine(File file, char *buf, ssize_t maxlen, uint32 wait);
 
 /* Convenience */
 static inline bool FTruncate(File file, off_t newSize, uint32 wait)
@@ -81,7 +83,7 @@ extern ssize_t FBlockSize(File file);
 static bool FileIsLegacy(File file);
 extern bool PathNameFSync(const char *name, uint32 wait);
 
-/* Expermental - belongs elsewhere */
+/* Expermental - belongs elsewhere. Says the function doesn't modify globals. */
 #ifdef _MSC_VER
 #define PURE __declspec(noalias)
 #else
@@ -89,6 +91,6 @@ extern bool PathNameFSync(const char *name, uint32 wait);
 #endif
 
 /* Copied from fd.h, which includes us */
-extern FState *getFState(File file) PURE;
+extern FileState *getFState(File file) PURE;
 
 #endif //TEST_MEMTRACK_OUT_FILEACCESS_H

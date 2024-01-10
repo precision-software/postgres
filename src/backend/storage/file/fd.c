@@ -209,7 +209,7 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	mode_t		fileMode;		/* mode to pass to open(2) */
-	FState      fState;         /* State to support FRead/FWrite/encyption */
+	FileState   fState;         /* State to support FRead/FWrite/encyption */
 
 } Vfd;
 
@@ -3802,7 +3802,7 @@ ResOwnerPrintFile(Datum res)
  * Provide access to the state used for FRead/FWrite/Encryption.
  * Called frequently, so it is a candidate for inlining.
  */
-FState *getFState(File file)
+FileState *getFState(File file)
 {
 	if (!FileIsValid(file))
 		return NULL;
