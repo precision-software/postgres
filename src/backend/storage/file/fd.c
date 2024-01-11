@@ -2933,10 +2933,11 @@ BeforeShmemExit_Files(int code, Datum arg)
  * exiting. If that's the case, we close all open files.
  * Files with the PG_DELETE flag set will be removed.
  *
- * TODO: Question: At a minimum, surviving files with buffers need to be
+ * At a minimum, surviving files with buffers need to be
  * flushed to disk. Regular files are about to be closed anyway.
  * We could do minimal work - flush iostack files, delete on close,
  * and leave other files open, just in case there is more I/O coming.
+ * Instead, we'll flush and close the files across the board.
  *
  * Note we call FClose to close the file. FClose will invoke FileClose
  * for files which do not use I/O stacks.
@@ -3788,7 +3789,7 @@ ResOwnerReleaseFile(Datum res)
 	vfdP = &VfdCache[file];
 	vfdP->resowner = NULL;
 
-	FileClose(file);
+	FClose(file);
 }
 
 static char *
