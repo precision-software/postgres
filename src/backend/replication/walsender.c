@@ -596,7 +596,7 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 	StringInfoData buf;
 	char		histfname[MAXFNAMELEN];
 	char		path[MAXPGPATH];
-	int			fd;
+	File		fd;
 	off_t		histfilelen;
 	off_t		bytesleft;
 	Size		len;
@@ -624,22 +624,18 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 	pq_sendint32(&buf, len);	/* col1 len */
 	pq_sendbytes(&buf, histfname, len);
 
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	fd = FOpen(path, PG_TRANSIENT | O_RDONLY);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", path)));
 
 	/* Determine file length and send it to client */
-	histfilelen = lseek(fd, 0, SEEK_END);
+	histfilelen = FSize(fd);
 	if (histfilelen < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not seek to end of file \"%s\": %m", path)));
-	if (lseek(fd, 0, SEEK_SET) != 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not seek to beginning of file \"%s\": %m", path)));
 
 	pq_sendint32(&buf, histfilelen);	/* col2 len */
 
@@ -649,9 +645,7 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 		PGAlignedBlock rbuf;
 		int			nread;
 
-		pgstat_report_wait_start(WAIT_EVENT_WALSENDER_TIMELINE_HISTORY_READ);
-		nread = read(fd, rbuf.data, sizeof(rbuf));
-		pgstat_report_wait_end();
+		nread = FReadSeq(fd, rbuf.data, sizeof(rbuf), WAIT_EVENT_WALSENDER_TIMELINE_HISTORY_READ);
 		if (nread < 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
@@ -667,7 +661,7 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 		bytesleft -= nread;
 	}
 
-	if (CloseTransientFile(fd) != 0)
+	if (!FClose(fd))
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", path)));
