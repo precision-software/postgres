@@ -103,9 +103,9 @@ ssize_t FScan(File file, const char *format, ...)
 	return -1;
 }
 
-ssize_t FPuts(File file, const char *string)
+ssize_t FPuts(File file, const char *string, uint32 wait)
 {
-	return FWriteSeq(file, string, strlen(string), 0);
+	return FWriteSeq(file, string, strlen(string), wait);
 }
 
 /*

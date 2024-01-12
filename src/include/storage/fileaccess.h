@@ -58,7 +58,7 @@ extern int FGetc(File file, uint32 wait);
 extern int FPutc(File file, unsigned char c, uint32 wait);
 extern ssize_t FPrint(File file, const char *format, ...);
 extern ssize_t FScan(File file, const char *format, ...);
-extern ssize_t FPuts(File file, const char *string);
+extern ssize_t FPuts(File file, const char *string, uint32 wait);
 extern off_t FSeek(File file, off_t offset);
 extern off_t FTell(File file);
 extern bool FReadLine(File file, char *buf, ssize_t maxlen, uint32 wait);
