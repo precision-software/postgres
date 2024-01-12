@@ -246,7 +246,7 @@ static void reapply_stacked_values(struct config_generic *variable,
 								   Oid cursrole);
 static bool validate_option_array_item(const char *name, const char *value,
 									   bool skipIfNoPermissions);
-static void write_auto_conf_file(int fd, const char *filename, ConfigVariable *head);
+static void write_auto_conf_file(File fd, const char *filename, ConfigVariable *head);
 static void replace_auto_config_value(ConfigVariable **head_p, ConfigVariable **tail_p,
 									  const char *name, const char *value);
 static bool valid_custom_variable_name(const char *name);
@@ -4390,7 +4390,7 @@ GetConfigOptionFlags(const char *name, bool missing_ok)
  * values before writing them.
  */
 static void
-write_auto_conf_file(int fd, const char *filename, ConfigVariable *head)
+write_auto_conf_file(File fd, const char *filename, ConfigVariable *head)
 {
 	StringInfoData buf;
 	ConfigVariable *item;
@@ -4402,15 +4402,10 @@ write_auto_conf_file(int fd, const char *filename, ConfigVariable *head)
 	appendStringInfoString(&buf, "# It will be overwritten by the ALTER SYSTEM command.\n");
 
 	errno = 0;
-	if (write(fd, buf.data, buf.len) != buf.len)
-	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
+	if (FWriteSeq(fd, buf.data, buf.len, 0) != buf.len)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", filename)));
-	}
 
 	/* Emit each parameter, properly quoting the value */
 	for (item = head; item != NULL; item = item->next)
@@ -4432,20 +4427,15 @@ write_auto_conf_file(int fd, const char *filename, ConfigVariable *head)
 
 		appendStringInfoString(&buf, "'\n");
 
-		errno = 0;
-		if (write(fd, buf.data, buf.len) != buf.len)
-		{
-			/* if write didn't set errno, assume problem is no disk space */
-			if (errno == 0)
-				errno = ENOSPC;
+		if (FWriteSeq(fd, buf.data, buf.len, 0) != buf.len)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not write to file \"%s\": %m", filename)));
-		}
+
 	}
 
 	/* fsync before considering the write to be successful */
-	if (pg_fsync(fd) != 0)
+	if (!FSync(fd, 0))
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", filename)));
@@ -4684,10 +4674,10 @@ AlterSystemSetConfigFile(AlterSystemStmt *altersysstmt)
 		if (stat(AutoConfFileName, &st) == 0)
 		{
 			/* open old file PG_AUTOCONF_FILENAME */
-			FILE	   *infile;
+			File	   infile;
 
-			infile = AllocateFile(AutoConfFileName, "r");
-			if (infile == NULL)
+			infile = FOpen(AutoConfFileName, PG_TRANSIENT | PG_PLAIN | O_RDONLY);
+			if (infile < 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not open file \"%s\": %m",
@@ -4701,7 +4691,7 @@ AlterSystemSetConfigFile(AlterSystemStmt *altersysstmt)
 						 errmsg("could not parse contents of file \"%s\"",
 								AutoConfFileName)));
 
-			FreeFile(infile);
+			FClose(infile);
 		}
 
 		/*
@@ -4735,8 +4725,8 @@ AlterSystemSetConfigFile(AlterSystemStmt *altersysstmt)
 	 * If there is a temp file left over due to a previous crash, it's okay to
 	 * truncate and reuse it.
 	 */
-	Tmpfd = BasicOpenFile(AutoConfTmpFileName,
-						  O_CREAT | O_RDWR | O_TRUNC);
+	Tmpfd = FOpen(AutoConfTmpFileName,
+						  PG_RAW | O_CREAT | O_RDWR | O_TRUNC);
 	if (Tmpfd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -4753,7 +4743,7 @@ AlterSystemSetConfigFile(AlterSystemStmt *altersysstmt)
 		write_auto_conf_file(Tmpfd, AutoConfTmpFileName, head);
 
 		/* Close before renaming; may be required on some platforms */
-		close(Tmpfd);
+		FClose(Tmpfd);
 		Tmpfd = -1;
 
 		/*
@@ -4767,7 +4757,7 @@ AlterSystemSetConfigFile(AlterSystemStmt *altersysstmt)
 	{
 		/* Close file first, else unlink might fail on some platforms */
 		if (Tmpfd >= 0)
-			close(Tmpfd);
+			FClose(Tmpfd);
 
 		/* Unlink, but ignore any error */
 		(void) unlink(AutoConfTmpFileName);
@@ -5502,12 +5492,13 @@ ShowGUCOption(struct config_generic *record, bool use_units)
 *		variable srole, OID
  */
 static void
-write_one_nondefault_variable(FILE *fp, struct config_generic *gconf)
+write_one_nondefault_variable(File fp, struct config_generic *gconf)
 {
 	Assert(gconf->source != PGC_S_DEFAULT);
+	file_debug("   %name=%s", gconf->name);
 
-	fprintf(fp, "%s", gconf->name);
-	fputc(0, fp);
+	FPrint(fp, "%s", gconf->name);
+	FPutc(fp, 0 0);
 
 	switch (gconf->vartype)
 	{
@@ -5516,9 +5507,9 @@ write_one_nondefault_variable(FILE *fp, struct config_generic *gconf)
 				struct config_bool *conf = (struct config_bool *) gconf;
 
 				if (*conf->variable)
-					fprintf(fp, "true");
+					FPrint(fp, "true");
 				else
-					fprintf(fp, "false");
+					FPrint(fp, "false");
 			}
 			break;
 
@@ -5526,7 +5517,7 @@ write_one_nondefault_variable(FILE *fp, struct config_generic *gconf)
 			{
 				struct config_int *conf = (struct config_int *) gconf;
 
-				fprintf(fp, "%d", *conf->variable);
+				FPrint(fp, "%d", *conf->variable);
 			}
 			break;
 
@@ -5534,7 +5525,7 @@ write_one_nondefault_variable(FILE *fp, struct config_generic *gconf)
 			{
 				struct config_real *conf = (struct config_real *) gconf;
 
-				fprintf(fp, "%.17g", *conf->variable);
+				FPrint(fp, "%.17g", *conf->variable);
 			}
 			break;
 
@@ -5543,7 +5534,7 @@ write_one_nondefault_variable(FILE *fp, struct config_generic *gconf)
 				struct config_string *conf = (struct config_string *) gconf;
 
 				if (*conf->variable)
-					fprintf(fp, "%s", *conf->variable);
+					FPrint(fp, "%s", *conf->variable);
 			}
 			break;
 
@@ -5551,22 +5542,22 @@ write_one_nondefault_variable(FILE *fp, struct config_generic *gconf)
 			{
 				struct config_enum *conf = (struct config_enum *) gconf;
 
-				fprintf(fp, "%s",
+				FPrint(fp, "%s",
 						config_enum_lookup_by_value(conf, *conf->variable));
 			}
 			break;
 	}
 
-	fputc(0, fp);
+	FPutc(fp, 0, 0);
 
 	if (gconf->sourcefile)
-		fprintf(fp, "%s", gconf->sourcefile);
-	fputc(0, fp);
+		FPrint(fp, "%s", gconf->sourcefile);
+	FPutc(fp, 0, 0);
 
-	fwrite(&gconf->sourceline, 1, sizeof(gconf->sourceline), fp);
-	fwrite(&gconf->source, 1, sizeof(gconf->source), fp);
-	fwrite(&gconf->scontext, 1, sizeof(gconf->scontext), fp);
-	fwrite(&gconf->srole, 1, sizeof(gconf->srole), fp);
+	FWriteSeq(fp, &gconf->sourceline, sizeof(gconf->sourceline), 0);
+	FWrite(fp, &gconf->source, sizeof(gconf->source), 0);
+	FWrite(fp, &gconf->scontext, izeof(gconf->scontext), 0);
+	FWrite(fp, &gconf->srole, sizeof(gconf->srole), 0);
 }
 
 void
@@ -5583,8 +5574,8 @@ write_nondefault_variables(GucContext context)
 	/*
 	 * Open file
 	 */
-	fp = AllocateFile(CONFIG_EXEC_PARAMS_NEW, "w");
-	if (!fp)
+	fp = FOpen(CONFIG_EXEC_PARAMS_NEW, PG_TRANSIENT | |PG_PLAIN | O_CREAT | O_RDWR | O_TRIMC);
+	if (fp < 0)
 	{
 		ereport(elevel,
 				(errcode_for_file_access(),
@@ -5602,7 +5593,7 @@ write_nondefault_variables(GucContext context)
 		write_one_nondefault_variable(fp, gconf);
 	}
 
-	if (FreeFile(fp))
+	if (!FClose(fp))
 	{
 		ereport(elevel,
 				(errcode_for_file_access(),

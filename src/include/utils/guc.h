@@ -13,8 +13,10 @@
 #define GUC_H
 
 #include "nodes/parsenodes.h"
+#include "storage/fd.h"  /* TODO: Do we want this for utils? */
 #include "tcop/dest.h"
 #include "utils/array.h"
+
 
 
 /* upper limit for GUC variables measured in kilobytes of memory */
@@ -150,7 +152,7 @@ extern bool ParseConfigFile(const char *config_file, bool strict,
 							const char *calling_file, int calling_lineno,
 							int depth, int elevel,
 							ConfigVariable **head_p, ConfigVariable **tail_p);
-extern bool ParseConfigFp(FILE *fp, const char *config_file,
+extern bool ParseConfigFp(File fp, const char *config_file,
 						  int depth, int elevel,
 						  ConfigVariable **head_p, ConfigVariable **tail_p);
 extern bool ParseConfigDirectory(const char *includedir,
