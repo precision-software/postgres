@@ -50,6 +50,8 @@ static const char *GUC_flex_fatal_errmsg;
 static sigjmp_buf *GUC_flex_fatal_jmp;
 
 static void FreeConfigVariable(ConfigVariable *item);
+typedef int File;  /* Duplicate def, rather than bringing in all of fd.h */
+static YY_BUFFER_STATE yy_create_file_buffer(File file);
 
 static int	GUC_flex_fatal(const char *msg);
 
@@ -179,7 +181,7 @@ ParseConfigFile(const char *config_file, bool strict,
 {
 	char	   *abs_path;
 	bool		OK = true;
-	FILE	   *fp;
+	File	    fp;
 
 	/*
 	 * Reject file name that is all-blank (including empty), as that leads to
@@ -235,8 +237,8 @@ ParseConfigFile(const char *config_file, bool strict,
 		return false;
 	}
 
-	fp = AllocateFile(abs_path, "r");
-	if (!fp)
+	fp = FOpen(abs_path, PG_PLAIN | O_RDONLY);
+	if (fp < 0)
 	{
 		if (strict)
 		{
@@ -262,8 +264,8 @@ ParseConfigFile(const char *config_file, bool strict,
 	OK = ParseConfigFp(fp, abs_path, depth, elevel, head_p, tail_p);
 
 cleanup:
-	if (fp)
-		FreeFile(fp);
+	if (fp >= 0)
+		FClose(fp);
 	pfree(abs_path);
 
 	return OK;
@@ -346,7 +348,7 @@ GUC_flex_fatal(const char *msg)
  * GUCs specifically.
  */
 bool
-ParseConfigFp(FILE *fp, const char *config_file, int depth, int elevel,
+ParseConfigFp(File fp, const char *config_file, int depth, int elevel,
 			  ConfigVariable **head_p, ConfigVariable **tail_p)
 {
 	volatile bool OK = true;
@@ -381,7 +383,7 @@ ParseConfigFp(FILE *fp, const char *config_file, int depth, int elevel,
 	ConfigFileLineno = 1;
 	errorcount = 0;
 
-	lex_buffer = yy_create_buffer(fp, YY_BUF_SIZE);
+	lex_buffer = yy_create_file_buffer(fp);
 	yy_switch_to_buffer(lex_buffer);
 
 	/* This loop iterates once per logical line */
@@ -731,4 +733,61 @@ DeescapeQuotedString(const char *s)
 	newStr[--j] = '\0';
 
 	return newStr;
+}
+
+
+/*
+ * Make the File contents available to flex.
+ * We read the entire file at once, but ideally we would read only bytes as needed.
+ * Note we probably need to put back characters into the File buffer,
+ * which is not currently implemented. Since config files are small,
+ * we should be OK with reading them into memory.
+ */
+static YY_BUFFER_STATE
+yy_create_file_buffer(File fp)
+{
+    off_t fileSize;
+    void *tmpBuf;
+    YY_BUFFER_STATE state;
+
+    /* Read the entire file into a buffer */
+    fileSize = FSize(fp);
+    if (fileSize < 0)
+        ereport(ERROR,
+            (errcode_for_file_access(),
+                 errmsg("could not get size of config file \"%s\" : %m",
+                      	FilePathName(fp))));
+
+    if (fileSize > 64*1024*1024)
+        ereport(ERROR,
+            E2BIG,
+                errmsg("Attempting to read config file \"%s\" > %lld bytes",
+                    FilePathName(fp), 64ll*1024*1024));
+
+    /* Allocate a buffer to temporarily hold the file contents */
+    tmpBuf = malloc(fileSize); /* TODO: use palloc so it gets freed on error */
+    if (tmpBuf == NULL)
+       ereport(ERROR,
+           errcode_for_file_access(),
+               errmsg("Could not allocate %lld bytes for file \"%s\": %m",
+                   fileSize, FilePathName(fp)));
+
+    /* Read in the entire file */
+    if (FRead(fp, tmpBuf, fileSize, 0, 0) != fileSize)
+        ereport(ERROR,
+            errcode_for_file_access(),
+            errmsg("Couldn't read config file %s of size %lld", FilePathName(fp), fileSize));
+
+    /*
+     * Copy the entire file into a YY_BUFFER_STATE.
+     * Would prefer to use yy_scan_buffer to avoid the extra copy
+     * but this way we know everything gets freed properly.
+     */
+    state = yy_scan_bytes(tmpBuf, fileSize);
+
+    /* Free the temporary buffer. flex now has the data it needs. */
+    free(tmpBuf);
+
+    /* done */
+    return state;
 }

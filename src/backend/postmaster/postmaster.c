@@ -5545,7 +5545,7 @@ CreateOptsFile(int argc, char *argv[], char *fullprogname)
 	FPrint(file, "%s", fullprogname);
 	for (i = 1; i < argc; i++)
 		FPrint(file, " \"%s\"", argv[i]);
-	FPuts(file, "\n");
+	FPuts(file, "\n", 0);
 
 	if (!FClose(file))
 	{
