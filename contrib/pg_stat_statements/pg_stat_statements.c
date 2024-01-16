@@ -504,8 +504,8 @@ pgss_shmem_startup(void)
 {
 	bool		found;
 	HASHCTL		info;
-	File	   file = -1;
-	File	   qfile = -1;
+	FILE	   *file = NULL;
+	FILE	   *qfile = NULL;
 	uint32		header;
 	int32		num;
 	int32		pgver;
@@ -570,9 +570,12 @@ pgss_shmem_startup(void)
 	 * processes running when this code is reached.
 	 */
 
-	/* Allocate new query text temp file, reusing one if left over from crash */
-	qfile = FOpen(PGSS_TEXT_FILE, PG_TRANSIENT | O_CREAT | O_RDWR | O_TRUNC);
-	if (qfile < 0)
+	/* Unlink query text file possibly left over from crash */
+	unlink(PGSS_TEXT_FILE);
+
+	/* Allocate new query text temp file */
+	qfile = AllocateFile(PGSS_TEXT_FILE, PG_BINARY_W);
+	if (qfile == NULL)
 		goto write_error;
 
 	/*
@@ -582,29 +585,29 @@ pgss_shmem_startup(void)
 	 */
 	if (!pgss_save)
 	{
-		FClose(qfile);
+		FreeFile(qfile);
 		return;
 	}
 
 	/*
 	 * Attempt to load old statistics from the dump file.
 	 */
-	file = FOpen(PGSS_DUMP_FILE, PG_TRANSIENT | O_RDWR | O_CREAT | O_TRUNC);
-	if (file < 0)
+	file = AllocateFile(PGSS_DUMP_FILE, PG_BINARY_R);
+	if (file == NULL)
 	{
 		if (errno != ENOENT)
 			goto read_error;
 		/* No existing persisted stats file, so we're done */
-		FClose(qfile);
+		FreeFile(qfile);
 		return;
 	}
 
 	buffer_size = 2048;
 	buffer = (char *) palloc(buffer_size);
 
-	if (FReadSeq(file, &header, sizeof(uint32), 0) != sizeof(uint32) ||
-		FReadSeq(file, &pgver, sizeof(uint32), 0) != sizeof(uint32) ||
-		FReadSeq(file, &num, sizeof(int32), 0) != sizeof(int32))
+	if (fread(&header, sizeof(uint32), 1, file) != 1 ||
+		fread(&pgver, sizeof(uint32), 1, file) != 1 ||
+		fread(&num, sizeof(int32), 1, file) != 1)
 		goto read_error;
 
 	if (header != PGSS_FILE_HEADER ||
@@ -617,7 +620,7 @@ pgss_shmem_startup(void)
 		pgssEntry  *entry;
 		Size		query_offset;
 
-		if (FReadSeq(file, &temp, sizeof(pgssEntry), 0) != sizeof(pgssEntry))
+		if (fread(&temp, sizeof(pgssEntry), 1, file) != 1)
 			goto read_error;
 
 		/* Encoding is the only field we can easily sanity-check */
@@ -631,7 +634,7 @@ pgss_shmem_startup(void)
 			buffer = repalloc(buffer, buffer_size);
 		}
 
-		if (FReadSeq(file, buffer, temp.query_len + 1, 0) != temp.query_len + 1)
+		if (fread(buffer, 1, temp.query_len + 1, file) != temp.query_len + 1)
 			goto read_error;
 
 		/* Should have a trailing null, but let's make sure */
@@ -643,7 +646,7 @@ pgss_shmem_startup(void)
 
 		/* Store the query text */
 		query_offset = pgss->extent;
-		if (FWriteSeq(qfile, buffer, temp.query_len + 1, 0) != temp.query_len + 1)
+		if (fwrite(buffer, 1, temp.query_len + 1, qfile) != temp.query_len + 1)
 			goto write_error;
 		pgss->extent += temp.query_len + 1;
 
@@ -659,12 +662,12 @@ pgss_shmem_startup(void)
 	}
 
 	/* Read global statistics for pg_stat_statements */
-	if (FReadSeq(file, &pgss->stats, sizeof(pgssGlobalStats), 0) != sizeof(pgssGlobalStats))
+	if (fread(&pgss->stats, sizeof(pgssGlobalStats), 1, file) != 1)
 		goto read_error;
 
 	pfree(buffer);
-	FClose(file);
-	FClose(qfile);
+	FreeFile(file);
+	FreeFile(qfile);
 
 	/*
 	 * Remove the persisted stats file so it's not included in
@@ -703,10 +706,10 @@ write_error:
 fail:
 	if (buffer)
 		pfree(buffer);
-	if (file >= 0)
-		FClose(file);
-	if (qfile >= 0)
-		FClose(qfile);
+	if (file)
+		FreeFile(file);
+	if (qfile)
+		FreeFile(qfile);
 	/* If possible, throw away the bogus file; ignore any error */
 	unlink(PGSS_DUMP_FILE);
 
@@ -725,7 +728,7 @@ fail:
 static void
 pgss_shmem_shutdown(int code, Datum arg)
 {
-	File	   file;
+	FILE	   *file;
 	char	   *qbuffer = NULL;
 	Size		qbuffer_size = 0;
 	HASH_SEQ_STATUS hash_seq;
@@ -744,16 +747,16 @@ pgss_shmem_shutdown(int code, Datum arg)
 	if (!pgss_save)
 		return;
 
-	file = FOpen(PGSS_DUMP_FILE ".tmp", PG_TRANSIENT | O_RDWR | O_CREAT | O_TRUNC);
-	if (file < 0)
+	file = AllocateFile(PGSS_DUMP_FILE ".tmp", PG_BINARY_W);
+	if (file == NULL)
 		goto error;
 
-	if (FWriteSeq(file, &PGSS_FILE_HEADER, sizeof(uint32), 0) != sizeof(uint32))
+	if (fwrite(&PGSS_FILE_HEADER, sizeof(uint32), 1, file) != 1)
 		goto error;
-	if (FWriteSeq(file, &PGSS_PG_MAJOR_VERSION, sizeof(uint32), 0) != sizeof(uint32))
+	if (fwrite(&PGSS_PG_MAJOR_VERSION, sizeof(uint32), 1, file) != 1)
 		goto error;
 	num_entries = hash_get_num_entries(pgss_hash);
-	if (FWriteSeq(file, &num_entries, sizeof(int32), 0) != sizeof(uint32))
+	if (fwrite(&num_entries, sizeof(int32), 1, file) != 1)
 		goto error;
 
 	qbuffer = qtext_load_file(&qbuffer_size);
@@ -774,8 +777,8 @@ pgss_shmem_shutdown(int code, Datum arg)
 		if (qstr == NULL)
 			continue;			/* Ignore any entries with bogus texts */
 
-		if (FWriteSeq(file, entry, sizeof(pgssEntry), 0) != sizeof(pgssEntry) ||
-			FWriteSeq(file, qstr, len + 1, 0) != len + 1)
+		if (fwrite(entry, sizeof(pgssEntry), 1, file) != 1 ||
+			fwrite(qstr, 1, len + 1, file) != len + 1)
 		{
 			/* note: we assume hash_seq_term won't change errno */
 			hash_seq_term(&hash_seq);
@@ -784,15 +787,15 @@ pgss_shmem_shutdown(int code, Datum arg)
 	}
 
 	/* Dump global statistics for pg_stat_statements */
-	if (FWriteSeq(file, &pgss->stats, sizeof(pgssGlobalStats), 0) != sizeof(pgssGlobalStats))
+	if (fwrite(&pgss->stats, sizeof(pgssGlobalStats), 1, file) != 1)
 		goto error;
 
 	free(qbuffer);
 	qbuffer = NULL;
 
-	if (!FClose(file))
+	if (FreeFile(file))
 	{
-		file = -1;
+		file = NULL;
 		goto error;
 	}
 
@@ -812,8 +815,8 @@ error:
 			 errmsg("could not write file \"%s\": %m",
 					PGSS_DUMP_FILE ".tmp")));
 	free(qbuffer);
-	if (file >= 0)
-		FClose(file);
+	if (file)
+		FreeFile(file);
 	unlink(PGSS_DUMP_FILE ".tmp");
 	unlink(PGSS_TEXT_FILE);
 }
@@ -2456,7 +2459,7 @@ gc_qtexts(void)
 {
 	char	   *qbuffer;
 	Size		qbuffer_size;
-	File	    qfile = -1;
+	FILE	   *qfile = NULL;
 	HASH_SEQ_STATUS hash_seq;
 	pgssEntry  *entry;
 	Size		extent;
@@ -2487,8 +2490,8 @@ gc_qtexts(void)
 	 * larger, this should always work on traditional filesystems; though we
 	 * could still lose on copy-on-write filesystems.
 	 */
-	qfile = FOpen(PGSS_TEXT_FILE, PG_TRANSIENT | O_RDWR | O_CREAT | O_TRUNC);
-	if (qfile < 0)
+	qfile = AllocateFile(PGSS_TEXT_FILE, PG_BINARY_W);
+	if (qfile == NULL)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -2518,7 +2521,7 @@ gc_qtexts(void)
 			continue;
 		}
 
-		if (FWriteSeq(qfile, qry, query_len + 1, 0) != query_len + 1)
+		if (fwrite(qry, 1, query_len + 1, qfile) != query_len + 1)
 		{
 			ereport(LOG,
 					(errcode_for_file_access(),
@@ -2537,19 +2540,19 @@ gc_qtexts(void)
 	 * Truncate away any now-unused space.  If this fails for some odd reason,
 	 * we log it, but there's no need to fail.
 	 */
-	if (!FTruncate(qfile, extent, 0))
+	if (ftruncate(fileno(qfile), extent) != 0)
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not truncate file \"%s\": %m",
 						PGSS_TEXT_FILE)));
 
-	if (!FClose(qfile))
+	if (FreeFile(qfile))
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not write file \"%s\": %m",
 						PGSS_TEXT_FILE)));
-		qfile = -1;
+		qfile = NULL;
 		goto gc_fail;
 	}
 
@@ -2583,8 +2586,8 @@ gc_qtexts(void)
 
 gc_fail:
 	/* clean up resources */
-	if (qfile >= 0)
-		FClose(qfile);
+	if (qfile)
+		FreeFile(qfile);
 	free(qbuffer);
 
 	/*
@@ -2601,14 +2604,15 @@ gc_fail:
 	/*
 	 * Destroy the query text file and create a new, empty one
 	 */
-	qfile = FOpen(PGSS_TEXT_FILE, PG_TRANSIENT | O_RDWR | O_TRUNC | O_CREAT);
-	if (qfile < 0)
+	(void) unlink(PGSS_TEXT_FILE);
+	qfile = AllocateFile(PGSS_TEXT_FILE, PG_BINARY_W);
+	if (qfile == NULL)
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not recreate file \"%s\": %m",
 						PGSS_TEXT_FILE)));
 	else
-		FClose(qfile);
+		FreeFile(qfile);
 
 	/* Reset the shared extent pointer */
 	pgss->extent = 0;
@@ -2657,7 +2661,7 @@ entry_reset(Oid userid, Oid dbid, uint64 queryid, bool minmax_only)
 {
 	HASH_SEQ_STATUS hash_seq;
 	pgssEntry  *entry;
-	File	    qfile;
+	FILE	   *qfile;
 	long		num_entries;
 	long		num_remove = 0;
 	pgssHashKey key;
@@ -2741,8 +2745,8 @@ entry_reset(Oid userid, Oid dbid, uint64 queryid, bool minmax_only)
 	 * Write new empty query file, perhaps even creating a new one to recover
 	 * if the file was missing.
 	 */
-	qfile = FOpen(PGSS_TEXT_FILE, PG_TRANSIENT | O_RDWR | O_CREAT | O_TRUNC);
-	if (qfile < 0)
+	qfile = AllocateFile(PGSS_TEXT_FILE, PG_BINARY_W);
+	if (qfile == NULL)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -2751,7 +2755,14 @@ entry_reset(Oid userid, Oid dbid, uint64 queryid, bool minmax_only)
 		goto done;
 	}
 
-	FClose(qfile);
+	/* If ftruncate fails, log it, but it's not a fatal problem */
+	if (ftruncate(fileno(qfile), 0) != 0)
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg("could not truncate file \"%s\": %m",
+						PGSS_TEXT_FILE)));
+
+	FreeFile(qfile);
 
 done:
 	pgss->extent = 0;
