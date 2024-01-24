@@ -395,13 +395,23 @@ BufFileDeleteFileSet(FileSet *fileset, const char *name, bool missing_ok)
 void
 BufFileExportFileSet(BufFile *file)
 {
+	int i;
+	file_debug("");
+
 	/* Must be a file belonging to a FileSet. */
 	Assert(file->fileset != NULL);
 
 	/* It's probably a bug if someone calls this twice. */
 	Assert(!file->readOnly);
 
+	/* Flush any current buffers */
 	BufFileFlush(file);
+
+	/* Reopen the files as readonly */
+	/* TODO: Actually, sync them for now. DO NOT RELEASE! */
+	for (i = 0; i < file->numFiles; i++)
+		FSync(file->files[i], 0);
+
 	file->readOnly = true;
 }
 

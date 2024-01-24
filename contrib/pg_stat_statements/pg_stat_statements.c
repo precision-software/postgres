@@ -2491,7 +2491,7 @@ gc_qtexts(void)
 	 * larger, this should always work on traditional filesystems; though we
 	 * could still lose on copy-on-write filesystems.
 	 */
-	qfile = FOpen(PGSS_TEXT_FILE, PG_TRANSIENT | PG_PLAIN | O_RDWR | O_CREAT | O_TRUNC);
+	qfile = FOpen(PGSS_TEXT_FILE, PG_TRANSIENT | O_RDWR | O_CREAT | O_TRUNC);
 	if (qfile < 0)
 	{
 		ereport(LOG,

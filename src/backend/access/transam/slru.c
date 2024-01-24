@@ -867,6 +867,8 @@ SlruPhysicalWritePage(SlruCtl ctl, int64 pageno, int slotno, SlruWriteAll fdata)
 		 * Note: it is possible for more than one backend to be executing this
 		 * code simultaneously for different pages of the same file. Hence,
 		 * don't use O_EXCL or O_TRUNC or anything like that.
+		 *
+		 * TODO: what if more than one backend extends the file at same time?
 		 */
 		SlruFileName(ctl, path, segno);
 		fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDWR | O_CREAT );
@@ -874,6 +876,20 @@ SlruPhysicalWritePage(SlruCtl ctl, int64 pageno, int slotno, SlruWriteAll fdata)
 		{
 			slru_errcause = SLRU_OPEN_FAILED;
 			slru_errno = errno;
+			return false;
+		}
+
+		/*
+		 * Since we are creating a new file, explicitly extend the file to
+		 * a full segment.
+		 * TODO: what if two backends are both extending file?
+		 * TODO: Create new wait event and errcause.
+		 */
+		if (!FExtend(fd, SLRU_PAGES_PER_SEGMENT*BLCKSZ, WAIT_EVENT_SLRU_WRITE))
+		{
+			slru_errcause = SLRU_WRITE_FAILED;
+			slru_errno = errno;
+			FClose(fd);
 			return false;
 		}
 

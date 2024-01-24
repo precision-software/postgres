@@ -1930,7 +1930,7 @@ FileReadV(File file, const struct iovec *iov, int iovcnt, off_t offset,
 	int			returnCode;
 	Vfd		   *vfdP;
 
-	file_debug("file=%d(%s)  amount=%zd  offset=%lld", file, FilePathName(file), iov->iov_len, offset);
+	//file_debug("file=%d(%s)  amount=%zd  offset=%lld", file, FilePathName(file), iov->iov_len, offset);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileReadV: %d (%s) " INT64_FORMAT " %d",
@@ -1987,7 +1987,7 @@ FileWriteV(File file, const struct iovec *iov, int iovcnt, off_t offset,
 	int			returnCode;
 	Vfd		   *vfdP;
 
-	file_debug("file=%d(%s)  amount=%zd  offset=%lld", file, FilePathName(file), iov->iov_len, offset);
+	//file_debug("file=%d(%s)  amount=%zd  offset=%lld", file, FilePathName(file), iov->iov_len, offset);
 	Assert(FileIsValid(file));
 
 	DO_DB(elog(LOG, "FileWriteV: %d (%s) " INT64_FORMAT " %d",
@@ -2046,7 +2046,7 @@ retry:
 		errno = ENOSPC;
 
 		/*
-		 * Maintain fileSize and temporary_files_size if it's a temp file.
+		 * Maintain plainFileSize and temporary_files_size if it's a temp file.
 		 */
 		if (vfdP->fdstate & FD_TEMP_FILE_LIMIT)
 		{
