@@ -2198,7 +2198,7 @@ qtext_store(const char *query, int query_len,
 			Size *query_offset, int *gc_count)
 {
 	Size		off;
-	File		fd;
+	int			fd;
 
 	/*
 	 * We use a spinlock to protect extent/n_writers/gc_count, so that
@@ -2231,16 +2231,16 @@ qtext_store(const char *query, int query_len,
 	}
 
 	/* Now write the data into the successfully-reserved part of the file */
-	fd = FOpen(PGSS_TEXT_FILE, PG_TRANSIENT | O_RDWR | O_CREAT);
+	fd = OpenTransientFile(PGSS_TEXT_FILE, O_RDWR | O_CREAT | PG_BINARY);
 	if (fd < 0)
 		goto error;
 
-	if (FWrite(fd, query, query_len, off, 0) != query_len)
+	if (pg_pwrite(fd, query, query_len, off) != query_len)
 		goto error;
-	if (FWriteSeq(fd, "\0", 1, 0) != 1)
+	if (pg_pwrite(fd, "\0", 1, off + query_len) != 1)
 		goto error;
 
-	FClose(fd);
+	CloseTransientFile(fd);
 
 	/* Mark our write complete */
 	{
@@ -2260,7 +2260,7 @@ error:
 					PGSS_TEXT_FILE)));
 
 	if (fd >= 0)
-		FClose(fd);
+		CloseTransientFile(fd);
 
 	/* Mark our write complete */
 	{
@@ -2290,10 +2290,10 @@ qtext_load_file(Size *buffer_size)
 {
 	char	   *buf;
 	int			fd;
+	struct stat stat;
 	Size		nread;
-	off_t 		fileSize;
 
-	fd = FOpen(PGSS_TEXT_FILE, PG_TRANSIENT | O_RDONLY);
+	fd = OpenTransientFile(PGSS_TEXT_FILE, O_RDONLY | PG_BINARY);
 	if (fd < 0)
 	{
 		if (errno != ENOENT)
@@ -2305,20 +2305,19 @@ qtext_load_file(Size *buffer_size)
 	}
 
 	/* Get file length */
-	fileSize = FSize(fd);
-	if (fileSize < 0)
+	if (fstat(fd, &stat))
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not stat file \"%s\": %m",
 						PGSS_TEXT_FILE)));
-		FClose(fd);
+		CloseTransientFile(fd);
 		return NULL;
 	}
 
 	/* Allocate buffer; beware that off_t might be wider than size_t */
-	if (fileSize <= MaxAllocHugeSize)
-		buf = (char *) malloc(fileSize);
+	if (stat.st_size <= MaxAllocHugeSize)
+		buf = (char *) malloc(stat.st_size);
 	else
 		buf = NULL;
 	if (buf == NULL)
@@ -2328,7 +2327,7 @@ qtext_load_file(Size *buffer_size)
 				 errmsg("out of memory"),
 				 errdetail("Could not allocate enough memory to read file \"%s\".",
 						   PGSS_TEXT_FILE)));
-		FClose(fd);
+		CloseTransientFile(fd);
 		return NULL;
 	}
 
@@ -2338,9 +2337,9 @@ qtext_load_file(Size *buffer_size)
 	 * so read a very large file in 1GB segments.
 	 */
 	nread = 0;
-	while (nread < fileSize)
+	while (nread < stat.st_size)
 	{
-		int			toread = Min(1024 * 1024 * 1024, fileSize - nread);
+		int			toread = Min(1024 * 1024 * 1024, stat.st_size - nread);
 
 		/*
 		 * If we get a short read and errno doesn't get set, the reason is
@@ -2350,7 +2349,7 @@ qtext_load_file(Size *buffer_size)
 		 * writes from garbage collection.
 		 */
 		errno = 0;
-		if (FReadSeq(fd, buf + nread, toread, 0) != toread)
+		if (read(fd, buf + nread, toread) != toread)
 		{
 			if (errno)
 				ereport(LOG,
@@ -2358,13 +2357,13 @@ qtext_load_file(Size *buffer_size)
 						 errmsg("could not read file \"%s\": %m",
 								PGSS_TEXT_FILE)));
 			free(buf);
-			FClose(fd);
+			CloseTransientFile(fd);
 			return NULL;
 		}
 		nread += toread;
 	}
 
-	if (!FClose(fd))
+	if (CloseTransientFile(fd) != 0)
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", PGSS_TEXT_FILE)));
@@ -2460,7 +2459,7 @@ gc_qtexts(void)
 {
 	char	   *qbuffer;
 	Size		qbuffer_size;
-	File	    qfile = -1;
+	FILE	   *qfile = NULL;
 	HASH_SEQ_STATUS hash_seq;
 	pgssEntry  *entry;
 	Size		extent;
@@ -2491,8 +2490,8 @@ gc_qtexts(void)
 	 * larger, this should always work on traditional filesystems; though we
 	 * could still lose on copy-on-write filesystems.
 	 */
-	qfile = FOpen(PGSS_TEXT_FILE, PG_TRANSIENT | O_RDWR | O_CREAT | O_TRUNC);
-	if (qfile < 0)
+	qfile = AllocateFile(PGSS_TEXT_FILE, PG_BINARY_W);
+	if (qfile == NULL)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -2522,7 +2521,7 @@ gc_qtexts(void)
 			continue;
 		}
 
-		if (FWriteSeq(qfile, qry, query_len + 1, 0) != query_len + 1)
+		if (fwrite(qry, 1, query_len + 1, qfile) != query_len + 1)
 		{
 			ereport(LOG,
 					(errcode_for_file_access(),
@@ -2541,19 +2540,19 @@ gc_qtexts(void)
 	 * Truncate away any now-unused space.  If this fails for some odd reason,
 	 * we log it, but there's no need to fail.
 	 */
-	if (!FTruncate(qfile, extent, 0))
+	if (ftruncate(fileno(qfile), extent) != 0)
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not truncate file \"%s\": %m",
 						PGSS_TEXT_FILE)));
 
-	if (!FClose(qfile))
+	if (FreeFile(qfile))
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not write file \"%s\": %m",
 						PGSS_TEXT_FILE)));
-		qfile = -1;
+		qfile = NULL;
 		goto gc_fail;
 	}
 
@@ -2587,8 +2586,8 @@ gc_qtexts(void)
 
 gc_fail:
 	/* clean up resources */
-	if (qfile >= 0)
-		FClose(qfile);
+	if (qfile)
+		FreeFile(qfile);
 	free(qbuffer);
 
 	/*
@@ -2605,15 +2604,15 @@ gc_fail:
 	/*
 	 * Destroy the query text file and create a new, empty one
 	 */
-	(void) unlink(PGSS_TEXT_FILE); /* TODO: no longer needed */
-	qfile = FOpen(PGSS_TEXT_FILE, O_RDWR | O_CREAT | O_TRUNC);
-	if (qfile < 0)
+	(void) unlink(PGSS_TEXT_FILE);
+	qfile = AllocateFile(PGSS_TEXT_FILE, PG_BINARY_W);
+	if (qfile == NULL)
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not recreate file \"%s\": %m",
 						PGSS_TEXT_FILE)));
 	else
-		FClose(qfile);
+		FreeFile(qfile);
 
 	/* Reset the shared extent pointer */
 	pgss->extent = 0;
