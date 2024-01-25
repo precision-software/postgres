@@ -81,6 +81,16 @@ stackVSetError(IoStack *stack, int errorCode, const char *fmt, va_list args)
 	vsnprintf(stack->errMsg, sizeof(stack->errMsg), fmt, args);
 	errno = errorCode;
 	file_debug("Error! code=%d msg=%s", errorCode, stack->errMsg);
+
+	if (errorCode == EIOSTACK)
+	    elog(WARNING, "IoStack Error: %s", stack->errMsg);
+
+#ifdef NOTNOW
+	/* TODO: debugging only. This will cause aeadtest to fail since aeadtest deliberately creates corrupt files. */
+	if (errorCode == EIOSTACK)
+		abort();
+#endif
+
 	return -1;
 }
 

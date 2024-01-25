@@ -42,10 +42,7 @@ void testMain()
 static void
 testCorruptedFile(const char *name, off_t fileSize, size_t blockSize)
 {
-	int64 rawFileSize;
-	File file;
-
-	/* Inject the procedure to create an I/O Stack */
+	/* Create a test I/O Stack */
 	setTestStack(createStack(blockSize));
 
 	/* Create a test file */
@@ -68,7 +65,12 @@ testCorruptedFile(const char *name, off_t fileSize, size_t blockSize)
 	PG_ASSERT(FClose(file));
 	PG_ASSERT(!verifyFile(name, fileSize, blockSize));
 
-	/* Restore the original size, but zero out the last word. Should Fail */
+	/*
+	 * Restore the original size, but zero out the last word. Should Fail.
+	 * Note we zero out a word instead of a byte because it is common (1/256)
+	 * for the last byte to be zero, but extremely uncommon for the last
+	 * word to be zero.
+	 */
 	file = FOpen(name, PG_RAW | O_RDWR);
 	PG_ASSERT(file >= 0);
 	PG_ASSERT(FResize(file, rawFileSize-4, 0));

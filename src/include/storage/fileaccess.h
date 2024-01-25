@@ -70,6 +70,12 @@ static inline bool FTruncate(File file, off_t newSize, uint32 wait)
 	return FResize(file, newSize, wait);
 }
 
+static inline bool FExtend(File file, off_t newSize, uint32 wait)
+{
+	Assert(newSize >= FSize(file));
+	return FResize(file, newSize, wait);
+}
+
 /* Error handling */
 extern bool FError(File file);
 extern bool FEof(File file);
