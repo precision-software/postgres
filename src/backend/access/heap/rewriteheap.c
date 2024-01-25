@@ -1119,7 +1119,7 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
 			 LSN_FORMAT_ARGS(xlrec->start_lsn),
 			 xlrec->mapped_xid, XLogRecGetXid(r));
 
-	file = FOpen(path, PG_ENCRYPT | O_CREAT | O_WRONLY );
+	file = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_CREAT | O_WRONLY );
 	if (file < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
