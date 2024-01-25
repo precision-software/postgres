@@ -597,7 +597,7 @@ CheckPointReplicationOrigin(void)
 	 * can happen at a time.
      * TODO: Can we drop the unlink above and replace O_EXCL witb O_TRUNC?
 	 */
-	tmpfd = FOpen(tmppath, PG_ENCRYPT | O_CREAT | O_EXCL | O_WRONLY );
+	tmpfd = FOpen(tmppath, PG_ENCRYPT | PG_TRANSIENT | O_CREAT | O_EXCL | O_WRONLY );
 	if (tmpfd < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
@@ -705,7 +705,7 @@ StartupReplicationOrigin(void)
 
 	elog(DEBUG2, "starting up replication origin progress state");
 
-	fd = FOpen(path, PG_ENCRYPT | O_RDONLY );
+	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDONLY );
 
 	/*
 	 * might have had max_replication_slots == 0 last run, or we just brought

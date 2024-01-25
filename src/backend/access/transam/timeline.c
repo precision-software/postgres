@@ -317,7 +317,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 	unlink(tmppath);
 
 	/* do not use get_sync_bit() here --- want to fsync only at end of fill */
-	fd = FOpen(tmppath, PG_PLAIN | O_RDWR | O_CREAT | O_EXCL );
+	fd = FOpen(tmppath, PG_PLAIN | PG_TRANSIENT | O_RDWR | O_CREAT | O_EXCL );
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -334,7 +334,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 	else
 		TLHistoryFilePath(path, parentTLI);
 
-	srcfd = FOpen(path, PG_RAW | PG_TRANSIENT | O_RDONLY );
+	srcfd = FOpen(path, PG_TRANSIENT | PG_PLAIN | O_RDONLY );
 	if (srcfd < 0)
 	{
 		if (errno != ENOENT)
@@ -452,7 +452,7 @@ writeTimeLineHistoryFile(TimeLineID tli, char *content, int size)
 	unlink(tmppath);
 
 	/* do not use get_sync_bit() here --- want to fsync only at end of file */
-	fd = FOpen(tmppath, PG_PLAIN | PG_XACT | O_RDWR | O_CREAT | O_TRUNC | O_EXCL);
+	fd = FOpen(tmppath, PG_PLAIN | PG_TRANSIENT | O_RDWR | O_CREAT | O_TRUNC | O_EXCL);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),

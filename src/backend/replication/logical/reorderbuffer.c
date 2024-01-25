@@ -3692,7 +3692,7 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 			 * open segment, create it if necessary.
 			 * Note we do not have a resource owner, so we must delete it explicitly.
 			 */
-			file = FOpen(path, PG_ENCRYPT | O_CREAT | O_WRONLY | O_APPEND );
+			file = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_CREAT | O_WRONLY | O_APPEND );
 			if (file < 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
@@ -4998,7 +4998,7 @@ ApplyLogicalMappingF(HTAB *tuplecid_data, Oid relid, const char *fname)
 	LogicalRewriteMappingData map;
 
 	sprintf(path, "pg_logical/mappings/%s", fname);
-	file = FOpen(path,  PG_ENCRYPT | O_RDONLY | PG_BINARY);
+	file = FOpen(path,  PG_ENCRYPT | PG_TRANSIENT | O_RDONLY | PG_BINARY);
 	if (file < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
