@@ -63,7 +63,7 @@ extern off_t FSeek(File file, off_t offset);
 extern off_t FTell(File file);
 extern bool FReadLine(File file, char *buf, ssize_t maxlen, uint32 wait);
 
-/* Convenience */
+/* Convenience. Should these be the primitive ops? */
 static inline bool FTruncate(File file, off_t newSize, uint32 wait)
 {
 	Assert(newSize <= FSize(file));

@@ -233,6 +233,13 @@ File FOpenPerm(const char *fileName, uint64 fileFlags, mode_t fileMode)
 		return -1;
 	}
 
+	/* Get the file size */
+	if (FSize(file) < 0)
+	{
+		FClose(file);
+		return -1;
+	}
+
 	return file;
 }
 
@@ -322,7 +329,7 @@ ssize_t FWrite(File file, const void *buffer, size_t amount, off_t offset, uint3
 		return -1;
 
 	/* If creating a hole, extend the file to fill in the hole first. */
-	if (offset > getFState(file)->fileSize && !FResize(file, offset, wait))
+	if (offset > getFState(file)->fileSize && !FExtend(file, offset, wait))
 		return -1;
 
 	/* Write the data as requested */
@@ -359,7 +366,8 @@ off_t FSize(File file)
 
 	/* Query the file's size */
 	size = stackSize(getStack(file));
-	getFState(file)->fileSize = size;
+	if (size >= 0)
+		getFState(file)->fileSize = size;
 
 	file_debug("name=%s file=%d  size=%lld", FilePathName(file), file, size);
 	return size;
@@ -385,10 +393,18 @@ ssize_t FBlockSize(File file)
  */
 bool	FResize(File file, off_t offset, uint32 wait)
 {
+	off_t fileSize;
 	if (badFile(file))
 		return false;
 
-	return stackResize(getStack(file), offset, wait);
+	/* Try to resize the file */
+	fileSize = stackResize(getStack(file), offset, wait);
+	if (fileSize < 0)
+		return false;
+
+	/* If successful, record the new file size */
+	getFState(file)->fileSize = fileSize;
+	return true;
 }
 
 
