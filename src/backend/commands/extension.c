@@ -476,7 +476,7 @@ parse_extension_control_file(ExtensionControlFile *control,
 							 const char *version)
 {
 	char	   *filename;
-	FILE	   *file;
+	File	    file;
 	ConfigVariable *item,
 			   *head = NULL,
 			   *tail = NULL;
@@ -489,7 +489,7 @@ parse_extension_control_file(ExtensionControlFile *control,
 	else
 		filename = get_extension_control_filename(control->name);
 
-	if ((file = AllocateFile(filename, "r")) == NULL)
+	if ((file = FOpen(filename, PG_PLAIN | PG_TRANSIENT | O_RDONLY)) < 0)
 	{
 		if (errno == ENOENT)
 		{
@@ -521,7 +521,7 @@ parse_extension_control_file(ExtensionControlFile *control,
 	(void) ParseConfigFp(file, filename, CONF_FILE_START_DEPTH, ERROR,
 						 &head, &tail);
 
-	FreeFile(file);
+	FClose(file);
 
 	/*
 	 * Convert the ConfigVariable list into ExtensionControlFile entries.
@@ -3456,37 +3456,41 @@ static char *
 read_whole_file(const char *filename, int *length)
 {
 	char	   *buf;
-	FILE	   *file;
+	File	    file;
 	size_t		bytes_to_read;
-	struct stat fst;
+	off_t       fileSize;
 
-	if (stat(filename, &fst) < 0)
+	/* Open the file. Note it will be closed on ERROR */
+	file = FOpen(filename, PG_RAW | PG_XACT | O_RDONLY | PG_BINARY);
+	if (file < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not stat file \"%s\": %m", filename)));
+					errmsg("could not open file \"%s\" for reading: %m",
+						   filename)));
 
-	if (fst.st_size > (MaxAllocSize - 1))
+	fileSize = FSize(file);
+	if (fileSize < 0)
+		ereport(ERROR,
+		    (errcode_for_file_access(),
+			    errmsg("could not determine size of file \"%s\": %m",
+				   filename)));
+
+	if (fileSize > (MaxAllocSize - 1))
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("file \"%s\" is too large", filename)));
-	bytes_to_read = (size_t) fst.st_size;
+					errmsg("file \"%s\" is too large", filename)));
+	bytes_to_read = (size_t) fileSize;
 
-	if ((file = AllocateFile(filename, PG_BINARY_R)) == NULL)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for reading: %m",
-						filename)));
 
 	buf = (char *) palloc(bytes_to_read + 1);
 
-	*length = fread(buf, 1, bytes_to_read, file);
-
-	if (ferror(file))
+	*length = FReadSeq(file, buf, bytes_to_read, 0);
+	if (*length < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not read file \"%s\": %m", filename)));
 
-	FreeFile(file);
+	FClose(file);
 
 	buf[*length] = '\0';
 	return buf;

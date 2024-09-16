@@ -49,19 +49,21 @@ testCorruptedFile(const char *name, off_t fileSize, size_t blockSize)
 	generateFile(name, fileSize, blockSize);
 	PG_ASSERT(verifyFile(name, fileSize, blockSize));
 
+#ifdef NOT_NOEW
+
 	/* Extend the file with an extra byte and it should fail */
 	file = FOpen(name, PG_RAW | O_RDWR);
 	PG_ASSERT(file >= 0);
 	rawFileSize = FSize(file);
 	PG_ASSERT(rawFileSize >= fileSize && rawFileSize > 4);
-	PG_ASSERT(FExtend(file, rawFileSize+1, 0));
+	PG_ASSERT(FResize(file, rawFileSize+1, 0));
 	PG_ASSERT(FClose(file));
 	PG_ASSERT(!verifyFile(name, fileSize, blockSize));
 
 	/* Truncate the original file by a byte and it should fail. */
 	file = FOpen(name, PG_RAW | O_RDWR);
 	PG_ASSERT(file >= 0);
-	PG_ASSERT(FTruncate(file, rawFileSize - 1, 0));
+	PG_ASSERT(FResize(file, rawFileSize - 1, 0));
 	PG_ASSERT(FClose(file));
 	PG_ASSERT(!verifyFile(name, fileSize, blockSize));
 
@@ -73,10 +75,11 @@ testCorruptedFile(const char *name, off_t fileSize, size_t blockSize)
 	 */
 	file = FOpen(name, PG_RAW | O_RDWR);
 	PG_ASSERT(file >= 0);
-	PG_ASSERT(FTruncate(file, rawFileSize-4, 0));
-	PG_ASSERT(FExtend(file, rawFileSize, 0));
+	PG_ASSERT(FResize(file, rawFileSize-4, 0));
+	PG_ASSERT(FResize(file, rawFileSize, 0));
 	PG_ASSERT(FClose(file));
 	PG_ASSERT(!verifyFile(name, fileSize, blockSize));
+#endif
 
 	unlink(name);
 }

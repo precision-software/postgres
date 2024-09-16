@@ -595,9 +595,9 @@ CheckPointReplicationOrigin(void)
 	/*
 	 * no other backend can perform this at the same time; only one checkpoint
 	 * can happen at a time.
+     * TODO: Can we drop the unlink above and replace O_EXCL witb O_TRUNC?
 	 */
-	tmpfd = OpenTransientFile(tmppath,
-							  O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
+	tmpfd = FOpen(tmppath, PG_ENCRYPT | PG_TRANSIENT | O_CREAT | O_EXCL | O_WRONLY );
 	if (tmpfd < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
@@ -605,17 +605,12 @@ CheckPointReplicationOrigin(void)
 						tmppath)));
 
 	/* write magic */
-	errno = 0;
-	if ((write(tmpfd, &magic, sizeof(magic))) != sizeof(magic))
-	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
+	if ((FWriteSeq(tmpfd, &magic, sizeof(magic), 0)) != sizeof(magic))
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m",
 						tmppath)));
-	}
+
 	COMP_CRC32C(crc, &magic, sizeof(magic));
 
 	/* prevent concurrent creations/drops */
@@ -646,18 +641,12 @@ CheckPointReplicationOrigin(void)
 		/* make sure we only write out a commit that's persistent */
 		XLogFlush(local_lsn);
 
-		errno = 0;
-		if ((write(tmpfd, &disk_state, sizeof(disk_state))) !=
+		if (FWriteSeq(tmpfd, &disk_state, sizeof(disk_state), 0) !=
 			sizeof(disk_state))
-		{
-			/* if write didn't set errno, assume problem is no disk space */
-			if (errno == 0)
-				errno = ENOSPC;
 			ereport(PANIC,
 					(errcode_for_file_access(),
 					 errmsg("could not write to file \"%s\": %m",
 							tmppath)));
-		}
 
 		COMP_CRC32C(crc, &disk_state, sizeof(disk_state));
 	}
@@ -666,19 +655,13 @@ CheckPointReplicationOrigin(void)
 
 	/* write out the CRC */
 	FIN_CRC32C(crc);
-	errno = 0;
-	if ((write(tmpfd, &crc, sizeof(crc))) != sizeof(crc))
-	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
+	if (FWriteSeq(tmpfd, &crc, sizeof(crc), 0) != sizeof(crc))
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m",
 						tmppath)));
-	}
 
-	if (CloseTransientFile(tmpfd) != 0)
+	if (!FClose(tmpfd))
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m",
@@ -722,7 +705,7 @@ StartupReplicationOrigin(void)
 
 	elog(DEBUG2, "starting up replication origin progress state");
 
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDONLY );
 
 	/*
 	 * might have had max_replication_slots == 0 last run, or we just brought
@@ -737,7 +720,7 @@ StartupReplicationOrigin(void)
 						path)));
 
 	/* verify magic, that is written even if nothing was active */
-	readBytes = read(fd, &magic, sizeof(magic));
+	readBytes = FReadSeq(fd, &magic, sizeof(magic), 0);
 	if (readBytes != sizeof(magic))
 	{
 		if (readBytes < 0)
@@ -765,7 +748,7 @@ StartupReplicationOrigin(void)
 	{
 		ReplicationStateOnDisk disk_state;
 
-		readBytes = read(fd, &disk_state, sizeof(disk_state));
+		readBytes = FReadSeq(fd, &disk_state, sizeof(disk_state), 0);
 
 		/* no further data */
 		if (readBytes == sizeof(crc))
@@ -817,7 +800,7 @@ StartupReplicationOrigin(void)
 				 errmsg("replication slot checkpoint has wrong checksum %u, expected %u",
 						crc, file_crc)));
 
-	if (CloseTransientFile(fd) != 0)
+	if (!FClose(fd))
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m",

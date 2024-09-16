@@ -608,7 +608,7 @@ SlruInternalWritePage(SlruCtl ctl, int slotno, SlruWriteAll fdata)
 		int			i;
 
 		for (i = 0; i < fdata->num_files; i++)
-			CloseTransientFile(fdata->fd[i]);
+			FClose(fdata->fd[i]);
 	}
 
 	/* Re-acquire control lock and update page state */
@@ -666,7 +666,7 @@ SimpleLruDoesPhysicalPageExist(SlruCtl ctl, int64 pageno)
 
 	SlruFileName(ctl, path, segno);
 
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDONLY );
 	if (fd < 0)
 	{
 		/* expected: file doesn't exist */
@@ -679,7 +679,7 @@ SimpleLruDoesPhysicalPageExist(SlruCtl ctl, int64 pageno)
 		SlruReportIOError(ctl, pageno, 0);
 	}
 
-	if ((endpos = lseek(fd, 0, SEEK_END)) < 0)
+	if ((endpos = FSize(fd)) < 0)
 	{
 		slru_errcause = SLRU_SEEK_FAILED;
 		slru_errno = errno;
@@ -688,7 +688,7 @@ SimpleLruDoesPhysicalPageExist(SlruCtl ctl, int64 pageno)
 
 	result = endpos >= (off_t) (offset + BLCKSZ);
 
-	if (CloseTransientFile(fd) != 0)
+	if (!FClose(fd))
 	{
 		slru_errcause = SLRU_CLOSE_FAILED;
 		slru_errno = errno;
@@ -716,7 +716,7 @@ SlruPhysicalReadPage(SlruCtl ctl, int64 pageno, int slotno)
 	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
 	off_t		offset = rpageno * BLCKSZ;
 	char		path[MAXPGPATH];
-	int			fd;
+	File		fd;
 
 	SlruFileName(ctl, path, segno);
 
@@ -727,7 +727,7 @@ SlruPhysicalReadPage(SlruCtl ctl, int64 pageno, int slotno)
 	 * SlruPhysicalWritePage).  Hence, if we are InRecovery, allow the case
 	 * where the file doesn't exist, and return zeroes instead.
 	 */
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDONLY );
 	if (fd < 0)
 	{
 		if (errno != ENOENT || !InRecovery)
@@ -745,18 +745,15 @@ SlruPhysicalReadPage(SlruCtl ctl, int64 pageno, int slotno)
 	}
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_SLRU_READ);
-	if (pg_pread(fd, shared->page_buffer[slotno], BLCKSZ, offset) != BLCKSZ)
+	if (FRead(fd, shared->page_buffer[slotno], BLCKSZ, offset, WAIT_EVENT_SLRU_READ) != BLCKSZ)
 	{
-		pgstat_report_wait_end();
 		slru_errcause = SLRU_READ_FAILED;
 		slru_errno = errno;
-		CloseTransientFile(fd);
+		FClose(fd);
 		return false;
 	}
-	pgstat_report_wait_end();
 
-	if (CloseTransientFile(fd) != 0)
+	if (!FClose(fd))
 	{
 		slru_errcause = SLRU_CLOSE_FAILED;
 		slru_errno = errno;
@@ -788,7 +785,7 @@ SlruPhysicalWritePage(SlruCtl ctl, int64 pageno, int slotno, SlruWriteAll fdata)
 	int			rpageno = pageno % SLRU_PAGES_PER_SEGMENT;
 	off_t		offset = rpageno * BLCKSZ;
 	char		path[MAXPGPATH];
-	int			fd = -1;
+	File 		fd = -1;
 
 	/* update the stats counter of written pages */
 	pgstat_count_slru_page_written(shared->slru_stats_idx);
@@ -870,13 +867,29 @@ SlruPhysicalWritePage(SlruCtl ctl, int64 pageno, int slotno, SlruWriteAll fdata)
 		 * Note: it is possible for more than one backend to be executing this
 		 * code simultaneously for different pages of the same file. Hence,
 		 * don't use O_EXCL or O_TRUNC or anything like that.
+		 *
+		 * TODO: what if more than one backend extends the file at same time?
 		 */
 		SlruFileName(ctl, path, segno);
-		fd = OpenTransientFile(path, O_RDWR | O_CREAT | PG_BINARY);
+		fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDWR | O_CREAT );
 		if (fd < 0)
 		{
 			slru_errcause = SLRU_OPEN_FAILED;
 			slru_errno = errno;
+			return false;
+		}
+
+		/*
+		 * Since we are creating a new file, explicitly extend the file to
+		 * a full segment.
+		 * TODO: what if two backends are both extending file?
+		 * TODO: Create new wait event and errcause.
+		 */
+		if (!FExtend(fd, SLRU_PAGES_PER_SEGMENT*BLCKSZ, WAIT_EVENT_SLRU_WRITE))
+		{
+			slru_errcause = SLRU_WRITE_FAILED;
+			slru_errno = errno;
+			FClose(fd);
 			return false;
 		}
 
@@ -899,21 +912,14 @@ SlruPhysicalWritePage(SlruCtl ctl, int64 pageno, int slotno, SlruWriteAll fdata)
 		}
 	}
 
-	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_SLRU_WRITE);
-	if (pg_pwrite(fd, shared->page_buffer[slotno], BLCKSZ, offset) != BLCKSZ)
+	if (FWrite(fd, shared->page_buffer[slotno], BLCKSZ, offset, WAIT_EVENT_SLRU_WRITE) != BLCKSZ)
 	{
-		pgstat_report_wait_end();
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
 		slru_errcause = SLRU_WRITE_FAILED;
 		slru_errno = errno;
 		if (!fdata)
-			CloseTransientFile(fd);
+			FClose(fd);
 		return false;
 	}
-	pgstat_report_wait_end();
 
 	/* Queue up a sync request for the checkpointer. */
 	if (ctl->sync_handler != SYNC_HANDLER_NONE)
@@ -924,23 +930,20 @@ SlruPhysicalWritePage(SlruCtl ctl, int64 pageno, int slotno, SlruWriteAll fdata)
 		if (!RegisterSyncRequest(&tag, SYNC_REQUEST, false))
 		{
 			/* No space to enqueue sync request.  Do it synchronously. */
-			pgstat_report_wait_start(WAIT_EVENT_SLRU_SYNC);
-			if (pg_fsync(fd) != 0)
+			if (!FSync(fd, WAIT_EVENT_SLRU_SYNC))
 			{
-				pgstat_report_wait_end();
 				slru_errcause = SLRU_FSYNC_FAILED;
 				slru_errno = errno;
-				CloseTransientFile(fd);
+				FClose(fd);
 				return false;
 			}
-			pgstat_report_wait_end();
 		}
 	}
 
 	/* Close file, unless part of flush request. */
 	if (!fdata)
 	{
-		if (CloseTransientFile(fd) != 0)
+		if (!FClose(fd))
 		{
 			slru_errcause = SLRU_CLOSE_FAILED;
 			slru_errno = errno;
@@ -1223,7 +1226,7 @@ SimpleLruWriteAll(SlruCtl ctl, bool allow_redirtied)
 	ok = true;
 	for (i = 0; i < fdata.num_files; i++)
 	{
-		if (CloseTransientFile(fdata.fd[i]) != 0)
+		if (!FClose(fdata.fd[i]))
 		{
 			slru_errcause = SLRU_CLOSE_FAILED;
 			slru_errno = errno;
@@ -1648,21 +1651,19 @@ SlruSyncFileTag(SlruCtl ctl, const FileTag *ftag, char *path)
 {
 	int			fd;
 	int			save_errno;
-	int			result;
+	bool		success;
 
 	SlruFileName(ctl, path, ftag->segno);
 
-	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
+	fd = FOpen(path, PG_ENCRYPT | PG_TRANSIENT | O_RDWR );
 	if (fd < 0)
 		return -1;
 
-	pgstat_report_wait_start(WAIT_EVENT_SLRU_FLUSH_SYNC);
-	result = pg_fsync(fd);
-	pgstat_report_wait_end();
+	success = FSync(fd, WAIT_EVENT_SLRU_FLUSH_SYNC);
+
 	save_errno = errno;
-
-	CloseTransientFile(fd);
-
+	FClose(fd);
 	errno = save_errno;
-	return result;
+
+	return success ? 0 : -1;
 }

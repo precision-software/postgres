@@ -56,6 +56,7 @@
 #include "replication/slot.h"
 #include "storage/copydir.h"
 #include "storage/fd.h"
+#include "storage/fileaccess.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/md.h"
@@ -456,7 +457,7 @@ ScanSourceDatabasePgClassTuple(HeapTupleData *tuple, Oid tbid, Oid dbid,
 static void
 CreateDirAndVersionFile(char *dbpath, Oid dbid, Oid tsid, bool isRedo)
 {
-	int			fd;
+	File		fd;
 	int			nbytes;
 	char		versionfile[MAXPGPATH];
 	char		buf[16];
@@ -508,31 +509,23 @@ CreateDirAndVersionFile(char *dbpath, Oid dbid, Oid tsid, bool isRedo)
 	 */
 	snprintf(versionfile, sizeof(versionfile), "%s/%s", dbpath, "PG_VERSION");
 
-	fd = OpenTransientFile(versionfile, O_WRONLY | O_CREAT | O_EXCL | PG_BINARY);
+	fd = FOpen(versionfile, PG_PLAIN | PG_TRANSIENT | O_WRONLY | O_CREAT | O_EXCL );
 	if (fd < 0 && errno == EEXIST && isRedo)
-		fd = OpenTransientFile(versionfile, O_WRONLY | O_TRUNC | PG_BINARY);
+		fd = FOpen(versionfile, PG_PLAIN | PG_TRANSIENT | O_WRONLY | O_TRUNC );
 
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create file \"%s\": %m", versionfile)));
 
-	/* Write PG_MAJORVERSION in the PG_VERSION file. */
-	pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_WRITE);
-	errno = 0;
-	if ((int) write(fd, buf, nbytes) != nbytes)
-	{
-		/* If write didn't set errno, assume problem is no disk space. */
-		if (errno == 0)
-			errno = ENOSPC;
+	/* Write PG_MAJORVERSION in the PG_VERSION file. Note we could use FPrint instead. */
+	if (FWriteSeq(fd, buf, nbytes, WAIT_EVENT_VERSION_FILE_WRITE) != nbytes)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", versionfile)));
-	}
-	pgstat_report_wait_end();
 
 	/* Close the version file. */
-	CloseTransientFile(fd);
+	FClose(fd);
 
 	/* Critical section done. */
 	if (!isRedo)
